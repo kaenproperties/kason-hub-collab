@@ -383,6 +383,11 @@ dn("bills-grid re-Bill supersede + paid-freeze (Task 6)", () => {
       expectedUpdatedAt: unpaidEntry.updatedAt.toISOString(),
     });
     expect(okLines.ok).toBe(true);
+    const afterOpenLines = await db.unitBillsGridEntry.findUniqueOrThrow({ where: key });
+    // Rolling deploy/stale-client defence: the wire schema still accepts the old
+    // tenant values, but every new editable snapshot is canonicalized owner-only.
+    expect(afterOpenLines.cleaningBearer).toBe("owner");
+    expect(afterOpenLines.wifiBearer).toBe("owner");
 
     const okExpense = await createExpensesService(session, {
       apartmentId: APT, billingMonth: PERIOD_STR, bearer: "owner",

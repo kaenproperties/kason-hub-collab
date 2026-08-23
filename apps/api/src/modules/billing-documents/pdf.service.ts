@@ -76,8 +76,8 @@ export const DOC_TITLE: Record<BillingDocumentPdfModel["docType"], string> = {
 };
 
 /** Series-prefix → customer-facing PDF title, for the series whose customer identity differs
- * from their internal docType. RB (+ legacy IVREN) → "RENTAL BILL"; EB (internal docType "invoice" — a tenant
- * expense RECOVERY, not KAEN service revenue) → "EXPENSE BILL" and must never print "INVOICE"
+ * from their internal docType. RB (+ legacy IVREN) is a rental payment request; EB (internal docType "invoice" — a tenant
+ * expense RECOVERY, not KAEN service revenue) is an expense payment request and must never print "INVOICE"
  * (redesign P2/P4). Matched on the series segment before the first "-", so "RBX-"/"IVRENX-"/"EBX-" do
  * NOT match. */
 const SERIES_DOC_TITLE: Record<string, string> = {
@@ -123,7 +123,7 @@ export function resolveEconomicDocTitle(
 const DESCRIPTION_LABELS: Record<string, string> = {
   management_fee: "Property Management Fee",
   letting_commission: "Rental Commission",
-  letting_commission_sst: "Rental Commission SST",
+  letting_commission_sst: "SST on Admin Fee (First Month Rental)",
   rental: "Monthly Rental",
   carpark: "Carpark Rental",
   tenancy_rental_deposit: "Rental Deposit",
@@ -146,7 +146,12 @@ function titleCase(value: string): string {
 }
 export function billingDocumentFilename(model: BillingDocumentPdfModel): string {
   const categoryCodes = [...new Set(model.lines.map((line) => line.categoryCode).filter((code): code is string => Boolean(code)))];
-  const labels = [...new Set(categoryCodes.map((code) => DESCRIPTION_LABELS[code]).filter((label): label is string => Boolean(label)))];
+  const isOwnerInvoice = model.documentNumber.split("-", 1)[0] === "IVOWN";
+  const labels = [...new Set(categoryCodes
+    .map((code) => code === "letting_commission" && isOwnerInvoice
+      ? "Admin Fee (First Month Rental)"
+      : DESCRIPTION_LABELS[code])
+    .filter((label): label is string => Boolean(label)))];
   const description = labels.length === 1
     ? labels[0]
     : model.lines.length === 1

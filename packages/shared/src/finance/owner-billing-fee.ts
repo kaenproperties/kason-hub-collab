@@ -104,6 +104,120 @@ export interface FreePeriodConfig {
   freePeriodEnd: string | null;
 }
 
+export interface ManagementFeeRentComponent {
+  /** Rent billed for this tenancy's occupied days in the billing month. */
+  billedRent: string;
+  /** Full-month rent before proration; used to prorate any per-pax deduction. */
+  fullMonthRent: string;
+  numberOfPax: number | null;
+  isCommissionMonth: boolean;
+  fullyCollected: boolean;
+}
+
+export interface ManagementFeeRentBaseResult {
+  eligibleRentBase: string;
+  fullyCollected: boolean;
+  reason: "commission_month" | "no_rental_income" | "rent_not_collected" | null;
+}
+
+/**
+ * Resolve the owner-income rent base before applying the configured percentage,
+ * fixed amount or cap.  No business amount is hard-coded: a null/zero pax
+ * deduction means no deduction, while any configured RM amount is prorated by
+ * the same occupied-days ratio as rent. Commission months never become owner
+ * income and therefore never attract a management fee.
+ */
+export function computeManagementFeeRentBase(
+  components: ManagementFeeRentComponent[],
+  paxDeductionPerPerson: string | null | undefined,
+): ManagementFeeRentBaseResult {
+  const deductionC = paxDeductionPerPerson == null || paxDeductionPerPerson.trim() === ""
+    ? 0
+    : toCents(paxDeductionPerPerson, "computeManagementFeeRentBase");
+  let eligibleC = 0;
+  let sawCommission = false;
+  let allCollected = true;
+
+  for (const component of components) {
+    const billedC = toCents(component.billedRent, "computeManagementFeeRentBase");
+    if (component.isCommissionMonth) {
+      sawCommission ||= billedC > 0;
+      continue;
+    }
+    const fullC = toCents(component.fullMonthRent, "computeManagementFeeRentBase");
+    if (billedC <= 0 || fullC <= 0) continue;
+    const pax = Math.max(component.numberOfPax ?? 0, 0);
+    const adjustedFullC = Math.max(0, fullC - deductionC * pax);
+    // The deduction follows the rent's own proration ratio. Integer-cent half-up
+    // keeps this deterministic while avoiding a full-month deduction in a
+    // mid-month move-in period.
+    const adjustedBilledC = Math.round((billedC * adjustedFullC) / fullC);
+    if (adjustedBilledC <= 0) continue;
+    eligibleC += adjustedBilledC;
+    if (!component.fullyCollected) allCollected = false;
+  }
+
+  const reason: ManagementFeeRentBaseResult["reason"] = eligibleC <= 0
+    ? sawCommission ? "commission_month" : "no_rental_income"
+    : !allCollected ? "rent_not_collected" : null;
+  return {
+    eligibleRentBase: centsToString(eligibleC),
+    fullyCollected: eligibleC > 0 && allCollected,
+    reason,
+  };
+}
+
+/** Optional management-fee effective window. Date bounds are inclusive. */
+export interface EffectiveWindowConfig {
+  effectiveFrom?: string | Date | null;
+  effectiveTo?: string | Date | null;
+}
+
+/**
+ * True when a management-fee config is effective for any part of the billing
+ * month. This deliberately checks month overlap instead of comparing both
+ * bounds with the first day of the month: a config starting on (for example)
+ * 25 August still applies to August's prorated rent.
+ */
+export function effectiveWindowOverlapsBillingMonth(
+  billingMonth: string | Date,
+  cfg: EffectiveWindowConfig,
+): boolean {
+  let year: number;
+  let monthIndex: number;
+  if (typeof billingMonth === "string") {
+    const match = /^(\d{4})-(\d{2})$/.exec(billingMonth.trim());
+    if (!match) {
+      throw new Error(
+        `effectiveWindowOverlapsBillingMonth: invalid billingMonth "${billingMonth}" (expected "YYYY-MM")`,
+      );
+    }
+    year = Number(match[1]);
+    monthIndex = Number(match[2]) - 1;
+  } else {
+    if (Number.isNaN(billingMonth.getTime())) {
+      throw new Error("effectiveWindowOverlapsBillingMonth: invalid billingMonth Date");
+    }
+    year = billingMonth.getUTCFullYear();
+    monthIndex = billingMonth.getUTCMonth();
+  }
+
+  const monthStart = Date.UTC(year, monthIndex, 1);
+  const nextMonthStart = Date.UTC(year, monthIndex + 1, 1);
+  const effectiveFrom = cfg.effectiveFrom == null ? null : new Date(cfg.effectiveFrom).getTime();
+  const effectiveTo = cfg.effectiveTo == null ? null : new Date(cfg.effectiveTo).getTime();
+
+  if (effectiveFrom != null && Number.isNaN(effectiveFrom)) {
+    throw new Error("effectiveWindowOverlapsBillingMonth: invalid effectiveFrom");
+  }
+  if (effectiveTo != null && Number.isNaN(effectiveTo)) {
+    throw new Error("effectiveWindowOverlapsBillingMonth: invalid effectiveTo");
+  }
+
+  return (effectiveFrom == null || effectiveFrom < nextMonthStart) &&
+    (effectiveTo == null || effectiveTo >= monthStart);
+}
+
 /**
  * True iff the first-of-month (UTC) for `billingMonth` ("YYYY-MM") falls within
  * [freePeriodStart, freePeriodEnd] inclusive. Returns false if either bound is

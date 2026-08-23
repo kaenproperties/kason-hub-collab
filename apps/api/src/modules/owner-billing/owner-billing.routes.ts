@@ -12,7 +12,6 @@ import {
   voidReasonBody,
   FEE_TYPES,
 } from "@kason/shared";
-import { requireRole } from "../../middleware/require-role";
 import type { SessionPayload } from "../../lib/auth";
 import type { AdminRole } from "../../lib/rbac";
 import { requirePermission } from "../../middleware/require-permission";
@@ -97,6 +96,7 @@ function zerr(c: OwnerBillingCtx, err: ZodError) {
 const listFeeConfigsQuery = z.object({
   ownerPartyId: z.string().uuid().optional(),
   propertyId: z.string().uuid().optional(),
+  apartmentId: z.string().uuid().optional(),
   feeType: z.enum(FEE_TYPES).optional(),
   isActive: z
     .enum(["true", "false"])
@@ -120,7 +120,7 @@ const feeConfigPatchBody = managementFeeConfigPatch.refine(
 // Config WRITE = requireRole("admin"); config READ = requireRole("manager").
 // require-role.ts also enforces operator userType, so portal sessions 403.
 
-ownerBillingRoutes.post("/fee-configs", requireRole("admin"), async (c) => {
+ownerBillingRoutes.post("/fee-configs", requirePermission("management_fee.configure"), async (c) => {
   const body = await c.req.json().catch(() => null);
   if (!body) return c.json({ error: "Invalid JSON body" }, 400);
   const parsed = managementFeeConfigInput.safeParse(body);
@@ -130,7 +130,7 @@ ownerBillingRoutes.post("/fee-configs", requireRole("admin"), async (c) => {
   return c.json({ data: result.data }, result.status as 201);
 });
 
-ownerBillingRoutes.get("/fee-configs", requireRole("manager"), async (c) => {
+ownerBillingRoutes.get("/fee-configs", requirePermission("management_fee.configure"), async (c) => {
   const parsed = listFeeConfigsQuery.safeParse(c.req.query());
   if (!parsed.success) return zerr(c, parsed.error);
   const { limit, offset, ...filters } = parsed.data;
@@ -139,13 +139,13 @@ ownerBillingRoutes.get("/fee-configs", requireRole("manager"), async (c) => {
   return c.json({ data: result.data });
 });
 
-ownerBillingRoutes.get("/fee-configs/:id", requireRole("manager"), async (c) => {
+ownerBillingRoutes.get("/fee-configs/:id", requirePermission("management_fee.configure"), async (c) => {
   const result = await getFeeConfigService(actor(c), c.req.param("id"));
   if (!result.ok) return c.json({ error: result.error }, result.status as 404);
   return c.json({ data: result.data });
 });
 
-ownerBillingRoutes.patch("/fee-configs/:id", requireRole("admin"), async (c) => {
+ownerBillingRoutes.patch("/fee-configs/:id", requirePermission("management_fee.configure"), async (c) => {
   const body = await c.req.json().catch(() => null);
   if (!body) return c.json({ error: "Invalid JSON body" }, 400);
   const parsed = feeConfigPatchBody.safeParse(body);
@@ -155,13 +155,13 @@ ownerBillingRoutes.patch("/fee-configs/:id", requireRole("admin"), async (c) => 
   return c.json({ data: result.data });
 });
 
-ownerBillingRoutes.post("/fee-configs/:id/retire", requireRole("admin"), async (c) => {
+ownerBillingRoutes.post("/fee-configs/:id/retire", requirePermission("management_fee.configure"), async (c) => {
   const result = await retireFeeConfigService(actor(c), c.req.param("id"));
   if (!result.ok) return c.json({ error: result.error }, result.status as 404 | 409);
   return c.json({ data: result.data });
 });
 
-ownerBillingRoutes.post("/fee-configs/:id/restore", requireRole("admin"), async (c) => {
+ownerBillingRoutes.post("/fee-configs/:id/restore", requirePermission("management_fee.configure"), async (c) => {
   const result = await restoreFeeConfigService(actor(c), c.req.param("id"));
   if (!result.ok) return c.json({ error: result.error }, result.status as 404 | 409);
   return c.json({ data: result.data });
@@ -171,7 +171,7 @@ ownerBillingRoutes.post("/fee-configs/:id/restore", requireRole("admin"), async 
 
 // R3: lightweight billing-readiness signal for the tracker "Bill this unit"
 // pre-check. READ = manager. Advisory only — the R2 server guard is authoritative.
-ownerBillingRoutes.get("/units/:apartmentId/billing-readiness", requireRole("manager"), async (c) => {
+ownerBillingRoutes.get("/units/:apartmentId/billing-readiness", requirePermission("owner_report.view"), async (c) => {
   const result = await getBillingReadinessService(actor(c), c.req.param("apartmentId"));
   // getBillingReadinessService always returns ok:true (it has no error branch); this
   // guard is defensive-only, matching every other OwnerBillingServiceResult call site
@@ -189,7 +189,7 @@ ownerBillingRoutes.get("/units/:apartmentId/billing-readiness", requireRole("man
 // {owner, month} (apartmentId null), covering all the owner's units. The strict
 // generateStatementInput rejects a stray `apartmentId` (400) — per-unit statement
 // generation is retired; per-unit reporting is a separate on-demand Receipt.
-ownerBillingRoutes.post("/statements", requireRole("admin"), async (c) => {
+ownerBillingRoutes.post("/statements", requirePermission("owner_report.generate"), async (c) => {
   const body = await c.req.json().catch(() => null);
   if (!body) return c.json({ error: "Invalid JSON body" }, 400);
   const parsed = generateStatementInput.safeParse(body);
@@ -213,7 +213,7 @@ const listStatementsQuery = z.object({
   offset: z.coerce.number().int().min(0).optional().default(0),
 });
 
-ownerBillingRoutes.get("/statements", requireRole("manager"), async (c) => {
+ownerBillingRoutes.get("/statements", requirePermission("owner_report.view"), async (c) => {
   const parsed = listStatementsQuery.safeParse(c.req.query());
   if (!parsed.success) return zerr(c, parsed.error);
   const { limit, offset, ...filters } = parsed.data;
@@ -240,7 +240,7 @@ const exportQuery = z.object({
     .transform((v) => v === "1" || v === "true"),
 });
 
-ownerBillingRoutes.get("/statements/export", requireRole("manager"), async (c) => {
+ownerBillingRoutes.get("/statements/export", requirePermission("owner_report.download"), async (c) => {
   const parsed = exportQuery.safeParse(c.req.query());
   if (!parsed.success) return zerr(c, parsed.error);
   const { ownerPartyId, fromMonth, toMonth, includeProof } = parsed.data;
@@ -291,7 +291,7 @@ ownerBillingRoutes.get(
     }
     await next();
   },
-  requireRole("manager"),
+  requirePermission("owner_report.view"),
   async (c) => {
     const parsed = liveStatementQuery.safeParse(c.req.query());
     if (!parsed.success) return zerr(c, parsed.error);
@@ -331,7 +331,7 @@ ownerBillingRoutes.get(
     }
     await next();
   },
-  requireRole("manager"),
+  requirePermission("owner_report.download"),
   async (c) => {
     const parsed = liveStatementQuery.safeParse(c.req.query());
     if (!parsed.success) return zerr(c, parsed.error);
@@ -359,13 +359,13 @@ ownerBillingRoutes.get(
 // void is allowed even post-approve. Stale line edit → 409 "Record changed —
 // reloaded". Every query is org-scoped; cross-org → 404.
 
-ownerBillingRoutes.get("/statements/:id", requireRole("manager"), async (c) => {
+ownerBillingRoutes.get("/statements/:id", requirePermission("owner_report.view"), async (c) => {
   const result = await getStatementService(actor(c), c.req.param("id"));
   if (!result.ok) return c.json({ error: result.error }, result.status as 404);
   return c.json({ data: result.data });
 });
 
-ownerBillingRoutes.post("/statements/:id/lines", requireRole("admin"), async (c) => {
+ownerBillingRoutes.post("/statements/:id/lines", requirePermission("owner_report.generate"), async (c) => {
   const body = await c.req.json().catch(() => null);
   if (!body) return c.json({ error: "Invalid JSON body" }, 400);
   const parsed = statementLineInput.safeParse(body);
@@ -375,7 +375,7 @@ ownerBillingRoutes.post("/statements/:id/lines", requireRole("admin"), async (c)
   return c.json({ data: result.data }, result.status as 200);
 });
 
-ownerBillingRoutes.patch("/statements/:id/lines/:chargeId", requireRole("admin"), async (c) => {
+ownerBillingRoutes.patch("/statements/:id/lines/:chargeId", requirePermission("owner_report.generate"), async (c) => {
   const body = await c.req.json().catch(() => null);
   if (!body) return c.json({ error: "Invalid JSON body" }, 400);
   const parsed = statementLinePatch.safeParse(body);
@@ -390,7 +390,7 @@ ownerBillingRoutes.patch("/statements/:id/lines/:chargeId", requireRole("admin")
   return c.json({ data: result.data });
 });
 
-ownerBillingRoutes.post("/statements/:id/lines/:chargeId/void", requireRole("admin"), async (c) => {
+ownerBillingRoutes.post("/statements/:id/lines/:chargeId/void", requirePermission("owner_report.reopen"), async (c) => {
   // Spec §4.3: reason mandatory (min 3) once ENABLE_PHASE2_BILLING_DOCS is on.
   let body: { reason?: string } | undefined;
   if (isPhase2FlagEnabled("ENABLE_PHASE2_BILLING_DOCS")) {
@@ -408,7 +408,7 @@ ownerBillingRoutes.post("/statements/:id/lines/:chargeId/void", requireRole("adm
 // the statement from the owner portal. A paid/void statement → 409. Same zod body as
 // add-line ({ chargeType, description, amount }); the service re-syncs the owner
 // ledger + regenerates the PDF and keeps the status unchanged.
-ownerBillingRoutes.post("/statements/:id/adjust", requireRole("admin"), async (c) => {
+ownerBillingRoutes.post("/statements/:id/adjust", requirePermission("owner_report.reopen"), async (c) => {
   const body = await c.req.json().catch(() => null);
   if (!body) return c.json({ error: "Invalid JSON body" }, 400);
   const parsed = statementLineInput.safeParse(body);
@@ -429,7 +429,7 @@ ownerBillingRoutes.post("/statements/:id/adjust", requireRole("admin"), async (c
 // org-scoped; cross-org / unknown → 404. Stale transition → 409 "Record changed —
 // reloaded". (Reads/list stay manager; generate stays admin.)
 
-ownerBillingRoutes.get("/statements/:id/approval-preflight", requireRole("manager"), async (c) => {
+ownerBillingRoutes.get("/statements/:id/approval-preflight", requirePermission("owner_report.view"), async (c) => {
   const result = await getStatementApprovalPreflightService(actor(c), c.req.param("id"));
   if (!result.ok) return c.json({ error: result.error }, result.status as 404);
   return c.json({ data: result.data });
@@ -447,7 +447,7 @@ ownerBillingRoutes.post("/statements/:id/first-check", requirePermission("owner_
   return c.json({ data: result.data });
 });
 
-ownerBillingRoutes.post("/statements/:id/void", requireRole("admin"), async (c) => {
+ownerBillingRoutes.post("/statements/:id/void", requirePermission("owner_report.reopen"), async (c) => {
   let body: { reason?: string } | undefined;
   if (isPhase2FlagEnabled("ENABLE_PHASE2_BILLING_DOCS")) {
     const parsed = voidReasonBody.safeParse(await c.req.json().catch(() => ({})));
@@ -459,7 +459,7 @@ ownerBillingRoutes.post("/statements/:id/void", requireRole("admin"), async (c) 
   return c.json({ data: result.data });
 });
 
-ownerBillingRoutes.post("/statements/:id/send", requireRole("admin"), async (c) => {
+ownerBillingRoutes.post("/statements/:id/send", requirePermission("owner_report.generate"), async (c) => {
   const result = await sendStatementService(actor(c), c.req.param("id"));
   // 400 = approved but no PDF yet; 409 = not approved (e.g. draft) or stale; 404 =
   // cross-org / unknown. On success the data carries { statement, downloadUrl }.
@@ -474,14 +474,14 @@ ownerBillingRoutes.post("/statements/:id/send", requireRole("admin"), async (c) 
 // present, else 404 "PDF not generated". Every query is org-scoped; cross-org /
 // unknown → 404. Soft-copy only — regenerate NEVER auto-sends.
 
-ownerBillingRoutes.post("/statements/:id/regenerate-pdf", requireRole("admin"), async (c) => {
+ownerBillingRoutes.post("/statements/:id/regenerate-pdf", requirePermission("owner_report.generate"), async (c) => {
   const result = await regenerateStatementPdf(actor(c), c.req.param("id"));
   // 400 = statement has no owner/period; 404 = cross-org / unknown.
   if (!result.ok) return c.json({ error: result.error }, result.status as 400 | 404);
   return c.json({ data: result.data });
 });
 
-ownerBillingRoutes.get("/statements/:id/pdf", requireRole("manager"), async (c) => {
+ownerBillingRoutes.get("/statements/:id/pdf", requirePermission("owner_report.download"), async (c) => {
   const result = await getStatementPdfUrl(actor(c), c.req.param("id"));
   // 404 = cross-org / unknown / no pdfKey ("PDF not generated").
   if (!result.ok) return c.json({ error: result.error }, result.status as 404);
@@ -493,7 +493,7 @@ ownerBillingRoutes.get("/statements/:id/pdf", requireRole("manager"), async (c) 
 // for use by the web statement page, PDF renderer, and portal. 404 when the
 // statement is not found or has no owner/period.
 
-ownerBillingRoutes.get("/statements/:id/sections", requireRole("manager"), async (c) => {
+ownerBillingRoutes.get("/statements/:id/sections", requirePermission("owner_report.view"), async (c) => {
   const result = await getStatementSectionsService(actor(c), c.req.param("id"));
   if (!result.ok) return c.json({ error: result.error }, result.status as 404);
   return c.json({ data: result.data });
@@ -507,7 +507,7 @@ ownerBillingRoutes.get("/statements/:id/sections", requireRole("manager"), async
 // Detach takes the storage key in the path (URL-encoded). Every query is
 // org-scoped; cross-org → 404. Statements stay SOFT-COPY (no auto-send).
 
-ownerBillingRoutes.post("/statements/:id/receipts", requireRole("admin"), async (c) => {
+ownerBillingRoutes.post("/statements/:id/receipts", requirePermission("owner_report.generate"), async (c) => {
   const form = await c.req.formData().catch(() => null);
   if (!form) return c.json({ error: "Invalid form body" }, 400);
 
@@ -533,7 +533,7 @@ ownerBillingRoutes.post("/statements/:id/receipts", requireRole("admin"), async 
   return c.json({ data: result.data }, result.status as 201);
 });
 
-ownerBillingRoutes.post("/statements/:id/receipts/:key/detach", requireRole("admin"), async (c) => {
+ownerBillingRoutes.post("/statements/:id/receipts/:key/detach", requirePermission("owner_report.generate"), async (c) => {
   // The key is URL-encoded in the path (it contains slashes) — decode before use.
   const key = decodeURIComponent(c.req.param("key"));
   const result = await detachReceiptService(actor(c), c.req.param("id"), key);
@@ -546,7 +546,7 @@ ownerBillingRoutes.post("/statements/:id/receipts/:key/detach", requireRole("adm
 // receipts upload/detach gate above. Pure read: signs ONLY this statement's
 // Invoice.attachmentKeys (never a caller-supplied key). Org-scoped; cross-org /
 // unknown → 404. Returns { data: Array<{ key, url }> }.
-ownerBillingRoutes.get("/statements/:id/receipts/urls", requireRole("admin"), async (c) => {
+ownerBillingRoutes.get("/statements/:id/receipts/urls", requirePermission("owner_report.view"), async (c) => {
   const result = await listReceiptUrlsService(actor(c), c.req.param("id"));
   if (!result.ok) return c.json({ error: result.error }, result.status as 404);
   return c.json({ data: result.data });
@@ -569,7 +569,7 @@ const expenseProofFields = z.object({
   category: z.string().min(1).max(60),
 });
 
-ownerBillingRoutes.post("/expense-proofs", requireRole("admin"), async (c) => {
+ownerBillingRoutes.post("/expense-proofs", requirePermission("owner_report.generate"), async (c) => {
   const form = await c.req.formData().catch(() => null);
   if (!form) return c.json({ error: "Invalid form body" }, 400);
 
@@ -619,7 +619,7 @@ const listExpenseProofsQuery = z.object({
   apartmentId: z.string().uuid().optional(),
 });
 
-ownerBillingRoutes.get("/expense-proofs", requireRole("manager"), async (c) => {
+ownerBillingRoutes.get("/expense-proofs", requirePermission("owner_report.view"), async (c) => {
   const parsed = listExpenseProofsQuery.safeParse(c.req.query());
   if (!parsed.success) return zerr(c, parsed.error);
   const result = await listExpenseProofUrlsService(
@@ -632,7 +632,7 @@ ownerBillingRoutes.get("/expense-proofs", requireRole("manager"), async (c) => {
   return c.json({ data: result.data });
 });
 
-ownerBillingRoutes.delete("/expense-proofs/:id", requireRole("admin"), async (c) => {
+ownerBillingRoutes.delete("/expense-proofs/:id", requirePermission("owner_report.generate"), async (c) => {
   const result = await detachExpenseProofService(actor(c), c.req.param("id"));
   if (!result.ok) return c.json({ error: result.error }, result.status as 404);
   return c.json({ data: result.data });
@@ -650,7 +650,7 @@ const proofPackQuery = z.object({
   apartmentId: z.string().uuid().optional(),
 });
 
-ownerBillingRoutes.get("/proof-pack", requireRole("manager"), async (c) => {
+ownerBillingRoutes.get("/proof-pack", requirePermission("owner_report.download"), async (c) => {
   const parsed = proofPackQuery.safeParse(c.req.query());
   if (!parsed.success) return zerr(c, parsed.error);
   const bytes = await buildProofPackPdf(

@@ -54,7 +54,7 @@ import {
 import { formatMoney, formatPeriodMonth, prettyEnumLabel } from "@/components/format";
 import { invoiceTypeMeta } from "./draft-approvals-table";
 import { apiFetch, ApiError } from "@/lib/api-client";
-import { useAuth } from "@/lib/auth";
+import { usePermission } from "@/components/permission-gate";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 // Mirrors the API's DraftChargeLine (apps/api/.../auto-draft.types.ts):
@@ -163,8 +163,8 @@ type Props = {
 };
 
 export function DraftInvoiceDrawer({ invoiceId, onClose }: Props) {
-  const { user } = useAuth();
-  const canManage = user?.role === "manager" || user?.role === "admin";
+  const canEditDraft = usePermission("billing.charge.edit");
+  const canApproveDraft = usePermission("billing.bill");
   const qc = useQueryClient();
 
   // Local edit state for dates
@@ -367,6 +367,7 @@ export function DraftInvoiceDrawer({ invoiceId, onClose }: Props) {
                     <Field label="Invoice Date">
                       <TextInput
                         type="date"
+                        disabled={!canEditDraft}
                         value={invoiceDate}
                         onChange={(e) => {
                           setInvoiceDate(e.target.value);
@@ -380,6 +381,7 @@ export function DraftInvoiceDrawer({ invoiceId, onClose }: Props) {
                     >
                       <TextInput
                         type="date"
+                        disabled={!canEditDraft}
                         value={dueDate}
                         onChange={(e) => {
                           setDueDate(e.target.value);
@@ -388,7 +390,7 @@ export function DraftInvoiceDrawer({ invoiceId, onClose }: Props) {
                       />
                     </Field>
                   </div>
-                  {datesDirty && (
+                  {canEditDraft && datesDirty && (
                     <Button
                       variant="outline"
                       size="sm"
@@ -405,7 +407,7 @@ export function DraftInvoiceDrawer({ invoiceId, onClose }: Props) {
                 <div className="space-y-3">
                   <div>
                     <h3 className="text-sm font-semibold text-foreground">Charges</h3>
-                    {canManage && inv.status === "draft" && inv.charges.some((c) => c.status === "draft") && (
+                    {canEditDraft && inv.status === "draft" && inv.charges.some((c) => c.status === "draft") && (
                       <p className="mt-1 text-xs text-muted-foreground">
                         Draft amounts may be adjusted for approved exceptions before issuing. The total updates automatically.
                       </p>
@@ -501,7 +503,7 @@ export function DraftInvoiceDrawer({ invoiceId, onClose }: Props) {
                                   ) : (
                                     <div className="flex items-center justify-end gap-2">
                                       <span className="whitespace-nowrap">{formatMoney(c.amount)}</span>
-                                      {canManage && inv.status === "draft" && c.status === "draft" && (
+                                      {canEditDraft && inv.status === "draft" && c.status === "draft" && (
                                         <Button
                                           type="button"
                                           variant="outline"
@@ -549,7 +551,7 @@ export function DraftInvoiceDrawer({ invoiceId, onClose }: Props) {
 
           {/* Footer: approve for managers; close for everyone. No destructive action. */}
           <SheetFooter>
-            {canManage && inv && (
+            {canApproveDraft && inv && (
               <Button
                 variant="gold"
                 onClick={() => setApproveOpen(true)}

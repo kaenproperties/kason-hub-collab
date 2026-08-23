@@ -484,7 +484,7 @@ describe("assembleYannieStatement — §5 owner receivables", () => {
           amount: dec("80.00"), // 100.00 minted, less the 20.00 credit note below
           sourceType: "statement",
           sourceChargeId: "c-stmt",
-          description: "Letting commission SST (owner-borne)",
+          description: "SST on Admin Fee (First Month Rental)",
         }),
       ]);
       noteLines = [
@@ -493,10 +493,33 @@ describe("assembleYannieStatement — §5 owner receivables", () => {
 
       const result = await assembleYannieStatement(ctx, STMT_ID);
       const row = result!.expenseBreakdown.rows.find(
-        (r) => r.description === "Letting commission SST (owner-borne)",
+        (r) => r.description === "SST on Admin Fee (First Month Rental)",
       )!;
 
       expect(row.adjustmentNote).toBe("Credit note -RM 20.00");
+    });
+
+    it("uses the owner-facing Admin Fee label for the internal letting_commission category", async () => {
+      dbMock.ownerLedgerEntry.findMany.mockResolvedValue([
+        ledgerRow(),
+        ledgerRow({
+          direction: "expense",
+          category: "letting_commission",
+          amount: dec("1500.00"),
+          includeInPayout: false,
+          sourceType: "statement",
+          sourceChargeId: "c-admin-fee",
+          description: "Admin Fee (First Month Rental)",
+        }),
+      ]);
+
+      const result = await assembleYannieStatement(ctx, STMT_ID);
+      const row = result!.expenseBreakdown.rows.find(
+        (item) => item.categoryKey === "letting_commission",
+      )!;
+
+      expect(row.category).toBe("Admin Fee (First Month Rental)");
+      expect(row.description).toBe("Admin Fee (First Month Rental)");
     });
 
     it("leaves every un-adjusted row's note null", async () => {

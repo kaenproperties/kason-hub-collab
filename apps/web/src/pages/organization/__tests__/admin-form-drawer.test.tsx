@@ -1,6 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { render, screen } from "@testing-library/react";
-import userEvent from "@testing-library/user-event";
+import { fireEvent, render, screen } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { AdminFormDrawer } from "../admin-form-drawer";
 
@@ -28,19 +27,19 @@ describe("AdminFormDrawer — password validation", () => {
 
   it("rejects password shorter than 6 characters", async () => {
     renderDrawer();
-    await userEvent.type(screen.getByLabelText(/full name/i), "Test User");
-    await userEvent.type(screen.getByLabelText(/email/i), "test@example.com");
-    await userEvent.type(screen.getByLabelText(/temporary password/i), "abc");
-    await userEvent.click(screen.getByRole("button", { name: /create user/i }));
+    fireEvent.change(screen.getByLabelText(/full name/i), { target: { value: "Test User" } });
+    fireEvent.change(screen.getByLabelText(/email/i), { target: { value: "test@example.com" } });
+    fireEvent.change(screen.getByLabelText(/^temporary password$/i), { target: { value: "abc" } });
+    fireEvent.click(screen.getByRole("button", { name: /create user/i }));
     expect(await screen.findByText(/at least 6 characters/i)).toBeInTheDocument();
   });
 
   it("accepts a 6-character password", async () => {
     renderDrawer();
-    await userEvent.type(screen.getByLabelText(/full name/i), "Test User");
-    await userEvent.type(screen.getByLabelText(/email/i), "test@example.com");
-    await userEvent.type(screen.getByLabelText(/temporary password/i), "abcd12");
-    await userEvent.click(screen.getByRole("button", { name: /create user/i }));
+    fireEvent.change(screen.getByLabelText(/full name/i), { target: { value: "Test User" } });
+    fireEvent.change(screen.getByLabelText(/email/i), { target: { value: "test@example.com" } });
+    fireEvent.change(screen.getByLabelText(/^temporary password$/i), { target: { value: "abcd12" } });
+    fireEvent.click(screen.getByRole("button", { name: /create user/i }));
     expect(screen.queryByText(/at least 6 characters/i)).toBeNull();
   });
 });

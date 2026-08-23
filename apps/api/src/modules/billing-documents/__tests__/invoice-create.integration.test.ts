@@ -17,12 +17,18 @@ const ORG = "18181818-1818-4181-8181-181818181818";
 let actorId = "";
 let tenantPartyId = "";
 let rentalCategoryId = "";
+let managementCategoryId = "";
+let apartmentId = "";
+let listingId = "";
 
 async function cleanOrg() {
   const db = getDb();
   await db.billingDocumentLine.deleteMany({ where: { document: { organizationId: ORG } } });
   await db.billingDocument.deleteMany({ where: { organizationId: ORG } });
   await db.charge.deleteMany({ where: { organizationId: ORG } });
+  await db.listing.deleteMany({ where: { organizationId: ORG } });
+  await db.apartment.deleteMany({ where: { organizationId: ORG } });
+  await db.property.deleteMany({ where: { organizationId: ORG } });
   await db.party.deleteMany({ where: { organizationId: ORG } });
   await db.chargeCategory.deleteMany({ where: { organizationId: ORG } });
   await db.documentSeries.deleteMany({ where: { organizationId: ORG } });
@@ -62,6 +68,32 @@ async function seed() {
     },
   });
   rentalCategoryId = rental.id;
+  const management = await db.chargeCategory.create({
+    data: {
+      organizationId: ORG, code: "management_fee", name: "Property management fee", family: "owner_income",
+      docType: "invoice", seriesId: dep.id, defaultSstRate: "8", eInvoiceEligible: true,
+      ledgerCategory: "management_fee_income", isSystem: true, active: true, sortOrder: 2,
+    },
+  });
+  managementCategoryId = management.id;
+  const property = await db.property.create({
+    data: {
+      organizationId: ORG, name: "Profitability Condo", propertyCode: "PROFIT-C",
+      propertyType: "Condominium", addressLine1: "1 Test Road", city: "Kuala Lumpur",
+      country: "Malaysia", status: "active", publishStatus: "draft",
+    },
+  });
+  const apartment = await db.apartment.create({
+    data: { organizationId: ORG, propertyId: property.id, unitCode: "A-01-01", listingMode: "WHOLE" },
+  });
+  apartmentId = apartment.id;
+  const listing = await db.listing.create({
+    data: {
+      organizationId: ORG, apartmentId: apartment.id, listingType: "Whole unit",
+      occupancyStatus: "vacant", listingStatus: "active", currency: "MYR",
+    },
+  });
+  listingId = listing.id;
 }
 
 dn("createManualInvoiceService", () => {
@@ -104,5 +136,42 @@ dn("createManualInvoiceService", () => {
     expect(res).toEqual({ ok: false, status: 400, error: "CATEGORY_NOT_FOUND" });
     const after = await getDb().charge.count({ where: { organizationId: session.orgId } });
     expect(after).toBe(before);
+  });
+
+  it("attributes a manual management fee to its whole unit and stamps manager revenue", async () => {
+    const db = getDb();
+    const session = { orgId: ORG, userId: actorId, role: "accountant" };
+    const res = await createManualInvoiceService(session, {
+      counterpartyType: "owner",
+      partyId: tenantPartyId,
+      apartmentId,
+      billingMonth: "2026-07",
+      lines: [{ description: "July management fee", categoryId: managementCategoryId, amount: "100.00" }],
+    });
+    expect(res.ok).toBe(true);
+    if (!res.ok) return;
+
+    const charge = await db.charge.findUnique({
+      where: { id: res.data.chargeIds[0] },
+      select: {
+        unitId: true, nature: true, fundedBy: true, revenueRecognition: true,
+        settlementRecipient: true, commercialPurpose: true, taxTreatment: true,
+      },
+    });
+    expect(charge).toMatchObject({
+      unitId: listingId,
+      nature: "profit",
+      fundedBy: "owner",
+      revenueRecognition: "manager_revenue",
+      settlementRecipient: "manager",
+      commercialPurpose: "MANAGEMENT_FEE",
+      taxTreatment: "taxable_service",
+    });
+    const document = await db.billingDocument.findUnique({
+      where: { id: res.data.documents[0].id },
+      select: { propertyId: true, apartmentId: true, listingId: true },
+    });
+    expect(document).toEqual(expect.objectContaining({ apartmentId, listingId }));
+    expect(document?.propertyId).toBeTruthy();
   });
 });

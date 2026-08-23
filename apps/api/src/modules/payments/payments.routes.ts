@@ -35,8 +35,7 @@ import {
 import { findPaymentGatewayStatus } from "./payments.repository";
 import { formatZodError } from "../../lib/zod-error-mapper";
 import { isPhase2FlagEnabled } from "../../lib/feature-flags";
-import { requireRole } from "../../middleware/require-role";
-import { requireWorkspace, requireWorkspaceOrRank } from "../../lib/workspace-access";
+import { requirePermission } from "../../middleware/require-permission";
 import { getPaymentProofUrlsService } from "./payments.proof-urls";
 
 const paymentsRoutes = new Hono<{ Variables: { session: PaymentsSession } }>();
@@ -64,7 +63,7 @@ async function isInFlightFpx(orgId: string, paymentId: string): Promise<boolean>
 
 // Registered ABOVE "/" (static path first) so it never falls through to the
 // unfiltered list handler below.
-paymentsRoutes.get("/summary", async (c) => {
+paymentsRoutes.get("/summary", requirePermission("accounting.view"), async (c) => {
   const session = c.get("session");
   const parsed = paymentsSummaryQuerySchema.safeParse(c.req.query());
   if (!parsed.success) {
@@ -74,7 +73,7 @@ paymentsRoutes.get("/summary", async (c) => {
   return c.json(await getPaymentsSummaryService(session, parsed.data));
 });
 
-paymentsRoutes.get("/", async (c) => {
+paymentsRoutes.get("/", requirePermission("accounting.view"), async (c) => {
   const session = c.get("session");
   const parsed = listPaymentsQuerySchema.safeParse(Object.fromEntries(new URL(c.req.url).searchParams));
   if (!parsed.success) {
@@ -85,9 +84,8 @@ paymentsRoutes.get("/", async (c) => {
   return c.json(result);
 });
 
-paymentsRoutes.post("/", async (c) => {
+paymentsRoutes.post("/", requirePermission("billing.mark_paid"), async (c) => {
   const session = c.get("session");
-  if (session.role === "viewer") return c.json({ error: "Read-only access" }, 403);
   const parsed = createPaymentSchema.safeParse(await c.req.json());
   if (!parsed.success) {
     const friendly = formatZodError(parsed.error, { domain: "payments" });
@@ -98,9 +96,8 @@ paymentsRoutes.post("/", async (c) => {
   return c.json(result.data, result.status as 201);
 });
 
-paymentsRoutes.post("/:paymentId/allocate", async (c) => {
+paymentsRoutes.post("/:paymentId/allocate", requirePermission("billing.mark_paid"), async (c) => {
   const session = c.get("session");
-  if (session.role === "viewer") return c.json({ error: "Read-only access" }, 403);
   const body = await c.req.json();
   const parsed = allocatePaymentSchema.safeParse({ ...body, paymentId: c.req.param("paymentId") });
   if (!parsed.success) {
@@ -115,7 +112,7 @@ paymentsRoutes.post("/:paymentId/allocate", async (c) => {
   return c.json(result.data, result.status as 201);
 });
 
-paymentsRoutes.put("/:paymentId/status", requireWorkspaceOrRank("accounting", "manager"), async (c) => {
+paymentsRoutes.put("/:paymentId/status", requirePermission("billing.mark_paid"), async (c) => {
   const session = c.get("session");
   // (inline viewer check removed — middleware admits admin/manager via rank + accountant via workspace; editor/viewer denied per the matrix)
   const body = await c.req.json();
@@ -142,7 +139,7 @@ const multiPayGate: MiddlewareHandler = async (c, next) => {
 // routes below so there is never a route-matching conflict (Hono matches by
 // segment count/shape; "/record-and-allocate" never collides with
 // "/:paymentId/allocate-batch" etc).
-paymentsRoutes.post("/record-and-allocate", multiPayGate, requireWorkspace("accounting"), async (c) => {
+paymentsRoutes.post("/record-and-allocate", multiPayGate, requirePermission("billing.mark_paid"), async (c) => {
   const session = c.get("session");
   const body = await c.req.json().catch(() => null);
   const parsed = recordAndAllocatePaymentSchema.safeParse(body);
@@ -168,7 +165,7 @@ paymentsRoutes.post("/record-and-allocate", multiPayGate, requireWorkspace("acco
 // Invoice-scoped "Record payment" (manual bank transfer). Payer + method are
 // derived server-side from the document; the transfer slip is mandatory (schema).
 // Static 1-segment path — no collision with the "/:paymentId/..." routes below.
-paymentsRoutes.post("/record-invoice-payment", multiPayGate, requireWorkspace("accounting"), async (c) => {
+paymentsRoutes.post("/record-invoice-payment", multiPayGate, requirePermission("billing.mark_paid"), async (c) => {
   const session = c.get("session");
   const body = await c.req.json().catch(() => null);
   const parsed = recordInvoicePaymentSchema.safeParse(body);
@@ -192,14 +189,14 @@ paymentsRoutes.post("/record-invoice-payment", multiPayGate, requireWorkspace("a
 // static path — a distinct terminal segment ("proof-urls") never collides
 // with /allocate-batch, /post, /status. multiPayGate keeps it dark until the
 // flag is on, matching the record-and-allocate surface it serves.
-paymentsRoutes.get("/:paymentId/proof-urls", multiPayGate, requireWorkspace("accounting"), async (c) => {
+paymentsRoutes.get("/:paymentId/proof-urls", multiPayGate, requirePermission("billing.document_manage"), async (c) => {
   const session = c.get("session");
   const result = await getPaymentProofUrlsService(session.orgId, c.req.param("paymentId"));
   if (!result.ok) return c.json({ error: result.status === 404 ? "Payment not found" : "Failed to sign proof URLs" }, result.status);
   return c.json({ urls: result.urls });
 });
 
-paymentsRoutes.post("/:paymentId/allocate-batch", multiPayGate, requireRole("editor"), async (c) => {
+paymentsRoutes.post("/:paymentId/allocate-batch", multiPayGate, requirePermission("billing.mark_paid"), async (c) => {
   const session = c.get("session");
   const body = await c.req.json().catch(() => null);
   const parsed = allocatePaymentBatchSchema.safeParse({ ...body, paymentId: c.req.param("paymentId") });
@@ -213,7 +210,7 @@ paymentsRoutes.post("/:paymentId/allocate-batch", multiPayGate, requireRole("edi
   return c.json(result.data, result.status as 200 | 201);
 });
 
-paymentsRoutes.post("/:paymentId/allocations/:allocationId/reverse", multiPayGate, requireWorkspaceOrRank("accounting", "editor"), async (c) => {
+paymentsRoutes.post("/:paymentId/allocations/:allocationId/reverse", multiPayGate, requirePermission("billing.rebill"), async (c) => {
   const session = c.get("session");
   // Parse the body too (reason/idempotencyKey/amount) — an empty body still
   // parses via the schema's server default on `reason`.
@@ -240,7 +237,7 @@ paymentsRoutes.post("/:paymentId/allocations/:allocationId/reverse", multiPayGat
 // the "manager" floor adds only admin/manager, who already held this. Editor
 // (rank 1) holds `operations`, not `accounting`, and sits below the floor — so
 // it stays denied on both routes, as do operator/viewer.
-paymentsRoutes.post("/:paymentId/post", multiPayGate, requireWorkspaceOrRank("accounting", "manager"), async (c) => {
+paymentsRoutes.post("/:paymentId/post", multiPayGate, requirePermission("billing.mark_paid"), async (c) => {
   const session = c.get("session");
   const parsed = postPaymentSchema.safeParse({ paymentId: c.req.param("paymentId") });
   if (!parsed.success) return c.json({ error: "Invalid id" }, 400);
@@ -255,7 +252,7 @@ paymentsRoutes.post("/:paymentId/post", multiPayGate, requireWorkspaceOrRank("ac
 // claim on money are the same authority, and a reviewer who can approve but not
 // reject is pushed toward approving. Same in-flight-FPX guard too, so a live
 // gateway attempt is never resolved by hand from underneath the callback.
-paymentsRoutes.post("/:paymentId/reject", multiPayGate, requireWorkspaceOrRank("accounting", "manager"), async (c) => {
+paymentsRoutes.post("/:paymentId/reject", multiPayGate, requirePermission("billing.mark_paid"), async (c) => {
   const session = c.get("session");
   const body = await c.req.json().catch(() => null);
   const parsed = rejectPaymentSchema.safeParse({ ...body, paymentId: c.req.param("paymentId") });
@@ -279,7 +276,7 @@ const fpxOpsGate: MiddlewareHandler = async (c, next) => {
   await next();
 };
 
-paymentsRoutes.get("/fpx/in-flight", fpxOpsGate, requireRole("manager"), async (c) => {
+paymentsRoutes.get("/fpx/in-flight", fpxOpsGate, requirePermission("accounting.view"), async (c) => {
   const session = c.get("session");
   const result = await listInFlightFpxService(session);
   return c.json(result);
@@ -291,13 +288,13 @@ paymentsRoutes.get("/fpx/in-flight", fpxOpsGate, requireRole("manager"), async (
 // likely taken and our books do not yet show, so this is a liability list, not a
 // report — and the FPX merchant agreement gives the payer 60 days to demand it
 // back. Manager rank to read, admin to resolve, mirroring post/reject.
-paymentsRoutes.get("/fpx/needs-reconciliation", fpxOpsGate, requireRole("manager"), async (c) => {
+paymentsRoutes.get("/fpx/needs-reconciliation", fpxOpsGate, requirePermission("accounting.view"), async (c) => {
   const session = c.get("session");
   const result = await listNeedsReconciliationService(session);
   return c.json(result);
 });
 
-paymentsRoutes.post("/fpx/:paymentId/resolve", fpxOpsGate, requireRole("admin"), async (c) => {
+paymentsRoutes.post("/fpx/:paymentId/resolve", fpxOpsGate, requirePermission("billing.mark_paid"), async (c) => {
   const session = c.get("session");
   const body = await c.req.json().catch(() => null);
   const parsed = resolveReconciliationSchema.safeParse({ ...body, paymentId: c.req.param("paymentId") });
@@ -310,7 +307,7 @@ paymentsRoutes.post("/fpx/:paymentId/resolve", fpxOpsGate, requireRole("admin"),
   return c.json(result.data);
 });
 
-paymentsRoutes.post("/fpx/:paymentId/cancel", fpxOpsGate, requireRole("admin"), async (c) => {
+paymentsRoutes.post("/fpx/:paymentId/cancel", fpxOpsGate, requirePermission("billing.rebill"), async (c) => {
   const session = c.get("session");
   const parsed = postPaymentSchema.safeParse({ paymentId: c.req.param("paymentId") });
   if (!parsed.success) return c.json({ error: "Invalid id" }, 400);

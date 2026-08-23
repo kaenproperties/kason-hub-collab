@@ -26,7 +26,7 @@ import {
 } from "@/components/ui/dialog";
 import { apiFetch, ApiError } from "@/lib/api-client";
 import { formatMoney } from "@/components/format";
-import { useAuth } from "@/lib/auth";
+import { usePermission } from "@/components/permission-gate";
 import {
   DraftApprovalsTable,
   invoiceTypeMeta,
@@ -138,8 +138,7 @@ function GenerateButton({
 // ─── Page ─────────────────────────────────────────────────────────────────────
 
 export default function DraftApprovalsPage() {
-  const { user } = useAuth();
-  const canManage = user?.role === "manager" || user?.role === "admin";
+  const canManage = usePermission("billing.bill");
   const qc = useQueryClient();
 
   // Filters
@@ -163,7 +162,7 @@ export default function DraftApprovalsPage() {
   const [scheduleOpen, setScheduleOpen] = useState(false);
   const configQ = useDraftConfig();
   const config = configQ.data ?? null;
-  const canEditSchedule = user?.role === "admin";
+  const canEditSchedule = usePermission("billing.period_manage");
   // The period the NEXT SCHEDULED RUN will draft, per the org's offset (defaults
   // to next month). Distinct from `thisPeriod` on purpose — see below.
   const targetPeriod = targetPeriodFor(config);
@@ -283,7 +282,7 @@ export default function DraftApprovalsPage() {
       }),
     onSuccess: (result) => {
       toast.success(
-        `Issued ${result.approved.length} invoice(s)${result.skipped.length > 0 ? `, ${result.skipped.length} skipped (wrong state or changed).` : "."}`,
+        `Issued ${result.approved.length} document(s)${result.skipped.length > 0 ? `, ${result.skipped.length} skipped (wrong state or changed).` : "."}`,
       );
       setConfirmIds(null);
       setSelectedIds([]);
@@ -419,7 +418,7 @@ export default function DraftApprovalsPage() {
         compact
         icon={FileCheck}
         title="Draft Approvals"
-        description="Review auto-generated draft invoices, adjust dates, then approve."
+        description="Review auto-generated draft billing documents, adjust dates, then approve."
         actions={
           <div className="flex flex-wrap items-center gap-2">
             {/* TWO periods, because they answer two different questions: THIS
@@ -457,7 +456,7 @@ export default function DraftApprovalsPage() {
           {
             label: "Total (filtered)",
             value: formatMoney(totalAmount),
-            hint: `${shown.length} invoice(s) in view`,
+            hint: `${shown.length} document(s) in view`,
             icon: Coins,
             glowColor: "gold",
           },
@@ -545,7 +544,7 @@ export default function DraftApprovalsPage() {
       ) : canManage && selectedIds.length > 0 ? (
         <div className="flex flex-wrap items-center gap-3 rounded-xl border border-amber-500/30 bg-amber-500/10 px-4 py-3">
           <span className="text-sm font-medium text-amber-900 dark:text-amber-100">
-            {selectedIds.length} invoice(s) selected · {formatMoney(selectedTotal)}
+            {selectedIds.length} document(s) selected · {formatMoney(selectedTotal)}
           </span>
           <Button variant="gold" size="sm" onClick={() => setConfirmIds(selectedIds)}>
             Issue selected ({selectedIds.length})
@@ -579,7 +578,7 @@ export default function DraftApprovalsPage() {
       ) : null}
 
       <Surface
-        title="Invoice queue"
+        title="Billing document queue"
         description="Grouped by document type. Click a row to open the detail drawer; use checkboxes for bulk approval."
         actions={
           invoicesQ.isLoading ? (
@@ -727,11 +726,11 @@ export default function DraftApprovalsPage() {
       >
         <DialogContent>
           <DialogHeader>
-            <DialogTitle>Issue {confirmIds?.length ?? 0} invoice(s)?</DialogTitle>
+            <DialogTitle>Issue {confirmIds?.length ?? 0} document(s)?</DialogTitle>
             <DialogDescription>
               {/* The TOTAL is the point of this dialog: issuing turns these drafts
                   into live receivables, and the amount is what makes that real. */}
-              Issuing approves {confirmIds?.length ?? 0} draft invoice(s) totalling{" "}
+              Issuing approves {confirmIds?.length ?? 0} draft document(s) totalling{" "}
               <strong>{formatMoney(confirmTotal)}</strong> and makes their charges live.
               Nothing is emailed — sending is a separate step.
             </DialogDescription>
@@ -770,7 +769,7 @@ export default function DraftApprovalsPage() {
             >
               {bulkApproveMutation.isPending
                 ? "Issuing…"
-                : `Issue ${confirmIds?.length ?? 0} invoice(s)`}
+                : `Issue ${confirmIds?.length ?? 0} document(s)`}
             </Button>
             <DialogClose render={<Button variant="ghost">Cancel</Button>} />
           </DialogFooter>

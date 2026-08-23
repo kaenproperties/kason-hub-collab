@@ -86,50 +86,77 @@ export async function listTenancies(orgId: string) {
       tenantParty: { select: { id: true, displayName: true } },
       charges: {
         where: { chargeType: "renewal_fee", status: { not: "void" } },
-        orderBy: { createdAt: "desc" },
-        take: 1,
-        select: { id: true, amount: true, dueDate: true, status: true, outstandingAmount: true },
+        orderBy: [{ createdAt: "desc" }, { id: "desc" }],
+        select: {
+          id: true,
+          chargeNumber: true,
+          parentChargeId: true,
+          amount: true,
+          dueDate: true,
+          status: true,
+          outstandingAmount: true,
+        },
       },
     },
     orderBy: [{ startDate: "desc" }],
   });
 
-  return rows.map((row) => ({
-    id: row.id,
-    tenancyCode: row.tenancyCode,
-    propertyId: row.propertyId,
-    propertyName: row.property.name,
-    unitId: row.unitId,
-    unitCode: row.unit.apartment.unitCode,
-    tenantPartyId: row.tenantPartyId,
-    tenantName: row.tenantParty.displayName,
-    status: row.status,
-    billingStatus: row.billingStatus,
-    startDate: row.startDate.toISOString(),
-    endDate: row.endDate ? row.endDate.toISOString() : null,
-    monthlyRentAmount: toNumber(row.monthlyRentAmount) ?? 0,
-    // First-month KAEN commission. Additive: carried here so a caller holding a
-    // tenancy row (e.g. the Assign-to-Unit dialog reopened for a tenant who is
-    // already assigned) can SHOW the stored commission state instead of falling
-    // back to a blank form's default `false` — the create-form default reading
-    // as "it wasn't saved" is exactly the bug this closes.
-    firstMonthIsCommission: row.firstMonthIsCommission,
-    commissionSstBearer: row.commissionSstBearer as "owner" | "kaen",
-    previousTenancyId: row.previousTenancyId,
-    renewalDecision: row.renewalDecision,
-    renewalDecisionAt: row.renewalDecisionAt?.toISOString() ?? null,
-    renewalContactedAt: row.renewalContactedAt?.toISOString() ?? null,
-    renewalNotes: row.renewalNotes,
-    renewalFeeCharge: row.charges[0]
-      ? {
-          id: row.charges[0].id,
-          amount: toNumber(row.charges[0].amount) ?? 0,
-          outstandingAmount: toNumber(row.charges[0].outstandingAmount) ?? 0,
-          dueDate: row.charges[0].dueDate.toISOString(),
-          status: row.charges[0].status,
-        }
-      : null,
-  }));
+  return rows.map((row) => {
+    const renewalBase = row.charges.find((charge) => charge.parentChargeId === null);
+    const renewalTax = renewalBase
+      ? row.charges.find((charge) =>
+          charge.parentChargeId === renewalBase.id
+          && charge.chargeNumber === `${renewalBase.chargeNumber}-SST`,
+        )
+      : undefined;
+    const renewalAmount = renewalBase
+      ? (toNumber(renewalBase.amount) ?? 0) + (renewalTax ? toNumber(renewalTax.amount) ?? 0 : 0)
+      : 0;
+    const renewalOutstanding = renewalBase
+      ? (toNumber(renewalBase.outstandingAmount) ?? 0)
+        + (renewalTax ? toNumber(renewalTax.outstandingAmount) ?? 0 : 0)
+      : 0;
+    const renewalStatus = renewalBase && renewalTax && renewalBase.status !== renewalTax.status
+      ? "partially_paid"
+      : renewalBase?.status;
+
+    return {
+      id: row.id,
+      tenancyCode: row.tenancyCode,
+      propertyId: row.propertyId,
+      propertyName: row.property.name,
+      unitId: row.unitId,
+      unitCode: row.unit.apartment.unitCode,
+      tenantPartyId: row.tenantPartyId,
+      tenantName: row.tenantParty.displayName,
+      status: row.status,
+      billingStatus: row.billingStatus,
+      startDate: row.startDate.toISOString(),
+      endDate: row.endDate ? row.endDate.toISOString() : null,
+      monthlyRentAmount: toNumber(row.monthlyRentAmount) ?? 0,
+      // First-month KAEN commission. Additive: carried here so a caller holding a
+      // tenancy row (e.g. the Assign-to-Unit dialog reopened for a tenant who is
+      // already assigned) can SHOW the stored commission state instead of falling
+      // back to a blank form's default `false` — the create-form default reading
+      // as "it wasn't saved" is exactly the bug this closes.
+      firstMonthIsCommission: row.firstMonthIsCommission,
+      commissionSstBearer: row.commissionSstBearer as "owner" | "kaen",
+      previousTenancyId: row.previousTenancyId,
+      renewalDecision: row.renewalDecision,
+      renewalDecisionAt: row.renewalDecisionAt?.toISOString() ?? null,
+      renewalContactedAt: row.renewalContactedAt?.toISOString() ?? null,
+      renewalNotes: row.renewalNotes,
+      renewalFeeCharge: renewalBase
+        ? {
+            id: renewalBase.id,
+            amount: renewalAmount,
+            outstandingAmount: renewalOutstanding,
+            dueDate: renewalBase.dueDate.toISOString(),
+            status: renewalStatus ?? renewalBase.status,
+          }
+        : null,
+    };
+  });
 }
 
 export async function findUnit(orgId: string, unitId: string) {

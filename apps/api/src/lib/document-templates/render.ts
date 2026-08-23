@@ -126,19 +126,47 @@ const CSS = `
   .sig-fields td:last-child{color:#111827}
   .audit-footer{margin-top:10mm;padding-top:3mm;border-top:1px solid #e5e7eb;
     font-size:8pt;color:#6b7280;text-align:center;letter-spacing:0.2pt}
+
+  /* Owner payout reports carry more financial detail than the other document
+     types. Give the legal entity the full centre width, keep its registered
+     name on one line, and use a denser print rhythm so a short expense table is
+     not stranded by itself on page two. */
+  .doc-owner-statement .doc-header{
+    grid-template-columns:18mm minmax(0,1fr) 42mm;gap:4mm;align-items:center;
+    margin-bottom:4mm;padding-bottom:3mm;border-bottom:1.5px solid #082f55
+  }
+  .doc-owner-statement .doc-header.no-logo{grid-template-columns:minmax(0,1fr) 42mm}
+  .doc-owner-statement .doc-header.no-logo .zone-left{display:none}
+  .doc-owner-statement .zone-left img{max-width:17mm;max-height:17mm}
+  .doc-owner-statement .zone-center{text-align:left;min-width:0}
+  .doc-owner-statement .zone-center h1{
+    color:#082f55;font-size:12pt;line-height:1.2;letter-spacing:.12pt;
+    margin-bottom:1mm;white-space:nowrap
+  }
+  .doc-owner-statement .zone-center p{display:inline;color:#4b5563;font-size:7.5pt;line-height:1.35}
+  .doc-owner-statement .zone-center p:not(:last-child)::after{content:"  ·  ";color:#c9a35c}
+  .doc-owner-statement .zone-right h2{color:#082f55;font-size:10.5pt;line-height:1.2;margin-bottom:1.5mm}
+  .doc-owner-statement .zone-right p{font-size:7.8pt;line-height:1.35}
+  .doc-owner-statement .zone-right .ref-label{font-size:7pt;margin-top:0}
+  .doc-owner-statement .zone-right .ref-value{font-size:8.5pt;margin-bottom:.7mm}
+  .doc-owner-statement main{margin-top:0}
+  .doc-owner-statement main section{margin-top:2.3mm;margin-bottom:2.3mm}
+  .doc-owner-statement main section:first-child{margin-top:0}
 `;
 
 export function renderToHtml(payload: RenderPayload): string {
   const { template, referenceCode, issuedDate, dueDate, bodyHtml, signature } = payload;
   const h = template.headerFields;
+  const hasVisibleLogo = h.showLogo && Boolean(template.logoUrl);
+  const documentClass = `doc-${template.docType.replace(/_/g, "-")}`;
 
   const headerElement = React.createElement(
     "header",
-    { className: "doc-header" },
+    { className: `doc-header ${hasVisibleLogo ? "has-logo" : "no-logo"}` },
     React.createElement(
       "div",
       { className: "zone-left" },
-      h.showLogo && template.logoUrl
+      hasVisibleLogo && template.logoUrl
         ? React.createElement("img", { src: template.logoUrl, alt: "logo" })
         : null,
     ),
@@ -253,7 +281,7 @@ export function renderToHtml(payload: RenderPayload): string {
   return [
     "<!DOCTYPE html>",
     "<html><head><meta charset='utf-8'/>",
-    `<style>${CSS}</style></head><body><div class='page'>`,
+    `<style>${CSS}</style></head><body class='${documentClass}'><div class='page'>`,
     headerHtml,
     "<main>",
     bodyHtml,

@@ -72,7 +72,10 @@
   --secondary:     #FFFFFF;
   --secondary-foreground: #082B4F;
   --muted:         #DFE9F3;
-  --muted-foreground: #657069;
+  /* Normal interface copy must stay crisp KAEN navy. Grey is reserved for
+     placeholders/disabled states, not headings, labels or business data. */
+  --muted-foreground: #082B4F;
+  --placeholder:   #657069;
   --accent:        #DFE9F3;
   --accent-foreground: #082B4F;
   --destructive:   #EF4444;
@@ -91,7 +94,7 @@
   /* Text (legacy compat) */
   --text-primary:  var(--foreground);
   --text-secondary: var(--muted-foreground);
-  --text-muted:    #657069;
+  --text-muted:    #082B4F;
 
   /* Functional (legacy compat) */
   --primary-hover: #061F38;
@@ -136,6 +139,7 @@
   --secondary-foreground: #e2e8f0;
   --muted:         #123B5E;
   --muted-foreground: #C7D3DF;
+  --placeholder:   #AFC0CF;
   --accent:        #123B5E;
   --accent-foreground: #e2e8f0;
   --destructive:   #ef4444;
@@ -206,7 +210,22 @@ html {
   ::selection { background: rgba(201,163,92,0.28); }
 
   input, select, textarea { color: var(--text-primary); }
-  input::placeholder, textarea::placeholder { color: var(--text-secondary); opacity: 0.9; }
+  input::placeholder, textarea::placeholder {
+    color: var(--placeholder) !important;
+    opacity: 0.9;
+  }
+
+  /* Legacy pages used Tailwind's grey/slate/zinc text utilities directly.
+     In the light KAEN theme those utilities made headings, field labels and
+     business data look disabled. Keep every ordinary word in brand navy;
+     placeholder pseudo-elements above deliberately retain the softer grey. */
+  :root:not(.dark) [class*="text-gray-"],
+  :root:not(.dark) [class*="text-slate-"],
+  :root:not(.dark) [class*="text-zinc-"],
+  :root:not(.dark) [class*="text-neutral-"],
+  :root:not(.dark) [class*="text-[#657069]"] {
+    color: var(--navy-text) !important;
+  }
   table { max-width: 100%; }
   th { background: var(--table-head); color: var(--navy-text); font-weight: 700; }
   td { border-color: var(--card-border); overflow-wrap: anywhere; }

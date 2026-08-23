@@ -92,7 +92,7 @@ dn("bills-grid recurring TOTALS — unopened-period projection", () => {
     await cleanup();
   });
 
-  it("projects owner+tenant totals for an apartment whose month entry does not exist", async () => {
+  it("projects owner+tenant totals and named items for an apartment whose month entry does not exist", async () => {
     const c = await cats();
     const dOwner = await makeDef("custom-own1", "Gardener");
     await makeRev(dOwner.id, "80.00", "owner", "2026-08-01", true, c.owner);
@@ -100,7 +100,14 @@ dn("bills-grid recurring TOTALS — unopened-period projection", () => {
     await makeRev(dTenant.id, "30.00", "tenant", "2026-08-01", true, c.tenant);
 
     const map = await projectedRecurringTotalsByApartment(ORG, [APT, APT_NOTEN], d("2026-08-01"));
-    expect(map.get(APT)).toEqual({ ownerTotal: 80, ownerCount: 1, tenantTotal: 30, tenantCount: 1 });
+    expect(map.get(APT)).toEqual({
+      ownerTotal: 80,
+      ownerCount: 1,
+      ownerItems: [{ id: dOwner.id, name: "Gardener", amount: "80.00" }],
+      tenantTotal: 30,
+      tenantCount: 1,
+      tenantItems: [{ id: dTenant.id, name: "Laundry", amount: "30.00" }],
+    });
     // No entry was created by the read (PURE projection).
     expect(await getDb().unitBillsGridEntry.count({ where: { organizationId: ORG } })).toBe(0);
   });

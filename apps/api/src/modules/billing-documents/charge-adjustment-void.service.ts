@@ -36,6 +36,7 @@ import { recordAudit } from "../../lib/audit";
 import { refreshDocumentStatusForCharges } from "./status.service";
 import { syncOwnerLedgerForCharges } from "../owner-ledger/owner-ledger.sync-hook";
 import { assertPeriodOpen } from "../owner-ledger/assert-period-open";
+import { isExactTaTaxPairCharge } from "./ta-tax-pair.guard";
 
 export type VoidChargeAdjustmentSession = { orgId: string; userId: string; role: string };
 export type VoidChargeAdjustmentResult =
@@ -72,11 +73,23 @@ export async function voidChargeAdjustmentService(
   if (!note || (note.docType !== "credit_note" && note.docType !== "debit_note")) {
     return { ok: false, status: 400, error: "NOT_A_NOTE" };
   }
-  const chargeScopedLine = note.lines.find((l) => l.chargeId !== null);
-  if (!note.originalDocumentId || !chargeScopedLine || !chargeScopedLine.chargeId) {
+  const chargeIds = [...new Set(note.lines.flatMap((line) => (line.chargeId ? [line.chargeId] : [])))];
+  if (chargeIds.length > 1) {
+    // The old implementation silently picked the first line then applied the
+    // note's whole total to that one Charge.  Refuse any multi-charge note until
+    // voiding can reverse every line atomically.
+    return { ok: false, status: 409, error: "MULTI_CHARGE_NOTE_VOID_UNSUPPORTED" };
+  }
+  const chargeId = chargeIds[0];
+  if (!note.originalDocumentId || !chargeId) {
     return { ok: false, status: 400, error: "NOT_CHARGE_SCOPED" };
   }
-  const chargeId = chargeScopedLine.chargeId;
+  const pairedTa = await db.$transaction((tx) =>
+    isExactTaTaxPairCharge(tx, session.orgId, chargeId),
+  );
+  if (pairedTa) {
+    return { ok: false, status: 409, error: "TAX_PAIR_CORRECTION_UNSUPPORTED" };
+  }
 
   // Linked invoice's counterpartyType (LITERAL spec check — not note.counterpartyType,
   // which by construction always mirrors it for a well-formed note, but the linked
@@ -102,6 +115,13 @@ export async function voidChargeAdjustmentService(
         await tx.$queryRaw`SELECT id FROM "BillingDocument" WHERE id = ${noteId}::uuid AND "organizationId" = ${session.orgId}::uuid FOR UPDATE`;
       }
       await tx.$queryRaw`SELECT id FROM "Charge" WHERE id = ${chargeId}::uuid AND "organizationId" = ${session.orgId}::uuid FOR UPDATE`;
+      if (await isExactTaTaxPairCharge(tx, session.orgId, chargeId)) {
+        return {
+          ok: false,
+          status: 409,
+          error: "TAX_PAIR_CORRECTION_UNSUPPORTED",
+        } as TxOutcome;
+      }
 
       // Re-read note, authoritative, AFTER the lock(s).
       const txNote = await tx.billingDocument.findFirst({

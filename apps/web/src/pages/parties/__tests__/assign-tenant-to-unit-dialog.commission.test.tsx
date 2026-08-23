@@ -104,7 +104,7 @@ async function openPickAndFill(user: ReturnType<typeof userEvent.setup>) {
   await user.selectOptions(screen.getByLabelText(/property/i), "prop-1");
   await user.selectOptions(await screen.findByLabelText(/^unit$/i), "unit-ok");
   fireEvent.change(screen.getByLabelText(/monthly rent/i), { target: { value: "1500" } });
-  fireEvent.change(screen.getByLabelText(/start date/i), { target: { value: "2026-07-01" } });
+  fireEvent.change(screen.getByLabelText(/^start date$/i), { target: { value: "2026-07-01" } });
 }
 
 function postBody() {
@@ -147,5 +147,34 @@ test("unchecked (regression): payload carries neither commission field", async (
     const body = postBody();
     expect(body).not.toHaveProperty("firstMonthIsCommission");
     expect(body).not.toHaveProperty("commissionSstBearer");
+  });
+});
+
+test("sends an explicit TA fee decision, including RM0, in the assignment payload", async () => {
+  const user = userEvent.setup();
+  await openPickAndFill(user);
+  fireEvent.change(screen.getByLabelText(/TA \(WITH SST\) amount/i), {
+    target: { value: "0" },
+  });
+  fireEvent.change(screen.getByLabelText(/agreement fee due date/i), {
+    target: { value: "2026-07-01" },
+  });
+
+  await user.click(screen.getByRole("button", { name: /assign/i }));
+  await waitFor(() => {
+    const body = postBody();
+    expect(body.tenancyAgreementFeeAmount).toBe("0");
+    expect(body.tenancyAgreementFeeDueDate).toBe("2026-07-01");
+  });
+});
+
+test("does not invent a TA fee when the assignment leaves it blank", async () => {
+  const user = userEvent.setup();
+  await openPickAndFill(user);
+  await user.click(screen.getByRole("button", { name: /assign/i }));
+  await waitFor(() => {
+    const body = postBody();
+    expect(body).not.toHaveProperty("tenancyAgreementFeeAmount");
+    expect(body).not.toHaveProperty("tenancyAgreementFeeDueDate");
   });
 });

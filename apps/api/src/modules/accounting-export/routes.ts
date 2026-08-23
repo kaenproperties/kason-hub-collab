@@ -2,10 +2,10 @@ import { Hono } from "hono";
 import ExcelJS from "exceljs";
 import { getDb } from "@kason/db";
 import type { SessionPayload } from "../../lib/auth";
-import { requireWorkspace } from "../../lib/workspace-access";
+import { requirePermission } from "../../middleware/require-permission";
 
 const routes = new Hono<{ Variables: { session: SessionPayload } }>();
-routes.use("*", requireWorkspace("accounting"));
+routes.use("*", requirePermission("accounting.export"));
 
 const money = (value: unknown) => value == null ? null : Number(value);
 const iso = (value: Date | null | undefined) => value ? value.toISOString().slice(0, 10) : "";

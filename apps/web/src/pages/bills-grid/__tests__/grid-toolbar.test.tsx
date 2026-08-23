@@ -113,6 +113,64 @@ describe("GridToolbar fullscreen removal", () => {
   });
 });
 
+describe("GridToolbar control alignment", () => {
+  it("uses one 40px control height and one bottom baseline across filters, views and actions", () => {
+    renderToolbar({
+      viewControls: <div data-testid="test-view-control" className="h-10" />,
+    });
+
+    const exactHeightControls = [
+      screen.getByTestId("anchor-prev-month"),
+      screen.getByTestId("anchor-month-input"),
+      screen.getByTestId("anchor-next-month"),
+      screen.getByRole("combobox", { name: "Categorize" }),
+      screen.getByPlaceholderText("Unit, name, or phone"),
+      screen.getByLabelText("Filter by colour"),
+      screen.getByLabelText("Filter owner payout status"),
+      screen.getByLabelText("Date range from"),
+      screen.getByLabelText("Date range to"),
+      screen.getByTestId("show-vacant-toggle").closest("label")!,
+      screen.getByTestId("grid-undo"),
+      screen.getByTestId("grid-redo"),
+      screen.getByRole("button", { name: "Save" }),
+      screen.getByRole("button", { name: "Bill" }),
+      screen.getByRole("button", { name: /Export/ }),
+    ];
+
+    for (const control of exactHeightControls) {
+      expect(control).toHaveClass("h-10");
+    }
+
+    expect(screen.getByTestId("hide-column-menu").querySelector("summary")).toHaveClass("h-10");
+    expect(screen.getByTestId("grid-view-controls")).toHaveClass("self-end");
+    expect(screen.getByTestId("grid-toolbar-actions")).toHaveClass("h-10", "self-end");
+  });
+});
+
+describe("GridToolbar permission controls", () => {
+  it("does not expose edit, save, bill or export actions when the user lacks those permissions", () => {
+    renderToolbar({
+      canEditAction: false,
+      canSaveAction: false,
+      canBillAction: false,
+      canExportAction: false,
+      dirtyCount: 2,
+      selectedRowCount: 2,
+      canExport: true,
+    });
+
+    expect(screen.queryByTestId("colour-fill-swatches")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("grid-undo")).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /save/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /bill/i })).not.toBeInTheDocument();
+    expect(screen.queryByText("Export")).not.toBeInTheDocument();
+
+    // Read-only navigation and filters remain available.
+    expect(screen.getByTestId("anchor-month-input")).toBeInTheDocument();
+    expect(screen.getByPlaceholderText("Unit, name, or phone")).toBeInTheDocument();
+  });
+});
+
 describe("GridToolbar billing-month navigator", () => {
   it("prev/next arrows step the anchor by ∓1 month", () => {
     const onStepMonth = vi.fn();

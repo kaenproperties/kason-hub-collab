@@ -42,6 +42,7 @@ const SERVER_CODE_TO_FIELD: Record<string, keyof UnitFormErrors> = {
   APARTMENT_OWNER_CONFLICT: "ownerPartyId",
   OCCUPANCY_RENT_REQUIRED: "monthlyRent",
   APARTMENT_BILLING_MODE_CONFLICT: "partitionBillingMode",
+  APARTMENT_TNB_SUBSIDY_CAP_CONFLICT: "tnbSubsidyCapMonthly",
 };
 
 // Apartment-scoped delta detection — spec §"On submit, detect shared field
@@ -162,6 +163,7 @@ export type FetchedUnitDetail = {
   ownerPartyId?: string | null;
   ownerName?: string | null;
   ownerPhone?: string | null;
+  tnbSubsidyCapMonthly?: number | null;
   // Active tenancy stub for prefill when reopening an Occupied unit.
   // null means no active tenancy; undefined means older API (treat as null).
   activeTenancy?: {
@@ -237,6 +239,8 @@ export function detailToFormState(u: FetchedUnitDetail): UnitFormState {
     // here ("" = untouched) and overwritten from the matched apartment in
     // EditUnitForm, so "dirty" is measured against the apartment's real mode.
     partitionBillingMode: "",
+    tnbSubsidyCapMonthly:
+      u.tnbSubsidyCapMonthly == null ? "" : String(u.tnbSubsidyCapMonthly),
     // Placeholder — the EditUnitForm initializer overrides this from the
     // matched apartment (the unit detail GET does not carry underManagement).
     underManagement: true,
@@ -337,6 +341,10 @@ export function EditUnitForm({
     return {
       ...base,
       partitionBillingMode: apartment.partitionBillingMode ?? "",
+      tnbSubsidyCapMonthly:
+        apartment.tnbSubsidyCapMonthly == null
+          ? ""
+          : String(apartment.tnbSubsidyCapMonthly),
       ownerPartyId: apartment.ownerPartyId,
       ownerName: apartment.ownerName ?? base.ownerName,
       ownerPhone: apartment.ownerPhone,
@@ -394,6 +402,10 @@ export function EditUnitForm({
     // eslint-disable-next-line react-hooks/refs -- deliberate: ref is a render-time baseline/mirror (dirty-check or latest-value), read during render on purpose
     form.partitionBillingMode !== initialForm.current.partitionBillingMode &&
     form.partitionBillingMode !== "";
+  const tnbSubsidyCapDirty =
+    !!apartment &&
+    // eslint-disable-next-line react-hooks/refs -- dirty-check baseline, same as billingDirty
+    form.tnbSubsidyCapMonthly !== initialForm.current.tnbSubsidyCapMonthly;
   const underManagementDirty =
     // intentional: initialForm is the dirty-check baseline ref for EditUnitForm (same
     // pattern as ownerDirty/billingDirty above). It must stay a ref — lifting it to state
@@ -418,9 +430,13 @@ export function EditUnitForm({
       // R5 routing. Apartment-scoped owner + billing model go to the dedicated
       // apartment endpoint FIRST. If it throws, the per-unit PUT never fires
       // (abort-on-first-failure) — the awaited call rejects out of here.
-      if (apartment && (ownerDirty || billingDirty || underManagementDirty)) {
+      if (
+        apartment &&
+        (ownerDirty || billingDirty || tnbSubsidyCapDirty || underManagementDirty)
+      ) {
         const patch: {
           partitionBillingMode?: "SUBSIDY" | "NO_SUBSIDY";
+          tnbSubsidyCapMonthly?: number | null;
           ownerPartyId?: string | null;
           underManagement?: boolean;
         } = {};
@@ -428,6 +444,12 @@ export function EditUnitForm({
           patch.partitionBillingMode = form.partitionBillingMode as
             | "SUBSIDY"
             | "NO_SUBSIDY";
+        }
+        if (tnbSubsidyCapDirty) {
+          patch.tnbSubsidyCapMonthly =
+            form.tnbSubsidyCapMonthly.trim() === ""
+              ? null
+              : Number(form.tnbSubsidyCapMonthly);
         }
         if (ownerDirty) patch.ownerPartyId = form.ownerPartyId;
         if (underManagementDirty) patch.underManagement = form.underManagement;
@@ -445,6 +467,7 @@ export function EditUnitForm({
           ownerName: form.ownerName,
           ownerPhone: form.ownerPhone,
           partitionBillingMode: form.partitionBillingMode,
+          tnbSubsidyCapMonthly: form.tnbSubsidyCapMonthly,
           underManagement: form.underManagement,
         };
         // The by-property apartments cache (EditUnitDialog, staleTime 30s) now
@@ -536,6 +559,18 @@ export function EditUnitForm({
     // PUT's Zod `unitType: min(1)`, leaving a destructive partial write.
     if (!form.unitType) {
       toast.error("Pick a unit type.");
+      return;
+    }
+    if (
+      form.tnbSubsidyCapMonthly.trim() !== "" &&
+      (!/^\d+(\.\d{1,2})?$/.test(form.tnbSubsidyCapMonthly.trim()) ||
+        Number(form.tnbSubsidyCapMonthly) > 9_999_999_999.99)
+    ) {
+      setErrors((prev) => ({
+        ...prev,
+        tnbSubsidyCapMonthly:
+          "Enter a nonnegative RM amount with no more than 2 decimal places.",
+      }));
       return;
     }
     // FIX WAVE 2 — the partial-commit SIBLING the empty-type guard above did not

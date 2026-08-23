@@ -14,7 +14,7 @@ import { remittanceCreateSchema, remittanceAllocateSchema, reverseSchema } from 
 import type { SessionPayload } from "../../lib/auth";
 import { isPhase2FlagEnabled } from "../../lib/feature-flags";
 import { formatZodError } from "../../lib/zod-error-mapper";
-import { requireWorkspaceOrRank } from "../../lib/workspace-access";
+import { requirePermission } from "../../middleware/require-permission";
 import { getActorHeaders } from "../../lib/actor-ctx";
 import {
   recordRemittanceService,
@@ -54,7 +54,7 @@ function zerr(c: OwnerRemittanceCtx, err: ZodError) {
 }
 
 // POST /api/owner-remittances — WRITE = accounting workspace OR rank>=manager.
-ownerRemittanceRoutes.post("/", requireWorkspaceOrRank("accounting", "manager"), async (c) => {
+ownerRemittanceRoutes.post("/", requirePermission("owner_payout.record"), async (c) => {
   const body = await c.req.json().catch(() => null);
   if (!body) return c.json({ error: "Invalid JSON body" }, 400);
   const parsed = remittanceCreateSchema.safeParse(body);
@@ -69,7 +69,7 @@ ownerRemittanceRoutes.post("/", requireWorkspaceOrRank("accounting", "manager"),
 // PRE_STATEMENT_REMITTANCE (Task 7). Same WRITE gate as create. `:id` is the
 // path param, never part of the Zod-parsed body (remittanceAllocateSchema
 // covers only {allocations, idempotencyKey}).
-ownerRemittanceRoutes.post("/:id/allocate", requireWorkspaceOrRank("accounting", "manager"), async (c) => {
+ownerRemittanceRoutes.post("/:id/allocate", requirePermission("owner_payout.record"), async (c) => {
   const body = await c.req.json().catch(() => null);
   if (!body) return c.json({ error: "Invalid JSON body" }, 400);
   const parsed = remittanceAllocateSchema.safeParse(body);
@@ -85,7 +85,7 @@ ownerRemittanceRoutes.post("/:id/allocate", requireWorkspaceOrRank("accounting",
 // OWNER_REMITTANCE or PRE_STATEMENT_REMITTANCE entry (Task 9). Same WRITE
 // gate as create/allocate. `:id` is the path param; reverseSchema covers
 // only {reason, idempotencyKey}.
-ownerRemittanceRoutes.post("/:id/reverse", requireWorkspaceOrRank("accounting", "manager"), async (c) => {
+ownerRemittanceRoutes.post("/:id/reverse", requirePermission("owner_payout.reverse"), async (c) => {
   const body = await c.req.json().catch(() => null);
   if (!body) return c.json({ error: "Invalid JSON body" }, 400);
   const parsed = reverseSchema.safeParse(body);
@@ -107,7 +107,7 @@ ownerRemittanceRoutes.post("/:id/reverse", requireWorkspaceOrRank("accounting", 
 // a write). accountant-scope.ts carries its OWN separate GET allowlist
 // entry for this exact path — the accountant default-deny wall runs BEFORE
 // this middleware for every method, not just POST.
-ownerRemittanceRoutes.get("/owner/:ownerPartyId", requireWorkspaceOrRank("accounting", "manager"), async (c) => {
+ownerRemittanceRoutes.get("/owner/:ownerPartyId", requirePermission("owner_report.view"), async (c) => {
   const result = await getOwnerAccountService(actor(c), c.req.param("ownerPartyId"));
   if (!result.ok) return c.json({ error: result.error }, result.status as 400);
   return c.json({ data: result.data });

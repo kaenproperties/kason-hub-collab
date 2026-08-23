@@ -30,6 +30,9 @@ export type FeeConfigRow = {
   sstPercent: string;
   freePeriodStart: string | null;
   freePeriodEnd: string | null;
+  firstChargeMonth: string | null;
+  firstChargeBaseAmount: string | null;
+  paxDeductionPerPerson: string | null;
   isActive: boolean;
   effectiveFrom: string | null;
   effectiveTo: string | null;
@@ -47,6 +50,7 @@ export type FeeConfigListEnvelope = {
 export type FeeConfigFilters = {
   ownerPartyId?: string;
   propertyId?: string;
+  apartmentId?: string;
   feeType?: FeeType;
   /** "true" | "false" — the API parses these enum strings; "" / undefined = all. */
   isActive?: string;
@@ -65,6 +69,9 @@ export type CreateFeeConfigBody = {
   sstPercent?: string;
   freePeriodStart?: string | null;
   freePeriodEnd?: string | null;
+  firstChargeMonth?: string | null;
+  firstChargeBaseAmount?: string | null;
+  paxDeductionPerPerson?: string | null;
 };
 
 /** Body for PATCH /owner-billing/fee-configs/:id. expectedUpdatedAt = optimistic-concurrency token. */
@@ -96,7 +103,10 @@ function toQueryString(sanitized: Record<string, string>): string {
 
 // ─── Hooks ───────────────────────────────────────────────────────────────────
 
-export function useFeeConfigs(filters: FeeConfigFilters = {}) {
+export function useFeeConfigs(
+  filters: FeeConfigFilters = {},
+  options: { enabled?: boolean } = {},
+) {
   const sanitized = sanitizeFilters(filters);
   return useQuery({
     queryKey: [...OWNER_FEE_CONFIGS_KEY, sanitized],
@@ -105,6 +115,7 @@ export function useFeeConfigs(filters: FeeConfigFilters = {}) {
         `/owner-billing/fee-configs${toQueryString(sanitized)}`,
       ),
     placeholderData: (prev) => prev,
+    enabled: options.enabled ?? true,
   });
 }
 
@@ -306,6 +317,7 @@ export type OwnerPayoutApprovalPreflight = {
   statementId: string;
   canFirstCheck: boolean;
   canApprove: boolean;
+  totalPayoutToOwner: string;
   netPayoutToOwner: string;
   checks: OwnerPayoutSafetyCheck[];
 };

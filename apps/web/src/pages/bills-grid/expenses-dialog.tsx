@@ -37,7 +37,7 @@ import { Callout } from "@/components/ui/callout";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Field, SelectInput, TextInput } from "@/components/form-ui";
 import { Segmented, type SegmentedOption } from "@/components/ui/segmented";
-import { useAuth } from "@/lib/auth";
+import { usePermission } from "@/components/permission-gate";
 import { formatMoney } from "@/components/format";
 import { cn } from "@/lib/utils";
 import { isPhase2FlagEnabled } from "@/lib/feature-flags";
@@ -226,7 +226,7 @@ function validateAmount(raw: string): string | null {
   return null;
 }
 
-function validateRows(rows: EditableRow[]): Record<string, RowError> {
+function validateRows(rows: EditableRow[], validateInternalCosts: boolean): Record<string, RowError> {
   const errors: Record<string, RowError> = {};
   for (const row of rows) {
     if (!row.description.trim()) {
@@ -235,11 +235,11 @@ function validateRows(rows: EditableRow[]): Record<string, RowError> {
     }
     const amountError = validateAmount(row.amount);
     if (amountError) errors[row.key] = { field: "amount", message: amountError };
-    if (row.actualCost.trim()) {
+    if (validateInternalCosts && row.actualCost.trim()) {
       const parsedCost = parseAmountCell(row.actualCost);
       if (!parsedCost.ok) errors[row.key] = { field: "actualCost", message: parsedCost.message };
     }
-    if (row.costPaymentStatus === "paid" && !row.actualCost.trim()) {
+    if (validateInternalCosts && row.costPaymentStatus === "paid" && !row.actualCost.trim()) {
       errors[row.key] = { field: "actualCost", message: "Enter the actual cost (enter 0 if there was no cost)" };
     }
   }
@@ -247,8 +247,11 @@ function validateRows(rows: EditableRow[]): Record<string, RowError> {
 }
 
 export function ExpensesDialog({ apartmentId, periodMonth, bearer, defaultWithSST = false, initialTenancy, tenancyOptions }: ExpensesDialogProps) {
-  const { user } = useAuth();
-  const isManager = user?.role === "manager" || user?.role === "admin";
+  const canViewCosts = usePermission("cost.view");
+  const canCreateCosts = usePermission("cost.create");
+  const canEditCosts = usePermission("cost.edit");
+  const canVoid = usePermission("billing.rebill");
+  const canManageDocuments = usePermission("billing.document_manage");
   const queryClient = useQueryClient();
   const queryKey = ["bills-grid", "expenses", apartmentId, periodMonth, bearer];
 
@@ -371,7 +374,7 @@ export function ExpensesDialog({ apartmentId, periodMonth, bearer, defaultWithSS
           )}
         </div>
 
-        {activeItems.length > 0 && (
+        {canViewCosts && activeItems.length > 0 && (
           <div className="mt-3 grid grid-cols-3 gap-2 border-t border-border/50 pt-3 text-xs">
             <div><span className="block text-muted-foreground">Direct costs</span><strong className="text-sm tabular-nums">{formatMoney(recordedCost)}</strong></div>
             <div><span className="block text-muted-foreground">Gross Margin</span><strong className="text-sm tabular-nums">{formatMoney(recordedMargin)}</strong></div>
@@ -396,7 +399,7 @@ export function ExpensesDialog({ apartmentId, periodMonth, bearer, defaultWithSS
         )}
       </GlowCard>
 
-      <ExpenseViewDialog open={viewOpen} onClose={() => setViewOpen(false)} items={items} />
+      <ExpenseViewDialog open={viewOpen} onClose={() => setViewOpen(false)} items={items} canViewCosts={canViewCosts} />
 
       {/* The editable form renders directly. The sheet that hosts this widget
           IS the drawer, so gating the form behind a button + a nested
@@ -422,7 +425,11 @@ export function ExpensesDialog({ apartmentId, periodMonth, bearer, defaultWithSS
           items={items}
           initialTenancy={initialTenancy}
           tenancyOptions={tenancyOptions}
-          isManager={isManager}
+          canViewCosts={canViewCosts}
+          canCreateCosts={canCreateCosts}
+          canEditCosts={canEditCosts}
+          canVoid={canVoid}
+          canManageDocuments={canManageDocuments}
           categoryPickerOn={flagOn}
           categories={activeCategories}
           natureRoutingOn={natureRoutingOn}
@@ -440,10 +447,12 @@ function ExpenseViewDialog({
   open,
   onClose,
   items,
+  canViewCosts,
 }: {
   open: boolean;
   onClose: () => void;
   items: ExpenseListItem[];
+  canViewCosts: boolean;
 }) {
   return (
     <Dialog open={open} onOpenChange={(o) => !o && onClose()}>
@@ -465,11 +474,13 @@ function ExpenseViewDialog({
               >
                 <div>
                   <p className="text-sm text-foreground">{item.description}</p>
-                  <p className="text-xs text-muted-foreground">
-                    {item.actualCost == null
-                      ? "Cost pending"
-                      : `Cost ${formatMoney(Number(item.actualCost))} · Margin ${formatMoney(Number(item.amount) - Number(item.actualCost))}`}
-                  </p>
+                  {canViewCosts && (
+                    <p className="text-xs text-muted-foreground">
+                      {item.actualCost == null
+                        ? "Cost pending"
+                        : `Cost ${formatMoney(Number(item.actualCost))} · Margin ${formatMoney(Number(item.amount) - Number(item.actualCost))}`}
+                    </p>
+                  )}
                   {item.status !== "active" && <p className="text-xs text-rose-500">Void</p>}
                 </div>
                 <p className="text-sm tabular-nums text-foreground">
@@ -549,7 +560,11 @@ function ExpenseEditForm({
   items,
   initialTenancy,
   tenancyOptions,
-  isManager,
+  canViewCosts,
+  canCreateCosts,
+  canEditCosts,
+  canVoid,
+  canManageDocuments,
   categoryPickerOn,
   categories,
   natureRoutingOn,
@@ -563,7 +578,11 @@ function ExpenseEditForm({
   items: ExpenseListItem[];
   initialTenancy?: { tenancyId: string; partyName: string };
   tenancyOptions?: ExpensesDialogTenancyOption[];
-  isManager: boolean;
+  canViewCosts: boolean;
+  canCreateCosts: boolean;
+  canEditCosts: boolean;
+  canVoid: boolean;
+  canManageDocuments: boolean;
   /** T3: ENABLE_PHASE2_BILLING_DOCS flag — when false the picker is absent (no behavior change vs pre-T3). */
   categoryPickerOn: boolean;
   /** T3: active ChargeCategory list for the picker's options (already filtered to active — see ExpensesDialog). */
@@ -636,13 +655,13 @@ function ExpenseEditForm({
         // comparison like-for-like). Gated on natureRoutingOn so a flag-OFF save NEVER sends
         // `nature`, even if local state happens to differ from server truth.
         const natureChanged = natureRoutingOn && (original.nature === "profit" ? "profit" : DEFAULT_NATURE) !== r.nature;
-        const costChanged =
+        const costChanged = canEditCosts && (
           (original.actualCost ?? null) !== normalizedActualCost ||
           (original.costVendor ?? "") !== r.costVendor.trim() ||
           (original.costPaymentStatus ?? "unpaid") !== r.costPaymentStatus ||
           (original.costPaymentDate?.slice(0, 10) ?? "") !== r.costPaymentDate ||
           (original.costPaymentAccount ?? "") !== r.costPaymentAccount.trim() ||
-          (original.costNotes ?? "") !== r.costNotes.trim();
+          (original.costNotes ?? "") !== r.costNotes.trim());
         if (locked && costChanged) {
           // Payments freeze what the customer was charged, not the internal
           // supplier-cost bookkeeping. Send a cost-only patch so the server can
@@ -718,12 +737,12 @@ function ExpenseEditForm({
             // entirely (byte-identical wire to pre-B2), even though `r.nature`
             // always holds a concrete local value.
             ...(natureRoutingOn ? { nature: r.nature } : {}),
-            ...(r.actualCost.trim() ? { actualCost: Number(r.actualCost).toFixed(2) } : {}),
-            ...(r.costVendor.trim() ? { costVendor: r.costVendor.trim() } : {}),
-            ...(r.costPaymentStatus !== "unpaid" ? { costPaymentStatus: r.costPaymentStatus } : {}),
-            ...(r.costPaymentDate ? { costPaymentDate: r.costPaymentDate } : {}),
-            ...(r.costPaymentAccount.trim() ? { costPaymentAccount: r.costPaymentAccount.trim() } : {}),
-            ...(r.costNotes.trim() ? { costNotes: r.costNotes.trim() } : {}),
+            ...(canCreateCosts && r.actualCost.trim() ? { actualCost: Number(r.actualCost).toFixed(2) } : {}),
+            ...(canCreateCosts && r.costVendor.trim() ? { costVendor: r.costVendor.trim() } : {}),
+            ...(canCreateCosts && r.costPaymentStatus !== "unpaid" ? { costPaymentStatus: r.costPaymentStatus } : {}),
+            ...(canCreateCosts && r.costPaymentDate ? { costPaymentDate: r.costPaymentDate } : {}),
+            ...(canCreateCosts && r.costPaymentAccount.trim() ? { costPaymentAccount: r.costPaymentAccount.trim() } : {}),
+            ...(canCreateCosts && r.costNotes.trim() ? { costNotes: r.costNotes.trim() } : {}),
           })),
         });
       }
@@ -813,12 +832,12 @@ function ExpenseEditForm({
             withSST: row.withSST,
             ...(row.chargeCategoryId ? { chargeCategoryId: row.chargeCategoryId } : {}),
             ...(natureRoutingOn ? { nature: row.nature } : {}),
-            ...(row.actualCost.trim() ? { actualCost: Number(row.actualCost).toFixed(2) } : {}),
-            ...(row.costVendor.trim() ? { costVendor: row.costVendor.trim() } : {}),
-            ...(row.costPaymentStatus !== "unpaid" ? { costPaymentStatus: row.costPaymentStatus } : {}),
-            ...(row.costPaymentDate ? { costPaymentDate: row.costPaymentDate } : {}),
-            ...(row.costPaymentAccount.trim() ? { costPaymentAccount: row.costPaymentAccount.trim() } : {}),
-            ...(row.costNotes.trim() ? { costNotes: row.costNotes.trim() } : {}),
+            ...(canCreateCosts && row.actualCost.trim() ? { actualCost: Number(row.actualCost).toFixed(2) } : {}),
+            ...(canCreateCosts && row.costVendor.trim() ? { costVendor: row.costVendor.trim() } : {}),
+            ...(canCreateCosts && row.costPaymentStatus !== "unpaid" ? { costPaymentStatus: row.costPaymentStatus } : {}),
+            ...(canCreateCosts && row.costPaymentDate ? { costPaymentDate: row.costPaymentDate } : {}),
+            ...(canCreateCosts && row.costPaymentAccount.trim() ? { costPaymentAccount: row.costPaymentAccount.trim() } : {}),
+            ...(canCreateCosts && row.costNotes.trim() ? { costNotes: row.costNotes.trim() } : {}),
           },
         ],
       });
@@ -863,7 +882,7 @@ function ExpenseEditForm({
     // All-or-nothing (brief): ONE bad line (empty description or an invalid
     // amount) blocks the WHOLE save and highlights the offending line — no
     // partial persist, createExpenses/updateExpense must not fire.
-    const errors = validateRows(rows);
+    const errors = validateRows(rows, canCreateCosts || canEditCosts);
     const missingTenancy = bearer === "tenant" && !tenancy && rows.some((r) => r.id === null);
     if (Object.keys(errors).length > 0 || missingTenancy) {
       setRowErrors(errors);
@@ -903,6 +922,7 @@ function ExpenseEditForm({
 
   const renderRowCard = (row: EditableRow, index: number) => {
     const rowError = rowErrors[row.key];
+    const canManageThisCost = row.id ? canEditCosts : canCreateCosts;
     // Per-line lock (expense-lock.ts). The server freezes an expense line once money has
     // arrived for its month; until now this dialog rendered live inputs over exactly that
     // money, so an edit looked accepted and then failed on Save with `409 ENTRY_LOCKED`.
@@ -931,7 +951,7 @@ function ExpenseEditForm({
                         {lockLabel}
                       </span>
                     )}
-                    {row.id && isManager && !locked && (
+                    {row.id && canVoid && !locked && (
                       <Button
                         type="button"
                         variant="ghost"
@@ -1067,7 +1087,7 @@ function ExpenseEditForm({
                   </label>
                 </div>
 
-                <div className="rounded-lg border border-amber-300/70 bg-amber-50/50 p-3">
+                {canViewCosts && <div className="rounded-lg border border-amber-300/70 bg-amber-50/50 p-3">
                   <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
                     <p className="text-sm font-bold text-[var(--navy-text)]">Internal cost tracking</p>
                     {row.actualCost.trim() && row.costPaymentStatus === "paid" ? (
@@ -1082,27 +1102,27 @@ function ExpenseEditForm({
                   </div>
                   <div className="grid grid-cols-1 gap-3 md:grid-cols-3">
                     <Field label="Actual cost (RM)" error={rowError?.field === "actualCost" ? rowError.message : null}>
-                      <TextInput type="text" inputMode="decimal" aria-label={`Line ${index + 1} actual cost`} value={row.actualCost} onChange={(e) => updateRow(row.key, { actualCost: e.target.value })} placeholder="Enter 0 if there was no cost" />
+                      <TextInput disabled={!canManageThisCost} type="text" inputMode="decimal" aria-label={`Line ${index + 1} actual cost`} value={row.actualCost} onChange={(e) => updateRow(row.key, { actualCost: e.target.value })} placeholder="Enter 0 if there was no cost" />
                     </Field>
                     <Field label="Vendor / Paid to">
-                      <TextInput aria-label={`Line ${index + 1} cost vendor`} value={row.costVendor} onChange={(e) => updateRow(row.key, { costVendor: e.target.value })} placeholder="Supplier or payee" />
+                      <TextInput disabled={!canManageThisCost} aria-label={`Line ${index + 1} cost vendor`} value={row.costVendor} onChange={(e) => updateRow(row.key, { costVendor: e.target.value })} placeholder="Supplier or payee" />
                     </Field>
                     <Field label="Cost payment status" error={rowError?.field === "costPaymentStatus" ? rowError.message : null}>
-                      <SelectInput aria-label={`Line ${index + 1} cost payment status`} value={row.costPaymentStatus} onChange={(e) => updateRow(row.key, { costPaymentStatus: e.target.value as EditableRow["costPaymentStatus"] })}>
+                      <SelectInput disabled={!canManageThisCost} aria-label={`Line ${index + 1} cost payment status`} value={row.costPaymentStatus} onChange={(e) => updateRow(row.key, { costPaymentStatus: e.target.value as EditableRow["costPaymentStatus"] })}>
                         <option value="unpaid">Unpaid</option><option value="partial">Partially Paid</option><option value="paid">Paid</option>
                       </SelectInput>
                     </Field>
                     <Field label="Payment date">
-                      <TextInput type="date" aria-label={`Line ${index + 1} cost payment date`} value={row.costPaymentDate} onChange={(e) => updateRow(row.key, { costPaymentDate: e.target.value })} />
+                      <TextInput disabled={!canManageThisCost} type="date" aria-label={`Line ${index + 1} cost payment date`} value={row.costPaymentDate} onChange={(e) => updateRow(row.key, { costPaymentDate: e.target.value })} />
                     </Field>
                     <Field label="Payment account">
-                      <TextInput aria-label={`Line ${index + 1} cost payment account`} value={row.costPaymentAccount} onChange={(e) => updateRow(row.key, { costPaymentAccount: e.target.value })} placeholder="e.g. Maybank" />
+                      <TextInput disabled={!canManageThisCost} aria-label={`Line ${index + 1} cost payment account`} value={row.costPaymentAccount} onChange={(e) => updateRow(row.key, { costPaymentAccount: e.target.value })} placeholder="e.g. Maybank" />
                     </Field>
                     <Field label="Cost remarks">
-                      <TextInput aria-label={`Line ${index + 1} cost remarks`} value={row.costNotes} onChange={(e) => updateRow(row.key, { costNotes: e.target.value })} placeholder="Payment/reference notes" />
+                      <TextInput disabled={!canManageThisCost} aria-label={`Line ${index + 1} cost remarks`} value={row.costNotes} onChange={(e) => updateRow(row.key, { costNotes: e.target.value })} placeholder="Payment/reference notes" />
                     </Field>
                   </div>
-                </div>
+                </div>}
 
                 {/* Per-line attachments (T1, spec R5–R8). canUpload is the A1
                     precondition (a valid line + a tenant for a tenant-bearer
@@ -1118,7 +1138,7 @@ function ExpenseEditForm({
                     the receipt photo for a line that has already been paid is exactly when
                     an admin needs to. Withholding it here would over-lock past the server
                     and cost an upload the API would have accepted. */}
-                <LineAttachments
+                {canManageDocuments && <LineAttachments
                   expenseId={row.id}
                   apartmentId={apartmentId}
                   canUpload={
@@ -1133,9 +1153,9 @@ function ExpenseEditForm({
                         ? "Select a tenant first"
                         : null
                   }
-                  isManager={isManager}
+                  isManager
                   onEnsurePersisted={() => ensureRowPersisted(row)}
-                />
+                />}
               </div>
     );
   };

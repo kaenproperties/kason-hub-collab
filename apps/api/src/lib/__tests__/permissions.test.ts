@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { hasPermission } from "../permissions";
+import { canManageRole, hasPermission } from "../permissions";
 
 describe("Tenant Management business permissions", () => {
   it("lets Operations Admin read and categorise bank transactions", () => {
@@ -84,5 +84,26 @@ describe("Tenant Management business permissions", () => {
 
   it("never removes Super Admin control through an override", () => {
     expect(hasPermission("admin", "roles.manage", { "roles.manage": false })).toBe(true);
+  });
+
+  it("enforces the staff hierarchy with Manager and Finance at the same tier", () => {
+    expect(canManageRole("admin", "director")).toBe(true);
+    expect(canManageRole("director", "manager")).toBe(true);
+    expect(canManageRole("director", "accountant")).toBe(true);
+    expect(canManageRole("manager", "editor")).toBe(true);
+    expect(canManageRole("accountant", "editor")).toBe(true);
+    expect(canManageRole("editor", "viewer")).toBe(true);
+
+    expect(canManageRole("manager", "accountant")).toBe(false);
+    expect(canManageRole("accountant", "manager")).toBe(false);
+    expect(canManageRole("director", "director")).toBe(false);
+    expect(canManageRole("viewer", "viewer")).toBe(false);
+    expect(canManageRole("viewer", "editor")).toBe(false);
+  });
+
+  it("does not let a custom override grant final approval below Director", () => {
+    expect(hasPermission("manager", "owner_report.final_approve", { "owner_report.final_approve": true })).toBe(false);
+    expect(hasPermission("accountant", "owner_report.final_approve", { "owner_report.final_approve": true })).toBe(false);
+    expect(hasPermission("editor", "owner_report.final_approve", { "owner_report.final_approve": true })).toBe(false);
   });
 });

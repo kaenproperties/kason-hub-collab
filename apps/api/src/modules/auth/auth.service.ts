@@ -62,19 +62,38 @@ export async function meService(session: SessionPayload) {
   const db = getDb();
   const user = await db.user.findUnique({
     where: { id: session.userId },
-    select: { mustChangePassword: true },
+    select: {
+      id: true,
+      fullName: true,
+      email: true,
+      role: true,
+      organizationId: true,
+      userType: true,
+      partyId: true,
+      status: true,
+      permissionOverrides: true,
+      mustChangePassword: true,
+    },
   });
+
+  if (!user || user.status !== "active") {
+    return { ok: false as const, status: 401, data: null };
+  }
 
   return {
     ok: true as const,
     status: 200,
     data: {
-      userId: session.userId,
-      orgId: session.orgId,
-      role: session.role,
-      userType: session.userType,
-      partyId: session.partyId,
-      mustChangePassword: user?.mustChangePassword ?? false,
+      userId: user.id,
+      id: user.id,
+      fullName: user.fullName,
+      email: user.email,
+      orgId: user.organizationId,
+      role: user.role,
+      userType: user.userType,
+      partyId: user.partyId,
+      permissions: effectivePermissions(user.role, user.permissionOverrides as PermissionOverrides),
+      mustChangePassword: user.mustChangePassword,
     },
   };
 }

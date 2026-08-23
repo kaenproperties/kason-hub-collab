@@ -62,7 +62,23 @@ export async function previewImport(actor: ReconActor, input: { accountId: strin
   const fingerprints = input.transactions.map(fingerprint);
   const existing = await db.bankReconciliationTransaction.findMany({ where: { organizationId: actor.orgId, accountId: input.accountId, fingerprint: { in: fingerprints } }, select: { fingerprint: true } });
   const duplicateSet = new Set(existing.map((row) => row.fingerprint));
-  const rows = input.transactions.map((line, index) => ({ index, fingerprint: fingerprints[index], duplicate: duplicateSet.has(fingerprints[index]), hasBalance: line.balance != null && Number.isFinite(Number(line.balance)), balanceBreak: false }));
+  // Detect both transactions that already exist in the database and repeated
+  // rows inside the current paste/CSV batch.  Without the second check the
+  // preview could claim every pasted row was new while createMany silently
+  // skipped an in-batch duplicate at import time.
+  const seenFingerprints = new Set(duplicateSet);
+  const rows = input.transactions.map((line, index) => {
+    const rowFingerprint = fingerprints[index];
+    const duplicate = seenFingerprints.has(rowFingerprint);
+    seenFingerprints.add(rowFingerprint);
+    return {
+      index,
+      fingerprint: rowFingerprint,
+      duplicate,
+      hasBalance: line.balance != null && Number.isFinite(Number(line.balance)),
+      balanceBreak: false,
+    };
+  });
   const comparablePairs: Array<{ index: number; ascending: boolean; descending: boolean }> = [];
   for (let index = 1; index < input.transactions.length; index += 1) {
     const previous = input.transactions[index - 1]; const current = input.transactions[index];
@@ -361,10 +377,16 @@ export async function categorizeTransaction(actor: ReconActor, id: string, input
 
 export async function reconciliationSummary(actor: ReconActor) {
   const [unmatched, review, chargeRequired, nonOperationalTransfers] = await Promise.all([
-    db.bankReconciliationTransaction.aggregate({ where: { organizationId: actor.orgId, status: "unmatched" }, _count: true, _sum: { debit: true } }),
-    db.bankReconciliationTransaction.aggregate({ where: { organizationId: actor.orgId, status: "review" }, _count: true, _sum: { debit: true } }),
-    db.bankReconciliationTransaction.aggregate({ where: { organizationId: actor.orgId, chargeRequired: true }, _count: true, _sum: { debit: true } }),
-    db.bankReconciliationTransaction.aggregate({ where: { organizationId: actor.orgId, transactionCategory: "non_operational_transfer" }, _count: true, _sum: { debit: true } }),
+    db.bankReconciliationTransaction.aggregate({ where: { organizationId: actor.orgId, status: "unmatched" }, _count: true, _sum: { debit: true, credit: true } }),
+    db.bankReconciliationTransaction.aggregate({ where: { organizationId: actor.orgId, status: "review" }, _count: true, _sum: { debit: true, credit: true } }),
+    db.bankReconciliationTransaction.aggregate({ where: { organizationId: actor.orgId, chargeRequired: true }, _count: true, _sum: { debit: true, credit: true } }),
+    db.bankReconciliationTransaction.aggregate({ where: { organizationId: actor.orgId, transactionCategory: "non_operational_transfer" }, _count: true, _sum: { debit: true, credit: true } }),
   ]);
-  return { unmatched: { count: unmatched._count, amount: money(unmatched._sum.debit) }, review: { count: review._count, amount: money(review._sum.debit) }, chargeRequired: { count: chargeRequired._count, amount: money(chargeRequired._sum.debit) }, nonOperationalTransfers: { count: nonOperationalTransfers._count, amount: money(nonOperationalTransfers._sum.debit) } };
+  const movementTotal = (summary: { _sum: { debit: unknown; credit: unknown } }) => money(Number(summary._sum.debit ?? 0) + Number(summary._sum.credit ?? 0));
+  return {
+    unmatched: { count: unmatched._count, amount: movementTotal(unmatched) },
+    review: { count: review._count, amount: movementTotal(review) },
+    chargeRequired: { count: chargeRequired._count, amount: movementTotal(chargeRequired) },
+    nonOperationalTransfers: { count: nonOperationalTransfers._count, amount: movementTotal(nonOperationalTransfers) },
+  };
 }

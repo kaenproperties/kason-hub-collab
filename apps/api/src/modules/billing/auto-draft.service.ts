@@ -25,6 +25,78 @@ import { creditPostedChargeTx } from "../billing-documents/credit-notes.service"
 import { isPhase2FlagEnabled } from "../../lib/feature-flags";
 import { syncOwnerLedgerForCharges } from "../owner-ledger/owner-ledger.sync-hook";
 
+type AgreementFeeInvoiceCharge = {
+  id: string;
+  chargeNumber: string;
+  chargeType: string;
+  status: string;
+  parentChargeId: string | null;
+  sstRate: { toString(): string } | null;
+};
+
+const isAgreementFeeType = (chargeType: string) =>
+  chargeType === "tenancy_agreement_fee" || chargeType === "renewal_fee";
+
+const isAgreementTaxChild = (charge: Pick<AgreementFeeInvoiceCharge, "chargeType" | "chargeNumber" | "parentChargeId">) =>
+  isAgreementFeeType(charge.chargeType)
+  && charge.parentChargeId !== null
+  && charge.chargeNumber.endsWith("-SST");
+
+class AgreementFeePairInvariantError extends Error {
+  readonly code = "TA_TAX_PAIR_INVARIANT";
+}
+
+/**
+ * Identify the strong TA/renewal inclusive-SST pairs already attached to one
+ * invoice. Explicit zero-rate single rows are migration-stamped legacy gross
+ * charges and remain supported; null/non-zero rows must have one exact sibling.
+ */
+function agreementFeePairIds(charges: AgreementFeeInvoiceCharge[]): Set<string> {
+  const pairedIds = new Set<string>();
+  for (const parent of charges) {
+    if (!isAgreementFeeType(parent.chargeType) || isAgreementTaxChild(parent)) continue;
+    const children = charges.filter((candidate) =>
+      candidate.parentChargeId === parent.id
+      && candidate.chargeNumber === `${parent.chargeNumber}-SST`
+      && candidate.chargeType === parent.chargeType,
+    );
+    const rate = parent.sstRate === null ? Number.NaN : Number(parent.sstRate.toString());
+    if (children.length === 0 && rate === 0) continue;
+    if (children.length !== 1 || rate !== 8 || Number(children[0]!.sstRate?.toString() ?? "NaN") !== 0) {
+      throw new AgreementFeePairInvariantError(`TA_TAX_PAIR_INVARIANT: ${parent.chargeNumber}`);
+    }
+    pairedIds.add(parent.id);
+    pairedIds.add(children[0]!.id);
+  }
+  for (const charge of charges) {
+    if (isAgreementTaxChild(charge) && !pairedIds.has(charge.id)) {
+      throw new AgreementFeePairInvariantError(`TA_TAX_PAIR_INVARIANT: ${charge.chargeNumber}`);
+    }
+  }
+  return pairedIds;
+}
+
+async function isAgreementFeePairMemberTx(
+  tx: Prisma.TransactionClient,
+  organizationId: string,
+  charge: AgreementFeeInvoiceCharge,
+): Promise<boolean> {
+  if (!isAgreementFeeType(charge.chargeType)) return false;
+  if (isAgreementTaxChild(charge)) return true;
+  const rate = charge.sstRate === null ? Number.NaN : Number(charge.sstRate.toString());
+  if (rate !== 0) return true;
+  const child = await tx.charge.findFirst({
+    where: {
+      organizationId,
+      parentChargeId: charge.id,
+      chargeNumber: `${charge.chargeNumber}-SST`,
+      chargeType: charge.chargeType,
+    },
+    select: { id: true },
+  });
+  return child !== null;
+}
+
 /**
  * Post an approved auto-draft invoice's charges. Approving a draft rent invoice must
  * turn its charges into LIVE receivables — otherwise the invoice reads "approved" while
@@ -49,15 +121,34 @@ async function postApprovedInvoiceChargesTx(
   if (!isPhase2FlagEnabled("ENABLE_PHASE2_BILLING_DOCS")) return [];
   const charges = await tx.charge.findMany({
     where: { organizationId: ctx.orgId, invoiceId, status: { not: "void" } },
-    select: { id: true, status: true },
+    select: {
+      id: true,
+      chargeNumber: true,
+      chargeType: true,
+      status: true,
+      parentChargeId: true,
+      sstRate: true,
+    },
   });
+  const pairedIds = agreementFeePairIds(charges);
+  for (const chargeId of pairedIds) {
+    const member = charges.find((charge) => charge.id === chargeId)!;
+    const partner = charges.find((charge) => charge.id !== chargeId && pairedIds.has(charge.id)
+      && (charge.parentChargeId === member.id || member.parentChargeId === charge.id));
+    if (!partner || (member.status === "draft") !== (partner.status === "draft")) {
+      throw new AgreementFeePairInvariantError(`TA_TAX_PAIR_MIXED_STATUS: ${member.chargeNumber}`);
+    }
+  }
   const draftIds = charges.filter((c) => c.status === "draft").map((c) => c.id);
   if (draftIds.length === 0) return [];
 
-  await tx.charge.updateMany({
+  const updated = await tx.charge.updateMany({
     where: { id: { in: draftIds }, organizationId: ctx.orgId, status: "draft" },
     data: { status: "posted", postedAt: new Date() },
   });
+  if (updated.count !== draftIds.length) {
+    throw new AgreementFeePairInvariantError("TA_TAX_PAIR_POST_CONFLICT");
+  }
   for (const chargeId of draftIds) {
     await tx.chargeEvent.create({
       data: {
@@ -715,23 +806,52 @@ export async function voidInvoiceService(
   reason?: string,
 ): Promise<ServiceResult<{ id: string }>> {
   const db = getDb();
-  const out = await db.$transaction(async (tx) => {
-    const res = await withStaleCheck(() =>
-      tx.invoice.update({
-        where: { id, organizationId: ctx.orgId, status: { in: ["draft", "approved"] }, updatedAt: new Date(expectedUpdatedAt) },
-        data: { status: "void" },
-        select: { id: true },
-      }),
-    );
-    if (res === null) return null;
+  try {
+    const out = await db.$transaction(async (tx) => {
+      const res = await withStaleCheck(() =>
+        tx.invoice.update({
+          where: { id, organizationId: ctx.orgId, status: { in: ["draft", "approved"] }, updatedAt: new Date(expectedUpdatedAt) },
+          data: { status: "void" },
+          select: { id: true },
+        }),
+      );
+      if (res === null) return null;
 
-    const billingDocsOn = isPhase2FlagEnabled("ENABLE_PHASE2_BILLING_DOCS");
-    const charges = await tx.charge.findMany({
-      where: { organizationId: ctx.orgId, invoiceId: id },
-      select: { id: true, chargeType: true },
-    });
-    for (const c of charges) {
-      if (c.chargeType === "rent") {
+      const billingDocsOn = isPhase2FlagEnabled("ENABLE_PHASE2_BILLING_DOCS");
+      const charges = await tx.charge.findMany({
+        where: { organizationId: ctx.orgId, invoiceId: id },
+        select: {
+          id: true,
+          chargeNumber: true,
+          chargeType: true,
+          status: true,
+          parentChargeId: true,
+          sstRate: true,
+        },
+      });
+      const pairedAgreementFeeIds = agreementFeePairIds(charges);
+      if ([...pairedAgreementFeeIds].some((chargeId) => charges.find((charge) => charge.id === chargeId)?.status !== "draft")) {
+        throw new AgreementFeePairInvariantError("PAIRED_TA_REQUIRES_ACCOUNTING_CORRECTION");
+      }
+      for (const c of charges) {
+        if (pairedAgreementFeeIds.has(c.id)) {
+          // A draft inclusive-SST fee has no issued document yet. Void both
+          // receivable legs together; never detach one and orphan the pair.
+          await tx.charge.update({
+            where: { id: c.id, organizationId: ctx.orgId, status: "draft" },
+            data: { status: "void" },
+          });
+          await tx.chargeEvent.create({
+            data: {
+              organizationId: ctx.orgId,
+              chargeId: c.id,
+              eventType: "void",
+              eventAt: new Date(),
+              actorUserId: ctx.actorUserId,
+              payloadJson: { invoiceId: id, reason: reason ?? null },
+            },
+          });
+        } else if (c.chargeType === "rent") {
         // M5-synthesized rent line has no life outside this invoice → reverse it.
         // Flag ON: creditPostedChargeTx handles BOTH states — a posted+documented
         // charge (approved) is credited (CN issued, original offset, outstanding 0);
@@ -749,23 +869,29 @@ export async function voidInvoiceService(
             data: { organizationId: ctx.orgId, chargeId: c.id, eventType: "void", eventAt: new Date(), actorUserId: ctx.actorUserId, payloadJson: { invoiceId: id, reason: reason ?? null } },
           });
         }
-      } else {
+        } else {
         // Externally-sourced charge (electricity/utility/owner line) → detach, keep the row.
         await detachChargeTx(tx, ctx.orgId, c.id);
         await tx.chargeEvent.create({
           data: { organizationId: ctx.orgId, chargeId: c.id, eventType: "draft.unlinked", eventAt: new Date(), actorUserId: ctx.actorUserId, payloadJson: { invoiceId: id, reason: "invoice voided" } },
         });
+        }
       }
-    }
-    await recordAudit(tx, {
-      organizationId: ctx.orgId, actorUserId: ctx.actorUserId, actorRole: ctx.actorRole,
-      action: "billing.invoice.voided", entityType: "Invoice", entityId: id,
-      meta: { reason: reason ?? null }, ip: ctx.ip, userAgent: ctx.userAgent,
+      await recordAudit(tx, {
+        organizationId: ctx.orgId, actorUserId: ctx.actorUserId, actorRole: ctx.actorRole,
+        action: "billing.invoice.voided", entityType: "Invoice", entityId: id,
+        meta: { reason: reason ?? null }, ip: ctx.ip, userAgent: ctx.userAgent,
+      });
+      return res;
     });
-    return res;
-  });
-  if (out === null) return { ok: false, status: 409, error: "Invoice not voidable from its current state or changed since loaded" };
-  return { ok: true, status: 200, data: { id } };
+    if (out === null) return { ok: false, status: 409, error: "Invoice not voidable from its current state or changed since loaded" };
+    return { ok: true, status: 200, data: { id } };
+  } catch (error) {
+    if (error instanceof AgreementFeePairInvariantError) {
+      return { ok: false, status: 409, error: error.message };
+    }
+    throw error;
+  }
 }
 
 /** Edit ONLY the date fields (invoiceDate/dueDate) of a DRAFT invoice — never amounts. */
@@ -821,11 +947,23 @@ export async function editDraftChargeAmountService(
     }
     const charge = await tx.charge.findFirst({
       where: { id: chargeId, organizationId: ctx.orgId },
-      select: { id: true, invoiceId: true, status: true, amount: true },
+      select: {
+        id: true,
+        invoiceId: true,
+        status: true,
+        amount: true,
+        chargeNumber: true,
+        chargeType: true,
+        parentChargeId: true,
+        sstRate: true,
+      },
     });
     if (!charge) return { kind: "charge_missing" as const };
     if (charge.invoiceId !== invoiceId) return { kind: "not_attached" as const };
     if (charge.status !== "draft") return { kind: "charge_live" as const };
+    if (await isAgreementFeePairMemberTx(tx, ctx.orgId, charge)) {
+      return { kind: "paired_agreement_fee" as const };
+    }
     const before = charge.amount.toString();
     await tx.charge.update({
       where: { id: chargeId, organizationId: ctx.orgId },
@@ -855,6 +993,7 @@ export async function editDraftChargeAmountService(
     case "stale": return { ok: false, status: 409, error: "Invoice changed since loaded. Refresh and try again." };
     case "not_attached": return { ok: false, status: 409, error: "Charge is not attached to this invoice" };
     case "charge_live": return { ok: false, status: 409, error: "Only draft charges can be edited" };
+    case "paired_agreement_fee": return { ok: false, status: 409, error: "PAIRED_TA_EDIT_FROM_TENANCY" };
     default: return { ok: true, status: 200, data: { id: invoiceId, chargeId, totalAmount: out.totalAmount } };
   }
 }
@@ -871,9 +1010,23 @@ export async function attachChargeService(
     if (!inv) return { kind: "missing" as const };
     if (inv.status !== "draft") return { kind: "not_draft" as const };
 
-    const charge = await tx.charge.findFirst({ where: { id: chargeId, organizationId: ctx.orgId }, select: { id: true, invoiceId: true } });
+    const charge = await tx.charge.findFirst({
+      where: { id: chargeId, organizationId: ctx.orgId },
+      select: {
+        id: true,
+        invoiceId: true,
+        status: true,
+        chargeNumber: true,
+        chargeType: true,
+        parentChargeId: true,
+        sstRate: true,
+      },
+    });
     if (!charge) return { kind: "charge_missing" as const };
     if (charge.invoiceId !== null) return { kind: "already_attached" as const };
+    if (await isAgreementFeePairMemberTx(tx, ctx.orgId, charge)) {
+      return { kind: "paired_agreement_fee" as const };
+    }
 
     await attachChargeTx(tx, ctx.orgId, chargeId, invoiceId);
     await recomputeInvoiceTotalTx(tx, ctx.orgId, invoiceId);
@@ -893,6 +1046,7 @@ export async function attachChargeService(
     case "charge_missing": return { ok: false, status: 404, error: "Charge not found" };
     case "not_draft": return { ok: false, status: 409, error: "Invoice is not a draft" };
     case "already_attached": return { ok: false, status: 409, error: "Charge already attached to an invoice" };
+    case "paired_agreement_fee": return { ok: false, status: 409, error: "PAIRED_TA_ATTACH_FROM_TENANCY" };
     default: return { ok: true, status: 200, data: { id: invoiceId } };
   }
 }
@@ -914,9 +1068,23 @@ export async function detachChargeService(
     if (!inv) return { kind: "missing" as const };
     if (inv.status !== "draft") return { kind: "not_draft" as const };
 
-    const charge = await tx.charge.findFirst({ where: { id: chargeId, organizationId: ctx.orgId }, select: { id: true, invoiceId: true } });
+    const charge = await tx.charge.findFirst({
+      where: { id: chargeId, organizationId: ctx.orgId },
+      select: {
+        id: true,
+        invoiceId: true,
+        status: true,
+        chargeNumber: true,
+        chargeType: true,
+        parentChargeId: true,
+        sstRate: true,
+      },
+    });
     if (!charge) return { kind: "charge_missing" as const };
     if (charge.invoiceId !== invoiceId) return { kind: "not_attached" as const };
+    if (await isAgreementFeePairMemberTx(tx, ctx.orgId, charge)) {
+      return { kind: "paired_agreement_fee" as const };
+    }
 
     await detachChargeTx(tx, ctx.orgId, chargeId);
     await recomputeInvoiceTotalTx(tx, ctx.orgId, invoiceId);
@@ -936,6 +1104,7 @@ export async function detachChargeService(
     case "charge_missing": return { ok: false, status: 404, error: "Charge not found" };
     case "not_draft": return { ok: false, status: 409, error: "Invoice is not a draft" };
     case "not_attached": return { ok: false, status: 409, error: "Charge is not attached to this invoice" };
+    case "paired_agreement_fee": return { ok: false, status: 409, error: "PAIRED_TA_DETACH_FROM_TENANCY" };
     default: return { ok: true, status: 200, data: { id: invoiceId } };
   }
 }

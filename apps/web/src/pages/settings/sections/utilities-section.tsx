@@ -14,7 +14,7 @@ import { Button } from "@/components/ui/button";
 import { Callout } from "@/components/ui/callout";
 import { Field, TextInput } from "@/components/form-ui";
 import { apiFetch, ApiError } from "@/lib/api-client";
-import { useAuth } from "@/lib/auth";
+import { usePermission } from "@/components/permission-gate";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -42,8 +42,7 @@ function patchConfig(fields: UtilityBillingConfig): Promise<UtilityBillingConfig
 // ─── Main component ───────────────────────────────────────────────────────────
 
 export default function UtilitiesSection() {
-  const { user } = useAuth();
-  const canWrite = user?.role === "admin";
+  const canWrite = usePermission("settings.manage");
   const qc = useQueryClient();
 
   // Config query — treat 404 as "no config yet" (show empty form for admin)

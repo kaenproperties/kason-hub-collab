@@ -105,7 +105,7 @@ export function CreatePropertyDialog({
               />
             </label>
             <label className="block">
-              <span className="text-xs text-muted-foreground">Property code *</span>
+              <span className="text-xs text-muted-foreground">Property Short Form *</span>
               <Input
                 value={form.propertyCode}
                 onChange={(e) =>

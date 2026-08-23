@@ -1,7 +1,11 @@
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
-import { computeManagementFee, type FeeType } from "@kason/shared";
+import {
+  computeManagementFee,
+  type FeeType,
+  type FirstMonthPreview,
+} from "@kason/shared";
 import { apiFetch, ApiError } from "@/lib/api-client";
 import {
   createUnitsBatch,
@@ -52,8 +56,9 @@ type CreateManagementFeeState = {
   feeValue: string;
   capAmount: string;
   sstPercent: string;
-  freePeriodStart: string;
-  freePeriodEnd: string;
+  freeMonths: string;
+  firstChargeMonth: string;
+  firstChargeBaseAmount: string;
 };
 
 const blankManagementFee = (): CreateManagementFeeState => ({
@@ -62,22 +67,41 @@ const blankManagementFee = (): CreateManagementFeeState => ({
   feeValue: "10",
   capAmount: "",
   sstPercent: "8",
-  freePeriodStart: "",
-  freePeriodEnd: "",
+  freeMonths: "0",
+  firstChargeMonth: "",
+  firstChargeBaseAmount: "",
 });
 
-function dateInputToIso(value: string): string | null {
-  return value ? `${value}T00:00:00.000Z` : null;
+function currentMonthKey(): string {
+  const now = new Date();
+  return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}`;
 }
 
-function sixMonthFreePeriod(moveInDate: string): { start: string; end: string } | null {
-  if (!/^\d{4}-\d{2}-\d{2}$/.test(moveInDate)) return null;
-  const [year, month, day] = moveInDate.split("-").map(Number);
-  const start = new Date(Date.UTC(year!, month! - 1, day));
-  const afterSixMonths = new Date(Date.UTC(year!, month! - 1 + 6, day));
-  afterSixMonths.setUTCDate(afterSixMonths.getUTCDate() - 1);
-  const toInput = (date: Date) => date.toISOString().slice(0, 10);
-  return { start: toInput(start), end: toInput(afterSixMonths) };
+function scheduleStartMonth(moveInDate: string): string {
+  return /^\d{4}-\d{2}-\d{2}$/.test(moveInDate)
+    ? moveInDate.slice(0, 7)
+    : currentMonthKey();
+}
+
+function addMonths(monthKey: string, amount: number): string {
+  const [year, month] = monthKey.split("-").map(Number);
+  const date = new Date(Date.UTC(year!, month! - 1 + amount, 1));
+  return `${date.getUTCFullYear()}-${String(date.getUTCMonth() + 1).padStart(2, "0")}`;
+}
+
+function monthStartIso(monthKey: string): string {
+  return `${monthKey}-01T00:00:00.000Z`;
+}
+
+function dayBeforeMonthIso(monthKey: string): string {
+  const [year, month] = monthKey.split("-").map(Number);
+  return new Date(Date.UTC(year!, month! - 1, 0, 23, 59, 59, 999)).toISOString();
+}
+
+function monthLabel(monthKey: string): string {
+  const [year, month] = monthKey.split("-").map(Number);
+  return new Intl.DateTimeFormat("en-MY", { month: "long", year: "numeric", timeZone: "UTC" })
+    .format(new Date(Date.UTC(year!, month! - 1, 1)));
 }
 
 /**
@@ -92,6 +116,7 @@ const SERVER_CODE_TO_FIELD: Record<string, keyof UnitFormErrors> = {
   APARTMENT_OWNER_CONFLICT: "ownerPartyId",
   OCCUPANCY_RENT_REQUIRED: "monthlyRent",
   APARTMENT_BILLING_MODE_CONFLICT: "partitionBillingMode",
+  APARTMENT_TNB_SUBSIDY_CAP_CONFLICT: "tnbSubsidyCapMonthly",
 };
 
 /**
@@ -114,6 +139,7 @@ export function buildPartitionPayload(
   const full = unitFormToApiPayload(form, {
     includeOwner: true,
     includeBillingMode: true,
+    includeTnbSubsidyCap: true,
     includeRent: true,
   });
   const shared: CreateUnitsBatchSharedFields = {
@@ -131,6 +157,7 @@ export function buildPartitionPayload(
     ...(form.partitionBillingMode
       ? { partitionBillingMode: form.partitionBillingMode as "SUBSIDY" | "NO_SUBSIDY" }
       : {}),
+    tnbSubsidyCapMonthly: full.tnbSubsidyCapMonthly,
   };
   // roomDraftToPayload is shared with the Edit dialog's Add-room panel — both
   // POST the same batch endpoint, so the money-carrying mapping lives once.
@@ -242,6 +269,146 @@ export function CreateUnitDialog({
     }
   }, [form.monthlyRent, form.rentalRate, managementFee]);
 
+  // Use the SAME server-side rent-proration formula as the billing poster. The
+  // first management fee must be based on the rent the owner actually earns in
+  // the move-in month, not the full contractual monthly rent. Keeping this as a
+  // query also covers short final dates and month-length/leap-year differences
+  // without duplicating financial arithmetic in the browser.
+  const managementFeeRent = form.monthlyRent.trim() || form.rentalRate.trim();
+  const firstRentPreviewQuery = useQuery({
+    queryKey: [
+      "tenancy",
+      "rent-preview",
+      "management-fee-first-charge",
+      form.moveInDate,
+      form.moveOutDate,
+      managementFeeRent,
+    ],
+    enabled:
+      open &&
+      managementFee.enabled &&
+      /^\d{4}-\d{2}-\d{2}$/.test(form.moveInDate) &&
+      Number.isFinite(Number(managementFeeRent)) &&
+      Number(managementFeeRent) > 0,
+    staleTime: 30_000,
+    queryFn: () => {
+      const qs = new URLSearchParams({
+        monthlyRent: managementFeeRent,
+        startDate: form.moveInDate,
+      });
+      if (form.moveOutDate) qs.set("endDate", form.moveOutDate);
+      return apiFetch<{ data: FirstMonthPreview }>(
+        `/tenancy/tenancies/rent-preview?${qs.toString()}`,
+      );
+    },
+  });
+
+  const firstMonthManagementFeePreview = useMemo(() => {
+    const proratedRent = firstRentPreviewQuery.data?.data?.amount;
+    if (
+      !managementFee.enabled ||
+      !Number.isFinite(proratedRent) ||
+      Number(proratedRent) < 0 ||
+      !managementFee.feeValue ||
+      !managementFee.sstPercent
+    ) return null;
+    try {
+      return computeManagementFee(
+        {
+          feeType: managementFee.feeType,
+          feeValue: managementFee.feeValue,
+          capAmount:
+            managementFee.feeType === "cap" ? managementFee.capAmount : null,
+          sstPercent: managementFee.sstPercent,
+        },
+        String(proratedRent),
+      );
+    } catch {
+      return null;
+    }
+  }, [firstRentPreviewQuery.data, managementFee]);
+
+  const managementFeeSchedule = useMemo(() => {
+    const startMonth = scheduleStartMonth(form.moveInDate);
+    const freeMonths = Math.max(0, Math.floor(Number(managementFee.freeMonths) || 0));
+    const automaticFirstChargeMonth = addMonths(startMonth, freeMonths);
+    const firstChargeMonth = managementFee.firstChargeMonth || automaticFirstChargeMonth;
+    const firstChargeBase = managementFee.firstChargeBaseAmount.trim();
+    const overrideBase = /^\d+(\.\d{1,2})?$/.test(firstChargeBase)
+      ? Number(firstChargeBase)
+      : null;
+    const sstRate = Number(managementFee.sstPercent || 8) / 100;
+    const firstChargeUsesMoveInRent =
+      freeMonths === 0 && firstChargeMonth === startMonth;
+    const automaticFirstChargeBase = Number(
+      (firstChargeUsesMoveInRent
+        ? firstMonthManagementFeePreview?.base
+        : managementFeePreview?.base) ??
+      managementFeePreview?.base ??
+      0,
+    );
+
+    return {
+      startMonth,
+      automaticFirstChargeMonth,
+      firstChargeMonth,
+      automaticFirstChargeBase: automaticFirstChargeBase.toFixed(2),
+      firstChargeUsesProratedRent:
+        firstChargeUsesMoveInRent && firstRentPreviewQuery.data?.data?.isProrated === true,
+      rows: Array.from({ length: 12 }, (_, index) => {
+        const month = addMonths(startMonth, index);
+        const isFree = month < firstChargeMonth;
+        const useOverride = month === firstChargeMonth && overrideBase != null;
+        const base = isFree ? 0 : useOverride
+          ? overrideBase
+          : month === firstChargeMonth
+            ? automaticFirstChargeBase
+          : Number(managementFeePreview?.base ?? 0);
+        const sst = Math.round(base * sstRate * 100) / 100;
+        return {
+          month,
+          status: isFree ? "Free" : month === firstChargeMonth ? "First charge" : "Recurring",
+          base: base.toFixed(2),
+          sst: sst.toFixed(2),
+          total: (base + sst).toFixed(2),
+        };
+      }),
+    };
+  }, [
+    firstMonthManagementFeePreview,
+    firstRentPreviewQuery.data,
+    form.moveInDate,
+    managementFee,
+    managementFeePreview,
+  ]);
+
+  function managementFeePayload() {
+    if (!managementFee.enabled || !form.ownerPartyId || matchedApartment) return undefined;
+    const freeMonths = Math.max(0, Math.floor(Number(managementFee.freeMonths) || 0));
+    const firstChargeMonth = managementFeeSchedule.firstChargeMonth;
+    return {
+      feeType: managementFee.feeType,
+      feeValue: managementFee.feeValue,
+      capAmount: managementFee.feeType === "cap" ? managementFee.capAmount : null,
+      // Management fee is always taxable at 8% SST.
+      sstPercent: "8" as const,
+      freePeriodStart: freeMonths > 0 ? monthStartIso(managementFeeSchedule.startMonth) : null,
+      freePeriodEnd: freeMonths > 0 ? dayBeforeMonthIso(firstChargeMonth) : null,
+      firstChargeMonth: monthStartIso(firstChargeMonth),
+      // Persist the visible auto-calculated amount as well as a manual
+      // exception. This means the preview, saved config and later billing all
+      // agree on the first charge instead of the input merely looking filled.
+      firstChargeBaseAmount:
+        managementFee.firstChargeBaseAmount.trim() ||
+        managementFeeSchedule.automaticFirstChargeBase ||
+        null,
+      paxDeductionPerPerson:
+        form.hasPaxDeduction && form.paxDeductionAmount.trim()
+          ? form.paxDeductionAmount.trim()
+          : null,
+    };
+  }
+
   // Pre-fill owner + billing model from the matched apartment, once per match,
   // so the admin sees what the new room will inherit and cannot unknowingly
   // submit a conflicting value. Keyed on the apartment id rather than the
@@ -257,6 +424,10 @@ export function CreateUnitDialog({
       ...prev,
       partitionBillingMode:
         matchedApartment.partitionBillingMode ?? prev.partitionBillingMode,
+      tnbSubsidyCapMonthly:
+        matchedApartment.tnbSubsidyCapMonthly == null
+          ? ""
+          : String(matchedApartment.tnbSubsidyCapMonthly),
       ...(matchedApartment.ownerPartyId
         ? {
             ownerPartyId: matchedApartment.ownerPartyId,
@@ -282,31 +453,6 @@ export function CreateUnitDialog({
       prefilledApartmentId.current = null;
     }
     setOpen(next);
-  }
-
-  async function createManagementFeeConfig(apartmentId: string) {
-    if (!managementFee.enabled || !form.ownerPartyId || matchedApartment) return null;
-    try {
-      await apiFetch("/owner-billing/fee-configs", {
-        method: "POST",
-        body: JSON.stringify({
-          ownerPartyId: form.ownerPartyId,
-          propertyId,
-          apartmentId,
-          feeType: managementFee.feeType,
-          feeValue: managementFee.feeValue,
-          capAmount:
-            managementFee.feeType === "cap" ? managementFee.capAmount : null,
-          sstPercent: managementFee.sstPercent,
-          freePeriodStart: dateInputToIso(managementFee.freePeriodStart),
-          freePeriodEnd: dateInputToIso(managementFee.freePeriodEnd),
-        }),
-      });
-      queryClient.invalidateQueries({ queryKey: ["owner-fee-configs"] });
-      return null;
-    } catch (error) {
-      return error instanceof Error ? error.message : "Unknown error";
-    }
   }
 
   async function registerCreatedCarparks(apartmentId: string) {
@@ -344,8 +490,6 @@ export function CreateUnitDialog({
       });
       const setupWarnings: string[] = [];
       if (response.apartmentId) {
-        const feeWarning = await createManagementFeeConfig(response.apartmentId);
-        if (feeWarning) setupWarnings.push(`management fee: ${feeWarning}`);
         const carparkWarning = await registerCreatedCarparks(response.apartmentId);
         if (carparkWarning) setupWarnings.push(`carparks: ${carparkWarning}`);
       }
@@ -402,23 +546,11 @@ export function CreateUnitDialog({
     mutationFn: (body: {
       shared: CreateUnitsBatchSharedFields;
       rooms: CreateUnitsBatchRoom[];
-    }) => createUnitsBatch(body).then(async (data) => ({
-      ...data,
-      feeConfigWarning: data.apartmentId
-        ? await createManagementFeeConfig(data.apartmentId)
-        : null,
-    })),
+    }) => createUnitsBatch(body),
     onSuccess: (data, variables) => {
       queryClient.invalidateQueries({ queryKey: ["inventory"] });
       const n = data.ids.length;
-      if (data.feeConfigWarning) {
-        toast.warning(
-          `${n === 1 ? "Room" : `${n} rooms`} created, but management fee setup failed: ${data.feeConfigWarning}.`,
-          { duration: 9000 },
-        );
-      } else {
-        toast.success(n === 1 ? "Room created." : `${n} rooms created.`);
-      }
+      toast.success(n === 1 ? "Room created." : `${n} rooms created.`);
       if (n > 0) {
         setMediaStep(
           data.ids.map((id, i) => ({
@@ -466,6 +598,18 @@ export function CreateUnitDialog({
       toast.error("Unit code is required.");
       return;
     }
+    if (
+      form.tnbSubsidyCapMonthly.trim() !== "" &&
+      (!/^\d+(\.\d{1,2})?$/.test(form.tnbSubsidyCapMonthly.trim()) ||
+        Number(form.tnbSubsidyCapMonthly) > 9_999_999_999.99)
+    ) {
+      setErrors((prev) => ({
+        ...prev,
+        tnbSubsidyCapMonthly:
+          "Enter a nonnegative RM amount with no more than 2 decimal places.",
+      }));
+      return;
+    }
     if (form.ownerPartyId && !matchedApartment && managementFee.enabled) {
       if (!/^\d+(\.\d{1,2})?$/.test(managementFee.feeValue)) {
         toast.error("Enter a valid management fee value (maximum 2 decimal places).");
@@ -482,16 +626,22 @@ export function CreateUnitDialog({
         toast.error("Enter the management fee cap amount.");
         return;
       }
-      if (Boolean(managementFee.freePeriodStart) !== Boolean(managementFee.freePeriodEnd)) {
-        toast.error("Set both the free-period start and end dates, or leave both blank.");
+      if (!/^\d+$/.test(managementFee.freeMonths) || Number(managementFee.freeMonths) < 0) {
+        toast.error("Free months must be zero or a positive whole number.");
         return;
       }
       if (
-        managementFee.freePeriodStart &&
-        managementFee.freePeriodEnd &&
-        managementFee.freePeriodEnd < managementFee.freePeriodStart
+        managementFee.firstChargeMonth &&
+        managementFee.firstChargeMonth < managementFeeSchedule.automaticFirstChargeMonth
       ) {
-        toast.error("Management fee free-period end cannot be before its start.");
+        toast.error("First charge month cannot be earlier than the selected free period.");
+        return;
+      }
+      if (
+        managementFee.firstChargeBaseAmount &&
+        !/^\d+(\.\d{1,2})?$/.test(managementFee.firstChargeBaseAmount)
+      ) {
+        toast.error("Enter a valid first management fee amount (maximum 2 decimal places). ");
         return;
       }
     }
@@ -618,7 +768,14 @@ export function CreateUnitDialog({
           return;
         }
       }
-      batchMutation.mutate(buildPartitionPayload(form, propertyId, withType));
+      const batchPayload = buildPartitionPayload(form, propertyId, withType);
+      batchMutation.mutate({
+        ...batchPayload,
+        shared: {
+          ...batchPayload.shared,
+          managementFeeConfig: managementFeePayload(),
+        },
+      });
       return;
     }
 
@@ -662,8 +819,10 @@ export function CreateUnitDialog({
       ...unitFormToApiPayload(form, {
         includeOwner: true,
         includeBillingMode: true,
+        includeTnbSubsidyCap: true,
         includeRent: true,
       }),
+      managementFeeConfig: managementFeePayload(),
     };
     mutation.mutate(payload);
   }
@@ -788,55 +947,88 @@ export function CreateUnitDialog({
                       <span>SST (%)</span>
                       <TextInput
                         type="number"
-                        min="0"
-                        step="0.01"
                         value={managementFee.sstPercent}
-                        onChange={(event) =>
-                          setManagementFee((current) => ({ ...current, sstPercent: event.target.value }))
-                        }
+                        readOnly
+                        aria-readonly="true"
+                        className="bg-[#F3F6F9]"
                       />
+                      <span className="block text-xs font-normal text-[#657069]">Management fee is always subject to 8% SST.</span>
                     </label>
                   </div>
 
-                  <div className="grid gap-3 md:grid-cols-[1fr_1fr_auto] md:items-end">
+                  <div className="grid gap-3 md:grid-cols-[1fr_1fr_1fr] md:items-end">
                     <label className="space-y-1 text-sm font-semibold text-[#082B4F]">
-                      <span>Free period start</span>
+                      <span>Free months</span>
                       <TextInput
-                        type="date"
-                        value={managementFee.freePeriodStart}
+                        type="number"
+                        min="0"
+                        step="1"
+                        value={managementFee.freeMonths}
                         onChange={(event) =>
-                          setManagementFee((current) => ({ ...current, freePeriodStart: event.target.value }))
+                          setManagementFee((current) => ({
+                            ...current,
+                            freeMonths: event.target.value,
+                            firstChargeMonth: "",
+                          }))
                         }
                       />
+                      <span className="block text-xs font-normal text-[#657069]">
+                        Enter 0 or leave this as 0 to charge immediately.
+                      </span>
                     </label>
                     <label className="space-y-1 text-sm font-semibold text-[#082B4F]">
-                      <span>Free period end</span>
+                      <span>First charge month</span>
                       <TextInput
-                        type="date"
-                        value={managementFee.freePeriodEnd}
+                        type="month"
+                        value={managementFee.firstChargeMonth || managementFeeSchedule.automaticFirstChargeMonth}
                         onChange={(event) =>
-                          setManagementFee((current) => ({ ...current, freePeriodEnd: event.target.value }))
+                          setManagementFee((current) => ({ ...current, firstChargeMonth: event.target.value }))
                         }
                       />
+                      <span className="block text-xs font-normal text-[#657069]">
+                        Automatically follows the free months; you may change it for a special arrangement.
+                      </span>
                     </label>
-                    <ActionButton
-                      type="button"
-                      variant="secondary"
-                      onClick={() => {
-                        const period = sixMonthFreePeriod(form.moveInDate);
-                        if (!period) {
-                          toast.error("Set the tenant move-in date before applying 6 months free.");
-                          return;
+                    <label className="space-y-1 text-sm font-semibold text-[#082B4F]">
+                      <span>First charge amount before SST</span>
+                      <TextInput
+                        aria-label="First charge amount before SST"
+                        type="number"
+                        min="0"
+                        step="0.01"
+                        value={
+                          managementFee.firstChargeBaseAmount ||
+                          managementFeeSchedule.automaticFirstChargeBase
                         }
-                        setManagementFee((current) => ({
+                        onChange={(event) =>
+                          setManagementFee((current) => ({ ...current, firstChargeBaseAmount: event.target.value }))
+                        }
+                      />
+                      <span className="block text-xs font-normal text-[#657069]">
+                        {managementFeeSchedule.firstChargeUsesProratedRent
+                          ? "Auto-calculated from the prorated move-in rent. You may edit it for a special arrangement."
+                          : "Auto-calculated from the eligible rent. You may edit it for a special arrangement."}
+                      </span>
+                    </label>
+                  </div>
+
+                  <div className="flex flex-wrap items-center gap-2">
+                    <span className="text-xs font-semibold uppercase tracking-wide text-[#657069]">Quick free period</span>
+                    {[0, 3, 6, 12].map((months) => (
+                      <ActionButton
+                        key={months}
+                        type="button"
+                        variant={Number(managementFee.freeMonths) === months ? "primary" : "secondary"}
+                        className="min-h-8 px-3 py-1 text-sm"
+                        onClick={() => setManagementFee((current) => ({
                           ...current,
-                          freePeriodStart: period.start,
-                          freePeriodEnd: period.end,
-                        }));
-                      }}
-                    >
-                      Apply 6 months free
-                    </ActionButton>
+                          freeMonths: String(months),
+                          firstChargeMonth: "",
+                        }))}
+                      >
+                        {months === 0 ? "No free period" : `${months} months free`}
+                      </ActionButton>
+                    ))}
                   </div>
 
                   <div className="rounded-lg bg-[#082F55] px-4 py-3 text-white">
@@ -850,11 +1042,42 @@ export function CreateUnitDialog({
                     ) : (
                       <p className="text-sm">Enter the rent and fee settings to see the monthly estimate.</p>
                     )}
-                    {managementFee.freePeriodEnd && (
-                      <p className="mt-1 text-xs text-[#DFE9F3]">
-                        First chargeable rental period begins after {managementFee.freePeriodEnd}.
+                    <p className="mt-1 text-xs text-[#DFE9F3]">
+                      First estimated charge: {monthLabel(managementFeeSchedule.firstChargeMonth)}. Actual billing still requires eligible owner rental income; a commission-only month is not charged.
+                    </p>
+                  </div>
+
+                  <div className="overflow-hidden rounded-lg border border-[#9DAFC1] bg-white">
+                    <div className="border-b border-[#9DAFC1] bg-[#DFE9F3] px-3 py-2">
+                      <h4 className="font-bold text-[#082B4F]">12-month management fee estimate</h4>
+                      <p className="text-xs text-[#657069]">
+                        Starts from {monthLabel(managementFeeSchedule.startMonth)}. This is a checking schedule; actual charges follow collected rental and commission-month rules.
                       </p>
-                    )}
+                    </div>
+                    <div className="max-h-72 overflow-y-auto">
+                      <table className="w-full table-fixed border-collapse text-sm">
+                        <thead className="sticky top-0 bg-[#F3F6F9] text-left text-[#082B4F]">
+                          <tr>
+                            <th className="w-[28%] border-b border-[#9DAFC1] px-3 py-2">Month</th>
+                            <th className="w-[22%] border-b border-[#9DAFC1] px-3 py-2">Status</th>
+                            <th className="border-b border-[#9DAFC1] px-3 py-2 text-right">Fee</th>
+                            <th className="border-b border-[#9DAFC1] px-3 py-2 text-right">SST</th>
+                            <th className="border-b border-[#9DAFC1] px-3 py-2 text-right">Total</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {managementFeeSchedule.rows.map((row) => (
+                            <tr key={row.month} className={row.status === "First charge" ? "bg-[#fff7dc]" : undefined}>
+                              <td className="border-b border-[#DFE9F3] px-3 py-2 font-semibold text-[#082B4F]">{monthLabel(row.month)}</td>
+                              <td className="border-b border-[#DFE9F3] px-3 py-2 text-[#657069]">{row.status}</td>
+                              <td className="border-b border-[#DFE9F3] px-3 py-2 text-right tabular-nums text-[#082B4F]">RM {row.base}</td>
+                              <td className="border-b border-[#DFE9F3] px-3 py-2 text-right tabular-nums text-[#082B4F]">RM {row.sst}</td>
+                              <td className="border-b border-[#DFE9F3] px-3 py-2 text-right font-bold tabular-nums text-[#082B4F]">RM {row.total}</td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
                   </div>
                 </div>
               )}

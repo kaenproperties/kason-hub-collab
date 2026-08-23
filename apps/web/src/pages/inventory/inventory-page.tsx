@@ -10,6 +10,7 @@ import type { PropertyOption } from "./create-unit-dialog";
 import { PropertyRow, type PropertyListItem } from "./property-row";
 import type { UnitListItem } from "./units-table";
 import { InventoryAgentViewTab } from "./agent-view-tab";
+import { usePermission } from "@/components/permission-gate";
 
 // ─── Tab plumbing ────────────────────────────────────────────────────────────
 //
@@ -134,6 +135,7 @@ export default function InventoryPage() {
 // ─── Admin view (property → expand → units table) ──────────────────────────
 
 function AdminViewTab() {
+  const canCreatePortfolio = usePermission("portfolio.create");
   const [searchQ, setSearchQ] = useState("");
   const [statusFilter, setStatusFilter] = useState<StatusFilter>("all");
 
@@ -215,13 +217,13 @@ function AdminViewTab() {
       title="Property register"
       description="Click a unit code to manage its photos and listing."
       actions={
-        <CreatePropertyDialog
+        canCreatePortfolio ? <CreatePropertyDialog
           trigger={
             <Button>
               <Plus /> New Property
             </Button>
           }
-        />
+        /> : undefined
       }
     >
       <div className="flex flex-wrap items-center gap-3 border-b border-[var(--border)] bg-[var(--page-bg)] px-4 py-3">
@@ -271,7 +273,9 @@ function AdminViewTab() {
         <p className="px-4 py-6 text-sm text-[var(--text-muted)]">
           {anyFilterActive
             ? "No properties match the current filters."
-            : <>No properties yet. Use <strong>+ New Property</strong> above to create one.</>}
+            : canCreatePortfolio
+              ? <>No properties yet. Use <strong>+ New Property</strong> above to create one.</>
+              : "No properties yet."}
         </p>
       ) : (
         <div>

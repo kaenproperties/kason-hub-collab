@@ -1,7 +1,7 @@
 import type { z } from "zod";
 import { getDb } from "@kason/db";
 import type { Prisma } from "@kason/db";
-import { rentInvoiceStartToUtcDate, resolveDepositBasisRate } from "@kason/shared";
+import { rentInvoiceStartToUtcDate, resolveDepositBasisRate, splitInclusiveSst, TENANCY_AGREEMENT_SST_RATE } from "@kason/shared";
 import type { TenancySession } from "./tenancy.types";
 import {
   createLandlordTenancy,
@@ -67,6 +67,7 @@ async function createTenantAgreementFeeForTenancy(
   // payment due date.
   const periodMonth = new Date(Date.UTC(tenancy.startDate.getUTCFullYear(), tenancy.startDate.getUTCMonth(), 1));
   const idempotencyKey = `tenancy-agreement-fee:${tenancy.id}`;
+  const split = splitInclusiveSst(amount.toFixed(2), TENANCY_AGREEMENT_SST_RATE);
   await db.$transaction(async (tx) => {
     if (await tx.invoice.findFirst({ where: { organizationId: session.orgId, idempotencyKey }, select: { id: true } })) return;
     const category = await tx.chargeCategory.findFirst({
@@ -85,7 +86,7 @@ async function createTenantAgreementFeeForTenancy(
       periodMonth,
       idempotencyKey,
     });
-    await tx.charge.create({
+    const baseCharge = await tx.charge.create({
       data: {
         organizationId: session.orgId,
         chargeNumber: `TAF-${tenancy.id}`,
@@ -95,10 +96,13 @@ async function createTenantAgreementFeeForTenancy(
         categoryId: category?.id ?? null,
         chargeType: "tenancy_agreement_fee",
         status: "draft",
-        description: "Tenancy agreement fee",
+        description: "TA (WITH SST)",
         dueDate,
-        amount: amount.toFixed(2),
-        outstandingAmount: amount.toFixed(2),
+        amount: split.base,
+        outstandingAmount: split.base,
+        // Explicit RM0 (and other sub-sen tax results) has no payable tax
+        // sibling. Stamp 0 so the category's 8% fallback cannot demand one.
+        sstRate: split.sst === "0.00" ? "0" : TENANCY_AGREEMENT_SST_RATE,
         currency: "MYR",
         billingMonth: periodMonth,
         attachmentKeys: [],
@@ -107,8 +111,41 @@ async function createTenantAgreementFeeForTenancy(
         revenueRecognition: "manager_revenue",
         settlementRecipient: "manager",
         commercialPurpose: "SERVICE",
+        taxTreatment: "taxable_service",
+        taxRate: TENANCY_AGREEMENT_SST_RATE,
       },
+      select: { id: true },
     });
+    if (split.sst !== "0.00") {
+      await tx.charge.create({
+        data: {
+          organizationId: session.orgId,
+          chargeNumber: `TAF-${tenancy.id}-SST`,
+          tenancyId: tenancy.id,
+          unitId: tenancy.unitId,
+          partyId: tenancy.tenantPartyId,
+          categoryId: category?.id ?? null,
+          chargeType: "tenancy_agreement_fee",
+          status: "draft",
+          description: `TA (WITH SST) — SST ${TENANCY_AGREEMENT_SST_RATE}%`,
+          dueDate,
+          amount: split.sst,
+          outstandingAmount: split.sst,
+          sstRate: "0",
+          currency: "MYR",
+          billingMonth: periodMonth,
+          attachmentKeys: [],
+          invoiceId: invoice.id,
+          parentChargeId: baseCharge.id,
+          nature: "profit",
+          revenueRecognition: "manager_revenue",
+          settlementRecipient: "manager",
+          commercialPurpose: "SERVICE",
+          taxTreatment: "taxable_service",
+          taxRate: TENANCY_AGREEMENT_SST_RATE,
+        },
+      });
+    }
     await recomputeInvoiceTotalTx(tx, session.orgId, invoice.id);
   });
 }
@@ -846,17 +883,33 @@ export async function renewTenancyService(session: TenancySession, input: z.infe
         tenancyId: created.id, propertyId: existing.propertyId, invoiceType: "tenant_renewal",
         invoiceDate: new Date(), dueDate: new Date(input.renewalFeeDueDate ?? input.newStartDate), periodMonth, idempotencyKey,
       });
-      await tx.charge.create({
+      const split = splitInclusiveSst(renewalFee.toFixed(2), TENANCY_AGREEMENT_SST_RATE);
+      const baseCharge = await tx.charge.create({
         data: {
           organizationId: session.orgId, chargeNumber: `RENEW-${created.id}`, tenancyId: created.id,
           unitId: existing.unitId, partyId: existing.tenantPartyId, categoryId: category?.id ?? null,
-          chargeType: "renewal_fee", status: "draft", description: "Tenancy renewal fee",
-          dueDate: new Date(input.renewalFeeDueDate ?? input.newStartDate), amount: renewalFee.toFixed(2), outstandingAmount: renewalFee.toFixed(2),
+          chargeType: "renewal_fee", status: "draft", description: "Renewal TA (WITH SST)",
+          dueDate: new Date(input.renewalFeeDueDate ?? input.newStartDate), amount: split.base, outstandingAmount: split.base,
+          sstRate: split.sst === "0.00" ? "0" : TENANCY_AGREEMENT_SST_RATE,
           currency: "MYR", billingMonth: periodMonth, attachmentKeys: [], invoiceId: invoice.id,
           nature: "profit", revenueRecognition: "manager_revenue", settlementRecipient: "manager",
-          commercialPurpose: "SERVICE",
+          commercialPurpose: "SERVICE", taxTreatment: "taxable_service", taxRate: TENANCY_AGREEMENT_SST_RATE,
         },
+        select: { id: true },
       });
+      if (split.sst !== "0.00") {
+        await tx.charge.create({
+          data: {
+            organizationId: session.orgId, chargeNumber: `RENEW-${created.id}-SST`, tenancyId: created.id,
+            unitId: existing.unitId, partyId: existing.tenantPartyId, categoryId: category?.id ?? null,
+            chargeType: "renewal_fee", status: "draft", description: `Renewal TA (WITH SST) — SST ${TENANCY_AGREEMENT_SST_RATE}%`,
+            dueDate: new Date(input.renewalFeeDueDate ?? input.newStartDate), amount: split.sst, outstandingAmount: split.sst,
+            sstRate: "0", currency: "MYR", billingMonth: periodMonth, attachmentKeys: [], invoiceId: invoice.id,
+            parentChargeId: baseCharge.id, nature: "profit", revenueRecognition: "manager_revenue", settlementRecipient: "manager",
+            commercialPurpose: "SERVICE", taxTreatment: "taxable_service", taxRate: TENANCY_AGREEMENT_SST_RATE,
+          },
+        });
+      }
       await recomputeInvoiceTotalTx(tx, session.orgId, invoice.id);
     });
   }

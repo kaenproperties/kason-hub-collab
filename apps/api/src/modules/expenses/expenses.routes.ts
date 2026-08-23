@@ -9,7 +9,7 @@ import { supplierExpenseInput } from "@kason/shared";
 import { z } from "zod";
 import type { SessionPayload } from "../../lib/auth";
 import { formatZodError } from "../../lib/zod-error-mapper";
-import { requireRole } from "../../middleware/require-role";
+import { requireAnyPermission, requirePermission, userHasPermission } from "../../middleware/require-permission";
 import { getActorHeaders } from "../../lib/actor-ctx";
 import { approveEmployeeClaimService, assignSharedCostService, createSupplierExpenseService, ExpenseError, listSupplierExpensesService, type ExpenseActorCtx } from "./expenses.service";
 
@@ -23,9 +23,20 @@ function actor(c: ExpensesCtx): ExpenseActorCtx {
   return { orgId: session.orgId, actorUserId: session.userId, actorRole: session.role, ip, userAgent };
 }
 
-expensesRoutes.get("/", requireRole("manager"), async (c) => c.json({ data: await listSupplierExpensesService(actor(c)) }));
+expensesRoutes.get("/", requireAnyPermission("claim.create", "claim.view_all", "cost.view"), async (c) => {
+  const session = c.get("session");
+  const [canViewAllClaims, canViewCosts] = await Promise.all([
+    userHasPermission(session, "claim.view_all"),
+    userHasPermission(session, "cost.view"),
+  ]);
+  return c.json({
+    data: await listSupplierExpensesService(actor(c), {
+      ownOnly: !canViewAllClaims && !canViewCosts,
+    }),
+  });
+});
 
-expensesRoutes.post("/", requireRole("editor"), async (c) => {
+expensesRoutes.post("/", requirePermission("claim.create"), async (c) => {
   const body = await c.req.json().catch(() => null);
   if (!body) return c.json({ error: { code: "invalid_json", message: "Invalid JSON body" } }, 400);
   const parsed = supplierExpenseInput.safeParse(body);
@@ -42,13 +53,13 @@ expensesRoutes.post("/", requireRole("editor"), async (c) => {
   }
 });
 
-expensesRoutes.post("/:id/approve", requireRole("admin"), async (c) => {
+expensesRoutes.post("/:id/approve", requirePermission("claim.approve"), async (c) => {
   try { return c.json({ data: await approveEmployeeClaimService(actor(c), c.req.param("id")) }); }
   catch (e) { if (e instanceof ExpenseError) return c.json({ error: e.code }, e.status as 404 | 409); throw e; }
 });
 
 const assignmentInput = z.object({ apartmentId: z.string().uuid(), gridExpenseId: z.string().uuid().nullable().optional(), amount: z.string().regex(/^\d+(\.\d{1,2})?$/).refine((value) => Number(value) > 0), description: z.string().max(500).nullable().optional() });
-expensesRoutes.post("/:id/assignments", requireRole("manager"), async (c) => {
+expensesRoutes.post("/:id/assignments", requirePermission("cost.create"), async (c) => {
   const parsed = assignmentInput.safeParse(await c.req.json().catch(() => null));
   if (!parsed.success) return c.json({ error: "invalid_assignment", details: parsed.error.flatten() }, 400);
   try { return c.json({ data: await assignSharedCostService(actor(c), c.req.param("id"), parsed.data) }, 201); }

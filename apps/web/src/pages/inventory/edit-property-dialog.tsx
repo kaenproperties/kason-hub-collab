@@ -177,7 +177,7 @@ export function EditPropertyDialog({
             <Field label="Property name">
               <TextInput name="name" required defaultValue={detail.name} />
             </Field>
-            <Field label="Property code">
+            <Field label="Property Short Form">
               <TextInput name="propertyCode" required defaultValue={detail.propertyCode} />
             </Field>
             <Field label="Property type">

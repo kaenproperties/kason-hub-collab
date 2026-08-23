@@ -36,6 +36,7 @@ function makeApp(session: SessionPayload | null) {
 const OWNER = "11111111-1111-4111-8111-111111111111";
 const OTHER_OWNER = "22222222-2222-4222-8222-222222222222";
 const CONFIG = "33333333-3333-4333-8333-333333333333";
+const APARTMENT = "44444444-4444-4444-8444-444444444444";
 
 const adminSession: SessionPayload = { userId: "u1", orgId: "o1", role: "admin", userType: "operator" };
 const managerSession: SessionPayload = { userId: "u2", orgId: "o1", role: "manager", userType: "operator" };
@@ -56,6 +57,9 @@ const createdRow = {
   feeValue: "10",
   capAmount: null,
   sstPercent: "8",
+  firstChargeMonth: null,
+  firstChargeBaseAmount: null,
+  paxDeductionPerPerson: null,
   freePeriodStart: null,
   freePeriodEnd: null,
   isActive: true,
@@ -193,15 +197,15 @@ describe("GET /fee-configs (read = manager) — filters + org-scope + paging", (
     expect(res.status).toBe(403);
   });
 
-  it("manager can list and the ?ownerPartyId filter + offset paging reach the service", async () => {
+  it("manager can list and owner/unit filters + offset paging reach the service", async () => {
     const res = await makeApp(managerSession).request(
-      `/fee-configs?ownerPartyId=${OWNER}&limit=25&offset=10`,
+      `/fee-configs?ownerPartyId=${OWNER}&apartmentId=${APARTMENT}&limit=25&offset=10`,
     );
     expect(res.status).toBe(200);
     expect(listFeeConfigsService).toHaveBeenCalledWith(
       // org comes from the SESSION, not the query — cross-org reads are impossible.
       expect.objectContaining({ orgId: "o1", actorUserId: "u2" }),
-      expect.objectContaining({ ownerPartyId: OWNER }),
+      expect.objectContaining({ ownerPartyId: OWNER, apartmentId: APARTMENT }),
       { limit: 25, offset: 10 },
     );
   });

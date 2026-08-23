@@ -34,6 +34,8 @@ export type FeeConfigDrawerProps = {
   /** When set (owner-detail context), the owner is fixed: the select is replaced
    * by read-only text and the form's ownerPartyId is forced to this owner. */
   lockedOwner?: OwnerOption;
+  /** Preselect a unit when this drawer is opened from its Billing cell. */
+  initialUnit?: UnitOption;
 };
 
 type FormState = {
@@ -46,9 +48,15 @@ type FormState = {
   sstPercent: string;
   freePeriodStart: string; // yyyy-mm-dd from <input type="date">; "" = none
   freePeriodEnd: string;
+  firstChargeMonth: string;
+  firstChargeBaseAmount: string;
+  paxDeductionPerPerson: string;
 };
 
-type FormErrors = Partial<Record<"ownerPartyId" | "feeValue" | "capAmount", string>>;
+type FormErrors = Partial<Record<
+  "ownerPartyId" | "feeValue" | "capAmount" | "firstChargeBaseAmount" | "paxDeductionPerPerson",
+  string
+>>;
 
 // Sample rent the live preview is computed against (RM). Round number so the
 // breakdown reads cleanly, e.g. "10.8% → RM216 on RM2,000 rent".
@@ -65,6 +73,9 @@ function blankForm(): FormState {
     sstPercent: "8", // matches managementFeeConfigInput default
     freePeriodStart: "",
     freePeriodEnd: "",
+    firstChargeMonth: "",
+    firstChargeBaseAmount: "",
+    paxDeductionPerPerson: "",
   };
 }
 
@@ -79,6 +90,9 @@ function formFromConfig(c: FeeConfigRow): FormState {
     sstPercent: c.sstPercent,
     freePeriodStart: c.freePeriodStart ? c.freePeriodStart.slice(0, 10) : "",
     freePeriodEnd: c.freePeriodEnd ? c.freePeriodEnd.slice(0, 10) : "",
+    firstChargeMonth: c.firstChargeMonth ? c.firstChargeMonth.slice(0, 10) : "",
+    firstChargeBaseAmount: c.firstChargeBaseAmount ?? "",
+    paxDeductionPerPerson: c.paxDeductionPerPerson ?? "",
   };
 }
 
@@ -100,6 +114,7 @@ export function FeeConfigDrawer({
   properties,
   units = [],
   lockedOwner,
+  initialUnit,
 }: FeeConfigDrawerProps) {
   const createConfig = useCreateFeeConfig();
   const updateConfig = useUpdateFeeConfig();
@@ -111,13 +126,17 @@ export function FeeConfigDrawer({
     if (open) {
       // eslint-disable-next-line react-hooks/set-state-in-effect -- reset-on-open form snapshot; same pattern as TaskDrawer / admin-form-drawer.
       if (mode === "edit" && config) setForm(formFromConfig(config));
-      else setForm(lockedOwner ? { ...blankForm(), ownerPartyId: lockedOwner.id } : blankForm());
+      else setForm({
+        ...blankForm(),
+        ownerPartyId: lockedOwner?.id ?? "",
+        apartmentId: initialUnit?.apartmentId ?? "",
+      });
       setErrors({});
     }
     // config is captured at open time only (keyed on config?.id) — re-snapshotting
     // on every config object identity change would clobber in-progress edits.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [open, mode, config?.id, lockedOwner?.id]);
+  }, [open, mode, config?.id, lockedOwner?.id, initialUnit?.apartmentId]);
 
   function set<K extends keyof FormState>(field: K, value: FormState[K]) {
     setForm((prev) => ({ ...prev, [field]: value }));
@@ -163,12 +182,23 @@ export function FeeConfigDrawer({
     if (form.feeType === "cap" && !DECIMAL_RE.test(form.capAmount)) {
       errs.capAmount = "Cap amount is required for a capped fee.";
     }
+    if (form.firstChargeBaseAmount && !DECIMAL_RE.test(form.firstChargeBaseAmount)) {
+      errs.firstChargeBaseAmount = "Enter a non-negative RM amount (max 2 dp).";
+    }
+    if (form.paxDeductionPerPerson && !DECIMAL_RE.test(form.paxDeductionPerPerson)) {
+      errs.paxDeductionPerPerson = "Enter a non-negative RM amount (max 2 dp).";
+    }
     setErrors(errs);
     if (Object.keys(errs).length > 0) return;
 
     const capAmount = form.feeType === "cap" ? form.capAmount : null;
     const freePeriodStart = form.freePeriodStart ? toIsoFromDateInput(form.freePeriodStart) : null;
     const freePeriodEnd = form.freePeriodEnd ? toIsoFromDateInput(form.freePeriodEnd) : null;
+    const firstChargeMonth = form.firstChargeMonth
+      ? toIsoFromDateInput(`${form.firstChargeMonth.slice(0, 7)}-01`)
+      : null;
+    const firstChargeBaseAmount = form.firstChargeBaseAmount.trim() || null;
+    const paxDeductionPerPerson = form.paxDeductionPerPerson.trim() || null;
     const propertyId = form.propertyId || null;
     const apartmentId = form.apartmentId || null;
 
@@ -181,9 +211,12 @@ export function FeeConfigDrawer({
           feeType: form.feeType,
           feeValue: form.feeValue,
           capAmount,
-          sstPercent: form.sstPercent,
+          sstPercent: "8",
           freePeriodStart,
           freePeriodEnd,
+          firstChargeMonth,
+          firstChargeBaseAmount,
+          paxDeductionPerPerson,
         },
         {
           onSuccess: () => {
@@ -209,9 +242,12 @@ export function FeeConfigDrawer({
         feeType: form.feeType,
         feeValue: form.feeValue,
         capAmount,
-        sstPercent: form.sstPercent,
+        sstPercent: "8",
         freePeriodStart,
         freePeriodEnd,
+        firstChargeMonth,
+        firstChargeBaseAmount,
+        paxDeductionPerPerson,
       },
       {
         onSuccess: () => {
@@ -233,7 +269,7 @@ export function FeeConfigDrawer({
       title={mode === "create" ? "New fee config" : "Edit fee config"}
       description={
         mode === "create"
-          ? "Set an owner's management fee. SST is added per row at the rate you choose."
+          ? "Set an owner's management fee. Management services always include 8% SST."
           : "Update this owner's management fee. The live preview reflects unsaved edits."
       }
       onSubmit={handleSubmit}
@@ -245,6 +281,11 @@ export function FeeConfigDrawer({
       }}
     >
       <div className="grid gap-4">
+        <Callout variant="info" title="Flexible per-unit rule">
+          Whole Unit and partitioned units are not forced into a preset formula. Choose any
+          percentage, use or omit a cap, and use or omit a per-person deduction for this unit.
+        </Callout>
+
         <Field label="Owner" error={errors.ownerPartyId}>
           {lockedOwner ? (
             <div
@@ -316,9 +357,9 @@ export function FeeConfigDrawer({
               onChange={(e) => set("feeType", e.target.value as FeeType)}
               aria-label="Fee type"
             >
-              <option value="percent">Percent of rent</option>
+              <option value="percent">Percentage — no cap</option>
               <option value="fixed">Fixed RM</option>
-              <option value="cap">Capped percent</option>
+              <option value="cap">Percentage — with cap</option>
             </SelectInput>
           </Field>
           <Field
@@ -355,15 +396,31 @@ export function FeeConfigDrawer({
           </Field>
         )}
 
+        <Field
+          label="Deduct per person before calculating fee (RM)"
+          hint="Optional for any unit type. Leave blank when this unit has no per-person deduction."
+          error={errors.paxDeductionPerPerson}
+        >
+          <TextInput
+            type="number"
+            inputMode="decimal"
+            min="0"
+            step="0.01"
+            value={form.paxDeductionPerPerson}
+            onChange={(e) => set("paxDeductionPerPerson", e.target.value)}
+            placeholder="No pax deduction"
+          />
+        </Field>
+
         <div className="grid gap-4 sm:grid-cols-2">
-          <Field label="SST %" hint="Default 8% (current Malaysian rate).">
+          <Field label="SST %" hint="Fixed at 8% for all management services.">
             <TextInput
               type="number"
               inputMode="decimal"
               min="0"
               step="0.01"
               value={form.sstPercent}
-              onChange={(e) => set("sstPercent", e.target.value)}
+              disabled
               placeholder="8"
             />
           </Field>
@@ -376,7 +433,7 @@ export function FeeConfigDrawer({
         </div>
 
         <div className="grid gap-4 sm:grid-cols-2">
-          <Field label="Free period start" hint="No management fee charged within this window.">
+          <Field label="Free period start" hint="Leave both dates blank when charging starts immediately.">
             <TextInput
               type="date"
               value={form.freePeriodStart}
@@ -388,6 +445,39 @@ export function FeeConfigDrawer({
               type="date"
               value={form.freePeriodEnd}
               onChange={(e) => set("freePeriodEnd", e.target.value)}
+            />
+          </Field>
+        </div>
+
+        <Callout variant="info" title="No free period?">
+          Leave both free-period dates blank. The system will start from the first eligible
+          rental-income month automatically.
+        </Callout>
+
+        <div className="grid gap-4 sm:grid-cols-2">
+          <Field
+            label="First charge month"
+            hint="Optional manual override. Leave blank for automatic scheduling."
+          >
+            <TextInput
+              type="month"
+              value={form.firstChargeMonth.slice(0, 7)}
+              onChange={(e) => set("firstChargeMonth", e.target.value)}
+            />
+          </Field>
+          <Field
+            label="First charge before SST (RM)"
+            hint="Optional one-month override; normal %/cap/fixed calculation resumes after it."
+            error={errors.firstChargeBaseAmount}
+          >
+            <TextInput
+              type="number"
+              inputMode="decimal"
+              min="0"
+              step="0.01"
+              value={form.firstChargeBaseAmount}
+              onChange={(e) => set("firstChargeBaseAmount", e.target.value)}
+              placeholder="Auto calculated"
             />
           </Field>
         </div>

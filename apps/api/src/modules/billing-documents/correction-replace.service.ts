@@ -36,6 +36,7 @@ import {
 } from "../payments/payments.repository";
 import { CreditNoteVoidError } from "./credit-notes.service";
 import { issueDocumentTx, type IssueLineInput } from "./issue.service";
+import { isExactTaTaxPairCharge } from "./ta-tax-pair.guard";
 
 // taxStatus values that still permit a cancel-and-replace (nothing legally
 // submitted yet). Any other value (SUBMITTED / VALID / INVALID / CANCELLED) →
@@ -72,6 +73,9 @@ export async function cancelAndReplaceDocumentTx(
   tx: Prisma.TransactionClient,
   input: CancelAndReplaceInput,
 ): Promise<CancelAndReplaceResult> {
+  if (await isExactTaTaxPairCharge(tx, input.organizationId, input.chargeId)) {
+    throw new CreditNoteVoidError(409, "TAX_PAIR_CORRECTION_UNSUPPORTED");
+  }
   if (input.replacementLines.length === 0) {
     throw new CreditNoteVoidError(400, "REPLACEMENT_LINES_REQUIRED");
   }

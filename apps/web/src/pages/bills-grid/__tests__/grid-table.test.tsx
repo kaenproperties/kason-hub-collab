@@ -4,11 +4,11 @@
 // shape — that's the §16 "renders fine but the field silently isn't there"
 // regression this whole plan guards against).
 import { describe, expect, it } from "vitest";
-import { render, screen, within } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { MemoryRouter } from "react-router-dom";
 import type { GridRow, GridEntryDto, GridBearerConfigDto, GridSubRow } from "@/api/bills-grid";
-import { billingStateForCell, GridTable, renewalSignalForRow, rowHasBillingState } from "../grid-table";
+import { billingStateForCell, formatTenancyEndDate, formatUnitIdentity, GridTable, renewalSignalForRow, rowHasBillingState } from "../grid-table";
 import { CURRENT_COLUMNS } from "../columns";
 import { emptySettlementCells } from "@kason/shared";
 
@@ -66,6 +66,7 @@ function makeRow(partial: Partial<GridRow> = {}): GridRow {
     unitCode: "PV9 A-13-13",
     propertyId: "PROP1",
     propertyName: "Sunway Vista",
+    propertyCode: "PV9",
     entryId: null,
     preview: null,
     previewError: null,
@@ -94,10 +95,12 @@ describe("GridTable", () => {
     expect(renewalSignalForRow(makeRow({ subRows: [ending] }), now)).toEqual({
       tenancyId: "T1",
       label: "Ask tenant about renewal · 60d left",
-      urgent: true,
+      urgent: false,
+      tone: "warning",
+      days: 60,
     });
     expect(renewalSignalForRow(makeRow({ subRows: [{ ...ending, renewalDecision: "contacted" }] }), now)?.label).toBe("Renewal answer pending · 60d left");
-    expect(renewalSignalForRow(makeRow({ subRows: [{ ...ending, renewalDecision: "renew" }] }), now)?.label).toBe("Renewal · add TA fee");
+    expect(renewalSignalForRow(makeRow({ subRows: [{ ...ending, renewalDecision: "renew" }] }), now)?.label).toBe("Renewal confirmed · add TA fee");
     expect(renewalSignalForRow(makeRow({
       subRows: [{ ...ending, renewalDecision: "renew" }],
       agreementFees: {
@@ -108,7 +111,43 @@ describe("GridTable", () => {
     expect(renewalSignalForRow(makeRow({ subRows: [{ ...ending, renewalDecision: "not_renew" }] }), now)?.label).toBe("Move-out planned · 60d left");
   });
 
-  it("uses compact content-led widths for Rent, Deposit and TA without forcing Fit All wider than its container", () => {
+  it("shows the tenancy end date beside a whole-unit tenant and places the 60-day follow-up there", () => {
+    const end = new Date();
+    end.setHours(12, 0, 0, 0);
+    end.setDate(end.getDate() + 45);
+    const tenancyEndDate = end.toISOString();
+    const expectedDate = formatTenancyEndDate(tenancyEndDate);
+    const row = makeRow({
+      isWholeUnit: true,
+      ownerName: "Owner One",
+      subRows: [makeSubRow({ partyId: "P1", partyName: "Tenant One", tenancyEndDate, renewalDecision: "pending" })],
+    });
+
+    render(<GridTable rows={[row]} columns={CURRENT_COLUMNS} />);
+
+    const tenantLine = screen.getByTestId("whole-unit-tenant");
+    expect(tenantLine).toHaveClass("flex-nowrap");
+    expect(within(tenantLine).getByText(`Ends ${expectedDate}`)).toBeInTheDocument();
+    expect(within(tenantLine).getByTestId("renewal-signal")).toHaveTextContent(/Ask tenant about renewal/);
+  });
+
+  it("shows each partitioned tenant's own tenancy end date", () => {
+    const row = makeRow({
+      isWholeUnit: false,
+      subRows: [
+        makeSubRow({ listingId: "L1", tenancyId: "T1", partyName: "Ali", tenancyEndDate: "2027-08-24T00:00:00.000Z" }),
+        makeSubRow({ listingId: "L2", tenancyId: "T2", partyName: "Bala", tenancyEndDate: "2027-09-30T00:00:00.000Z" }),
+      ],
+    });
+
+    render(<GridTable rows={[row]} columns={CURRENT_COLUMNS} />);
+
+    const subRows = screen.getAllByTestId("tenant-sub-row");
+    expect(within(subRows[0]!).getByText("Ends 24 Aug 2027")).toBeInTheDocument();
+    expect(within(subRows[1]!).getByText("Ends 30 Sept 2027")).toBeInTheDocument();
+  });
+
+  it("uses real Excel-style pixel widths and lets header dividers resize or AutoFit each column", async () => {
     const compactColumns = CURRENT_COLUMNS.filter((column) =>
       ["rental", "deposit", "agreementFee"].includes(column.id),
     );
@@ -120,13 +159,93 @@ describe("GridTable", () => {
       "300px",
       "86px",
       "86px",
-      "72px",
+      "116px",
     ]);
 
     rerender(<GridTable rows={[]} columns={compactColumns} displayMode="fit-all" />);
     const table = container.querySelector("table");
     expect(table?.className).not.toContain("min-w-[1680px]");
-    expect(table?.style.minWidth).toBe("");
+    expect(Array.from(container.querySelectorAll("col"), (col) => col.style.width)).toEqual([
+      "218px",
+      "60px",
+      "64px",
+      "116px",
+    ]);
+
+    const rentalResize = screen.getByTestId("column-resize-rental");
+    fireEvent.pointerDown(rentalResize, { clientX: 100 });
+    fireEvent.pointerMove(rentalResize, { clientX: 125 });
+    fireEvent.pointerUp(rentalResize, { clientX: 125 });
+    expect(container.querySelectorAll("col")[1]?.style.width).toBe("85px");
+
+    await userEvent.dblClick(screen.getByTestId("column-resize-deposit"));
+    expect(container.querySelectorAll("col")[2]?.style.width).toBe("84px");
+
+    // OWNER used to stay clipped as OWN... because AutoFit reserved only 14px
+    // and did not account for header padding + the resize handle itself.
+    rerender(
+      <GridTable
+        rows={[]}
+        columns={CURRENT_COLUMNS.filter((column) => column.id === "cleaningOwner")}
+        displayMode="fit-all"
+      />,
+    );
+    await userEvent.dblClick(screen.getByTestId("column-resize-cleaningOwner"));
+    expect(Number.parseInt(container.querySelectorAll("col")[1]?.style.width ?? "0", 10)).toBeGreaterThanOrEqual(68);
+
+    // Single-column bands must fit their merged category title too, not only
+    // the short WITH SST sub-header underneath.
+    rerender(
+      <GridTable
+        rows={[]}
+        columns={CURRENT_COLUMNS.filter((column) => column.id === "managementFeeSst")}
+        displayMode="fit-all"
+      />,
+    );
+    await userEvent.dblClick(screen.getByTestId("column-resize-managementFeeSst"));
+    expect(Number.parseInt(container.querySelectorAll("col")[1]?.style.width ?? "0", 10)).toBeGreaterThanOrEqual(120);
+  });
+
+  it("AutoFits every Fit All column once after real rows load and preserves later manual widths", async () => {
+    const compactColumns = CURRENT_COLUMNS.filter((column) =>
+      ["rental", "deposit", "agreementFee"].includes(column.id),
+    );
+    const { container, rerender } = render(
+      <GridTable rows={[makeRow()]} columns={compactColumns} displayMode="fit-all" />,
+    );
+
+    await waitFor(() => {
+      expect(Number.parseInt(container.querySelectorAll("col")[1]?.style.width ?? "0", 10))
+        .toBeGreaterThan(60);
+    });
+
+    const automaticallyFittedUnitWidth = Number.parseInt(
+      container.querySelectorAll("col")[0]?.style.width ?? "0",
+      10,
+    );
+    // The visible identity now uses the compact property short form rather
+    // than the full condo name, so a correctly fitted Unit column may settle
+    // at its 180px Excel-style minimum instead of carrying the old 218px floor.
+    expect(automaticallyFittedUnitWidth).toBeGreaterThanOrEqual(180);
+    expect(automaticallyFittedUnitWidth).toBeLessThan(520);
+
+    const rentalWidth = Number.parseInt(
+      container.querySelectorAll("col")[1]?.style.width ?? "0",
+      10,
+    );
+    const rentalResize = screen.getByTestId("column-resize-rental");
+    fireEvent.pointerDown(rentalResize, { clientX: 100 });
+    fireEvent.pointerMove(rentalResize, { clientX: 135 });
+    fireEvent.pointerUp(rentalResize, { clientX: 135 });
+    expect(container.querySelectorAll("col")[1]?.style.width).toBe(`${rentalWidth + 35}px`);
+
+    // Simulates a Live data refresh. The initial sheet AutoFit must not undo a
+    // width the user deliberately changed after the page was ready.
+    rerender(
+      <GridTable rows={[makeRow({ unitCode: "A-99-99" })]} columns={compactColumns} displayMode="fit-all" />,
+    );
+    await new Promise((resolve) => window.setTimeout(resolve, 40));
+    expect(container.querySelectorAll("col")[1]?.style.width).toBe(`${rentalWidth + 35}px`);
   });
 
   it("does not render the redundant Billed lifecycle tag", () => {
@@ -441,6 +560,7 @@ describe("GridTable", () => {
       "Maint Fee", "Recurring", "Tenant Expenses", "Owner Expenses", "Management Fee", "Owner Payout",
     ]);
     expect(screen.queryByText(/aircond/i)).toBeNull();
+    expect(screen.getByText("TA (WITH SST)")).toBeInTheDocument();
   });
 
   it("combines new and renewal agreement fees into one SST-inclusive TA cell", () => {
@@ -455,6 +575,24 @@ describe("GridTable", () => {
     expect(screen.getByTestId("cell-agreementFee")).toHaveTextContent("600.00");
     expect(screen.getByTestId("cell-managementFeeSst")).toHaveTextContent("270.00");
     expect(billingStateForCell(row, row.apartmentId, "agreementFee")).toBe("saved");
+  });
+
+  it("distinguishes a missing management-fee rule from a configured zero fee", () => {
+    const missing = makeRow({
+      managementFee: { nonSst: "0.00", sst: "0.00", total: "0.00", configured: false },
+    });
+    const configuredZero = makeRow({
+      apartmentId: "APT-CONFIGURED-ZERO",
+      unitCode: "A-01-02",
+      managementFee: { nonSst: "0.00", sst: "0.00", total: "0.00", configured: true },
+    });
+
+    const { rerender } = render(<GridTable rows={[missing]} columns={CURRENT_COLUMNS} />);
+    expect(screen.getByTestId("cell-managementFeeSst")).toHaveTextContent("Not configured");
+
+    rerender(<GridTable key="configured-zero" rows={[configuredZero]} columns={CURRENT_COLUMNS} />);
+    expect(screen.getByTestId("cell-managementFeeSst")).toHaveTextContent("0.00");
+    expect(screen.getByTestId("cell-managementFeeSst")).not.toHaveTextContent("Not configured");
   });
 
   it("distinguishes no TA charge from a deliberately saved zero-value TA charge", () => {
@@ -553,22 +691,106 @@ describe("GridTable", () => {
     expect(loss).toHaveTextContent("Loss RM30.00");
     expect(profit.tagName).toBe("SPAN");
     expect(loss.tagName).toBe("SPAN");
+    expect(profit).not.toHaveClass("absolute");
+    expect(loss).not.toHaveClass("absolute");
     expect(within(unitRow).queryByRole("button", { name: "Add Cost" })).toBeNull();
   });
 
-  it('"wifi read-only" (recurring-charges R9): a saved wifiBearer "tenant" row shows the value read-only on the tenant column, "—" on owner — no textbox on either', () => {
+  it("uses the same amount-first action stack for every actionable read-only cell in every unit row", () => {
+    const rows = [
+      makeRow({
+        apartmentId: "APT1",
+        unitCode: "A-01-01",
+        ownerPartyId: "OWNER-1",
+        entry: makeEntry({}),
+        recurring: { owner: { total: "10.00", count: 1 }, tenant: { total: "20.00", count: 1 } },
+        expenses: {
+          tenant: {
+            total: "120.00", withSstTotal: "20.00", count: 2,
+            nonSstCount: 1, withSstCount: 1,
+            nonSstActionRequiredCount: 1, withSstActionRequiredCount: 0,
+            withSstGrossMargin: "5.00",
+          },
+          owner: {
+            total: "80.00", withSstTotal: "30.00", count: 2,
+            nonSstCount: 1, withSstCount: 1,
+          },
+        },
+        managementFee: { nonSst: "0.00", sst: "0.00", total: "0.00", configured: false },
+      }),
+      makeRow({
+        apartmentId: "APT2",
+        unitCode: "A-02-02",
+        ownerPartyId: "OWNER-2",
+        entry: makeEntry({}),
+        recurring: { owner: { total: "30.00", count: 1 }, tenant: { total: "40.00", count: 1 } },
+        expenses: {
+          tenant: {
+            total: "100.00", withSstTotal: "40.00", count: 2,
+            nonSstCount: 1, withSstCount: 1,
+          },
+          owner: {
+            total: "60.00", withSstTotal: "10.00", count: 2,
+            nonSstCount: 1, withSstCount: 1,
+          },
+        },
+        managementFee: { nonSst: "0.00", sst: "0.00", total: "0.00", configured: false },
+      }),
+    ];
+
+    render(
+      <GridTable
+        rows={rows}
+        columns={CURRENT_COLUMNS}
+        onViewRecurring={() => undefined}
+        onViewExpenses={() => undefined}
+        onConfigureManagementFee={() => undefined}
+        onViewOwnerReport={() => undefined}
+        onDownloadOwnerReport={() => undefined}
+      />,
+    );
+
+    const actionableColumns = [
+      "ownerRecurring", "tenantRecurring",
+      "tenantExpNonSst", "tenantExpWithSst",
+      "ownerExpNonSst", "ownerExpWithSst",
+      "managementFeeSst", "ownerPayout",
+    ];
+    const unitRows = screen.getAllByTestId("cell-ownerPayout").map((cell) => cell.closest("tr"));
+    expect(unitRows).toHaveLength(2);
+
+    for (const unitRow of unitRows) {
+      expect(unitRow).not.toBeNull();
+      for (const columnId of actionableColumns) {
+        const cell = within(unitRow!).getByTestId(`cell-${columnId}`);
+        const stack = within(cell).getByTestId("readonly-cell-stack");
+        const amount = within(stack).getByTestId("readonly-cell-amount");
+        const bottomRail = within(stack).getByTestId("readonly-cell-bottom-rail");
+        expect(stack).toHaveClass("contents");
+        expect(amount).toHaveClass("absolute", "inset-0", "items-center", "justify-center");
+        expect(bottomRail).toHaveClass("absolute", "bottom-1", "items-end", "justify-center");
+        expect(stack.children[0]).toBe(amount);
+        expect(stack.children[1]).toBe(bottomRail);
+      }
+    }
+
+    const addCost = screen.getByRole("button", { name: "Add Cost" });
+    expect(addCost).not.toHaveClass("absolute");
+    expect(screen.getByTestId("view-expenses-tenant-margin")).not.toHaveClass("absolute");
+    expect(screen.getAllByRole("button", { name: "Set management fee" })).toHaveLength(2);
+    expect(screen.queryByTestId("configure-management-fee")).toBeNull();
+  });
+
+  it('removes the WiFi Tenant column while preserving a legacy tenant-bearer snapshot without relabelling it as Owner', () => {
     const row = makeRow({
       entry: makeEntry({ wifi: "88.00", wifiBearer: "tenant" }),
       bearerConfig: makeBearerConfig({ wifiBearer: "tenant" }),
     });
     render(<GridTable rows={[row]} columns={CURRENT_COLUMNS} />);
     const unitRow = screen.getByRole("row", { name: /PV9 A-13-13/ });
-    // R9: wifi is settings-controlled read-only on BOTH sides; the tenant side is the ACTIVE
-    // (value-bearing) one for a tenant bearer, the owner side shows "—". Neither is editable.
-    const tenantCell = within(unitRow).getByTestId("cell-wifiTenant");
-    expect(tenantCell.querySelector("input")).toBeNull();
-    expect(tenantCell.getAttribute("aria-readonly")).toBe("true");
-    expect(tenantCell).toHaveTextContent("88.00"); // active side shows the value
+    // The historical snapshot stays tenant-borne in data/documents, so the remaining
+    // Owner cell must not misrepresent it. A future settings Save converts open months.
+    expect(within(unitRow).queryByTestId("cell-wifiTenant")).not.toBeInTheDocument();
     const ownerCell = within(unitRow).getByTestId("cell-wifiOwner");
     expect(ownerCell.getAttribute("aria-readonly")).toBe("true");
     expect(ownerCell).toHaveTextContent("—");
@@ -594,9 +816,7 @@ describe("GridTable", () => {
     expect(ownerCell.querySelector("input")).toBeNull(); // read-only now (R9)
     expect(ownerCell.getAttribute("aria-readonly")).toBe("true");
     expect(ownerCell).toHaveTextContent("77.00"); // snapshot owner side is active
-    const tenantCell = within(unitRow).getByTestId("cell-cleaningTenant");
-    expect(tenantCell.getAttribute("aria-readonly")).toBe("true");
-    expect(tenantCell).toHaveTextContent("—");
+    expect(within(unitRow).queryByTestId("cell-cleaningTenant")).not.toBeInTheDocument();
   });
 
   // Task 7 (R2): a single occupancy tag on the unit row — "Whole unit ·
@@ -616,6 +836,20 @@ describe("GridTable", () => {
     // sub-rows re-emitting it.
     expect(within(unitRow).getByTestId("unit-occupancy-tag")).toHaveTextContent("Whole unit: Owner Lee");
     expect(within(unitRow).getByTestId("whole-unit-tenant")).toHaveTextContent("Tenant: Ali");
+    const ownerLine = within(unitRow).getByTestId("unit-occupancy-tag");
+    const tenantLine = within(unitRow).getByTestId("whole-unit-tenant");
+    expect(ownerLine).toHaveClass("text-[18px]", "font-semibold", "leading-tight");
+    expect(tenantLine).toHaveClass("text-[18px]", "font-semibold", "leading-tight");
+    expect(within(ownerLine).getByText("Owner Lee")).toHaveClass(
+      "text-[18px]",
+      "font-semibold",
+      "leading-tight",
+    );
+    expect(within(tenantLine).getByText("Ali")).toHaveClass(
+      "text-[18px]",
+      "font-semibold",
+      "leading-tight",
+    );
     /* Retired format assertion kept in history:
     expect(within(unitRow).getByTestId("unit-occupancy-tag")).toHaveTextContent("Whole unit · Ali");
     */
@@ -825,17 +1059,58 @@ describe("GridTable", () => {
     expect(screen.getByTitle(/Edited by Siti ·/)).toBeInTheDocument();
   });
 
-  // Punch-list Item 5: each unit row shows its parent property/condo name under
-  // the unit code — the bare unit code alone is ambiguous under the "All"
-  // property filter, where units from different condos are interleaved.
-  it('"property name": the unit row renders row.propertyName under the unit code', () => {
-    const row = makeRow({ propertyName: "Sunway GEO Residences", entry: makeEntry({}) });
+  it('uses "Property Short Form + Unit Number" in the identity line and keeps the full condo name only in the group heading', () => {
+    const row = makeRow({ unitCode: "A-13-13", propertyName: "Sunway GEO Residences", propertyCode: "SGR", entry: makeEntry({}) });
     render(<GridTable rows={[row]} columns={CURRENT_COLUMNS} />);
-    const unitRow = screen.getByRole("row", { name: /PV9 A-13-13/ });
-    expect(within(unitRow).getByText("Sunway GEO Residences")).toBeInTheDocument();
-    // Lives inside the pinned Unit td, alongside the unit code (same cell).
-    const unitCell = within(unitRow).getByText("Sunway GEO Residences").closest("td");
-    expect(within(unitCell!).getByText("PV9 A-13-13")).toBeInTheDocument();
+    const unitRow = screen.getByRole("row", { name: /SGR A-13-13/ });
+    const identityLine = within(unitRow).getByTestId("unit-identity-line");
+    expect(identityLine).toHaveTextContent("SGR A-13-13");
+    expect(identityLine).not.toHaveTextContent("Sunway GEO Residences");
+    expect(screen.getByText("Sunway GEO Residences")).toBeInTheDocument();
+  });
+
+  it("keeps unit actions in normal flow so AutoFit and browser zoom cannot cover party details", () => {
+    const row = makeRow({
+      isWholeUnit: true,
+      ownerName: "Owner Lee",
+      entry: makeEntry({}),
+      subRows: [makeSubRow({ partyId: "P1", partyName: "Tenant Ali", rental: "3000.00" })],
+    });
+
+    render(
+      <GridTable
+        rows={[row]}
+        columns={CURRENT_COLUMNS}
+        onViewTenantSummary={() => undefined}
+        onOpenAttachments={() => undefined}
+      />,
+    );
+
+    const actionRow = screen.getByTestId("unit-status-actions-row");
+    const primaryRow = screen.getByTestId("unit-primary-row");
+    const identityLine = screen.getByTestId("unit-identity-line");
+    const actionCluster = screen.getByTestId("unit-action-cluster");
+    expect(actionCluster).not.toHaveClass("absolute");
+    expect(actionRow).toContainElement(actionCluster);
+    expect(primaryRow).toContainElement(identityLine);
+    expect(primaryRow).toContainElement(actionCluster);
+    expect(identityLine).toHaveClass("col-start-1", "row-start-1");
+    expect(actionCluster).toHaveClass("col-start-2", "row-start-1");
+    expect(screen.getByTestId("whole-unit-tenant")).toHaveTextContent("Tenant: Tenant Ali");
+  });
+
+  it("keeps the payment status on the same identity line as the short-form unit label", () => {
+    render(<GridTable rows={[makeRow({ entry: makeEntry({}), paymentStatus: "unpaid" })]} columns={CURRENT_COLUMNS} />);
+    const identityLine = screen.getByTestId("unit-identity-line");
+    expect(within(identityLine).getByTestId("entry-payment-pill")).toHaveTextContent("Unpaid");
+    expect(identityLine).toHaveTextContent("PV9 A-13-13");
+  });
+
+  it("does not repeat a short form already stored at the start of a legacy unit code", () => {
+    expect(formatUnitIdentity("KR", "A-02-02")).toBe("KR A-02-02");
+    expect(formatUnitIdentity(undefined, "A-02-02")).toBe("A-02-02");
+    expect(formatUnitIdentity("PV9", "PV9 A-13-13")).toBe("PV9 A-13-13");
+    expect(formatUnitIdentity("PV9", "PV9-A-13-13")).toBe("PV9-A-13-13");
   });
 
   it("draws strong category boundaries while keeping inner sub-columns unaccented", () => {
@@ -865,9 +1140,10 @@ describe("GridTable", () => {
       subRows: [makeSubRow({ previousKwh: null, currentKwh: null, amount: null })],
     })]} columns={CURRENT_COLUMNS} />);
 
-    for (const columnId of ["tnbOwner", "tnbTenant", "amount", "airOwner", "airTenant", "wifiOwner", "wifiTenant"]) {
+    for (const columnId of ["tnbOwner", "tnbTenant", "amount", "airOwner", "airTenant", "wifiOwner"]) {
       expect(screen.getByTestId(`total-${columnId}`)).toHaveTextContent("0.00");
     }
+    expect(screen.queryByTestId("total-wifiTenant")).not.toBeInTheDocument();
     expect(screen.getByTestId("total-previousKwh")).toHaveTextContent("—");
     expect(screen.getByTestId("total-currentKwh")).toHaveTextContent("—");
   });
@@ -896,6 +1172,20 @@ describe("GridTable", () => {
     expect(screen.getByTestId("total-ownerPayout")).toHaveTextContent("3165.00");
     await userEvent.click(screen.getByRole("button", { name: "View owner monthly report for PV9 A-13-13" }));
     expect(opened).toBe(row);
+  });
+
+  it("keeps Owner Payout in the table flow instead of overlaying Management Fee", () => {
+    render(<GridTable rows={[makeRow()]} columns={CURRENT_COLUMNS} />);
+
+    for (const element of [
+      screen.getByTestId("col-header-ownerPayout"),
+      screen.getByTestId("cell-ownerPayout"),
+      screen.getByTestId("total-ownerPayout"),
+    ]) {
+      // Vertical sticky headers/totals are intentional. The regression was
+      // the horizontally frozen right edge, which covered Management Fee.
+      expect(element).not.toHaveClass("right-0");
+    }
   });
 
   it("automates saved/billed/paid/re-bill cell colours while empty cells stay unpainted", () => {

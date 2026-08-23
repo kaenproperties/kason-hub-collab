@@ -2,7 +2,7 @@ import { useEffect } from "react";
 import { useSearchParams } from "react-router-dom";
 import { Building2, LayoutGrid, Settings, Sparkles, Tag } from "lucide-react";
 import { PageHeader } from "@/components/ui";
-import { useAuth } from "@/lib/auth";
+import { usePermission } from "@/components/permission-gate";
 import { AmenitiesSection } from "./inventory/amenities-section";
 import { UnitTypesSection } from "./inventory/unit-types-section";
 import { WorkCategoriesSection } from "./inventory/work-categories-section";
@@ -48,8 +48,7 @@ function isTabKey(v: string | null): v is TabKey {
 }
 
 export default function InventorySettingsPage() {
-  const { user } = useAuth();
-  const canWrite = user?.role === "manager" || user?.role === "admin";
+  const canWrite = usePermission("settings.manage");
 
   const [searchParams, setSearchParams] = useSearchParams();
   const rawTab = searchParams.get("tab");

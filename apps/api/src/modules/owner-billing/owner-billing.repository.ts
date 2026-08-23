@@ -7,7 +7,12 @@ import { computeProratedRent, pickBaseRent } from "../../lib/rent-math";
 // The SHARED period-aware tenancy selector every billing surface uses — never a
 // hand-rolled `status:"active"` snapshot (see the ⚠️ MONEY note below).
 import { primaryTenancyForPeriod, tenancyPeriodWhere } from "../../lib/tenancy-period";
-import { centsToString, toCents } from "@kason/shared";
+import {
+  centsToString,
+  effectiveWindowOverlapsBillingMonth,
+  toCents,
+  type ManagementFeeRentComponent,
+} from "@kason/shared";
 import { isCommissionMonth } from "../../lib/commission-month";
 
 export type DbManagementFeeConfig = Prisma.ManagementFeeConfigGetPayload<Record<string, never>>;
@@ -16,6 +21,7 @@ export type DbManagementFeeConfig = Prisma.ManagementFeeConfigGetPayload<Record<
 export interface FeeConfigFilters {
   ownerPartyId?: string;
   propertyId?: string;
+  apartmentId?: string;
   feeType?: string;
   isActive?: boolean;
 }
@@ -126,6 +132,7 @@ export async function listFeeConfigs(
       organizationId: orgId,
       ...(filters.ownerPartyId ? { ownerPartyId: filters.ownerPartyId } : {}),
       ...(filters.propertyId ? { propertyId: filters.propertyId } : {}),
+      ...(filters.apartmentId ? { apartmentId: filters.apartmentId } : {}),
       ...(filters.feeType ? { feeType: filters.feeType } : {}),
       ...(filters.isActive !== undefined ? { isActive: filters.isActive } : {}),
     },
@@ -234,6 +241,11 @@ export interface OwnerUnitForMonth {
   occupied: boolean;
   rentBase: string;
   rentBaseForMonth: string;
+  /** Per-tenancy rent facts. The service applies the fee rule selected for this
+   * owner/property/unit, including its optional per-pax deduction. Keeping raw
+   * components here avoids an old property-level setting silently overriding a
+   * negotiated unit-specific fee rule. */
+  managementFeeRentComponents: ManagementFeeRentComponent[];
 }
 
 /**
@@ -301,7 +313,13 @@ export async function resolveOwnerUnitsForMonth(
     },
     select: {
       id: true,
-      apartment: { select: { id: true, unitCode: true, propertyId: true } },
+      apartment: {
+        select: {
+          id: true,
+          unitCode: true,
+          propertyId: true,
+        },
+      },
       tenancies: {
         // Period OVERLAP, not `status:"active"` — the shared selector every
         // billing surface uses (lib/tenancy-period.ts). `status:"active"` is a
@@ -317,6 +335,8 @@ export async function resolveOwnerUnitsForMonth(
           startDate: true,
           endDate: true,
           status: true,
+          numberOfPax: true,
+          firstMonthIsCommission: true,
           reservation: { select: { agreedMonthlyRent: true } },
         },
       },
@@ -347,6 +367,30 @@ export async function resolveOwnerUnitsForMonth(
     }
   }
 
+  // Management fees are owner charges and only become payable after the owner's
+  // ordinary rent for the month has been fully collected.  Read the live rental
+  // charges once for all tenancies; commission rent is deliberately excluded by
+  // the economic rule below even though it is tenant-facing "first month rent".
+  const rentCharges = tenancyIds.length > 0
+    ? await db.charge.findMany({
+        where: {
+          organizationId: orgId,
+          tenancyId: { in: tenancyIds },
+          billingMonth: month,
+          chargeType: { in: ["rent", "letting_commission"] },
+          status: { notIn: ["void", "credited"] },
+        },
+        select: { tenancyId: true, chargeType: true, outstandingAmount: true },
+      })
+    : [];
+  const ordinaryRentChargesByTenancy = new Map<string, typeof rentCharges>();
+  for (const charge of rentCharges) {
+    if (!charge.tenancyId || charge.chargeType !== "rent") continue;
+    const rows = ordinaryRentChargesByTenancy.get(charge.tenancyId) ?? [];
+    rows.push(charge);
+    ordinaryRentChargesByTenancy.set(charge.tenancyId, rows);
+  }
+
   const units: OwnerUnitForMonth[] = [];
   for (const listing of ownedListings) {
     // `rentBase` follows the month's PRIMARY tenancy (longest occupancy) — the
@@ -358,16 +402,29 @@ export async function resolveOwnerUnitsForMonth(
     // month the unit is billed two prorated rents that together cover it, and the
     // fee is owed on both — taking only the primary's share would under-bill.
     let rentBaseForMonthC = 0;
+    const managementFeeRentComponents: ManagementFeeRentComponent[] = [];
     for (const t of listing.tenancies) {
       const picked = pickBaseRent(
         rentOverrideByTenancyId.get(t.id) ?? null,
         t.reservation?.agreedMonthlyRent != null ? Number(t.reservation.agreedMonthlyRent) : null,
         Number(t.monthlyRentAmount),
       );
+      const billedRent = computeProratedRent(picked, t.startDate, t.endDate, month);
       rentBaseForMonthC += toCents(
-        computeProratedRent(picked, t.startDate, t.endDate, month).toFixed(2),
+        billedRent.toFixed(2),
         "resolveOwnerUnitsForMonth.rentBaseForMonth",
       );
+
+      const ordinaryCharges = ordinaryRentChargesByTenancy.get(t.id) ?? [];
+      managementFeeRentComponents.push({
+        billedRent: billedRent.toFixed(2),
+        fullMonthRent: picked.toFixed(2),
+        numberOfPax: t.numberOfPax,
+        isCommissionMonth: isCommissionMonth(t, month),
+        fullyCollected:
+          ordinaryCharges.length > 0 &&
+          ordinaryCharges.every((charge) => Number(charge.outstandingAmount) <= 0.005),
+      });
     }
     const rentBaseForMonth = centsToString(rentBaseForMonthC);
 
@@ -379,6 +436,7 @@ export async function resolveOwnerUnitsForMonth(
       occupied: primaryTenancy != null,
       rentBase,
       rentBaseForMonth,
+      managementFeeRentComponents,
     });
   }
   return units;
@@ -557,7 +615,7 @@ export async function findFeeConfigsForOwner(
  * Resolve the management-fee config that applies to one unit. A config whose
  * apartmentId === the unit's apartmentId overrides its property config, which
  * overrides the all-properties default. Only `isActive` configs whose effective window (if set)
- * covers the first-of-month are eligible. Returns null when none applies → that
+ * overlaps the billing month are eligible. Returns null when none applies → that
  * unit gets no auto mgmt-fee / cleaning lines.
  *
  * THE canonical resolver — the generate path (owner-billing.service.ts), the
@@ -573,8 +631,7 @@ export function resolveConfigForUnit(
 ): DbManagementFeeConfig | null {
   const eligible = configs.filter((c) => {
     if (!c.isActive) return false;
-    if (c.effectiveFrom && firstOfMonth < c.effectiveFrom) return false;
-    if (c.effectiveTo && firstOfMonth > c.effectiveTo) return false;
+    if (!effectiveWindowOverlapsBillingMonth(firstOfMonth, c)) return false;
     return (
       c.apartmentId === unit.apartmentId ||
       (c.apartmentId == null && (c.propertyId === null || c.propertyId === unit.propertyId))

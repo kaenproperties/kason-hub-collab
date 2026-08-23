@@ -1,7 +1,7 @@
 import { Dialog } from "@base-ui/react/dialog";
 import { Menu, X, LogOut } from "lucide-react";
 import { Link, useLocation, useNavigate } from "react-router-dom";
-import { navSections, allNavItems, canSeeNavItem, type NavItem } from "./navigation";
+import { navSections, allNavItems, canSeeNavItemFor, type NavItem } from "./navigation";
 import { useAuth } from "@/lib/auth";
 import { cn } from "@/lib/utils";
 
@@ -59,7 +59,7 @@ export function MobileDrawer() {
 
           <nav className="scrollbar-slim flex-1 overflow-y-auto px-3 py-4">
             {navSections.map((section) => {
-              const visibleItems = section.items.filter((item) => canSeeNavItem(role, item));
+              const visibleItems = section.items.filter((item) => canSeeNavItemFor(role, item, user?.permissions));
               if (visibleItems.length === 0) return null;
               return (
               <div key={section.label} className="mb-4">

@@ -272,17 +272,30 @@ async function findOrCreateApartment(args: {
   // when supplied — undefined leaves the DB default (NO_SUBSIDY) on create and
   // leaves an existing apartment's value untouched.
   partitionBillingMode?: "SUBSIDY" | "NO_SUBSIDY";
+  // Optional per-unit monthly TNB owner cap. A value takes priority for the
+  // residual TNB amount. `null` explicitly defers to partitionBillingMode;
+  // undefined means the caller made no assertion about this setting.
+  tnbSubsidyCapMonthly?: number | null;
   // Actor for the in-tx audit written when an EXISTING apartment's billing mode
   // actually changes (money-adjacent: SUBSIDY vs NO_SUBSIDY drives tenant utility
   // bills). Required so the audit can never be silently dropped.
   actor: { userId: string; role: string };
 }): Promise<{ id: string }> {
-  const { tx, orgId, propertyId, unitCode, listingType, shared, partitionBillingMode, actor } =
-    args;
+  const {
+    tx,
+    orgId,
+    propertyId,
+    unitCode,
+    listingType,
+    shared,
+    partitionBillingMode,
+    tnbSubsidyCapMonthly,
+    actor,
+  } = args;
 
   const existing = await tx.apartment.findFirst({
     where: { organizationId: orgId, propertyId, unitCode },
-    select: { id: true, partitionBillingMode: true },
+    select: { id: true, partitionBillingMode: true, tnbSubsidyCapMonthly: true },
   });
   if (existing) {
     // I4: `partitionBillingMode` is APARTMENT-scoped and money-adjacent — SUBSIDY vs
@@ -305,6 +318,17 @@ async function findOrCreateApartment(args: {
     // comparison needs no NULL handling.
     if (partitionBillingMode !== undefined && partitionBillingMode !== existing.partitionBillingMode) {
       throw apartmentBillingModeConflictError();
+    }
+    if (tnbSubsidyCapMonthly !== undefined) {
+      const existingCapCents = existing.tnbSubsidyCapMonthly == null
+        ? null
+        : Math.round(Number(existing.tnbSubsidyCapMonthly.toString()) * 100);
+      const requestedCapCents = tnbSubsidyCapMonthly == null
+        ? null
+        : Math.round(tnbSubsidyCapMonthly * 100);
+      if (requestedCapCents !== existingCapCents) {
+        throw apartmentTnbSubsidyCapConflictError();
+      }
     }
     return existing;
   }
@@ -331,6 +355,8 @@ async function findOrCreateApartment(args: {
       publishedDescription: shared.description ?? null,
       // Omitted when undefined so the schema default (NO_SUBSIDY) applies.
       ...(partitionBillingMode !== undefined ? { partitionBillingMode } : {}),
+      // Null deliberately defers to the apartment's legacy partition billing mode.
+      ...(tnbSubsidyCapMonthly !== undefined ? { tnbSubsidyCapMonthly } : {}),
     },
     select: { id: true },
   });
@@ -346,7 +372,12 @@ async function findOrCreateApartment(args: {
   // among the edits. The action is deliberately NOT renamed (other consumers filter on
   // it); the `diff` carries a `source` discriminator instead, mirroring the `source`
   // key already on the `inventory.owner.propagate` meta.
-  if (partitionBillingMode !== undefined) {
+  if (partitionBillingMode !== undefined || tnbSubsidyCapMonthly !== undefined) {
+    const diff: Record<string, unknown> = { source: "unit-create" };
+    if (partitionBillingMode !== undefined) diff.partitionBillingMode = partitionBillingMode;
+    if (tnbSubsidyCapMonthly !== undefined) {
+      diff.tnbSubsidyCapMonthly = tnbSubsidyCapMonthly;
+    }
     await recordAudit(tx, {
       organizationId: orgId,
       actorUserId: actor.userId,
@@ -354,7 +385,7 @@ async function findOrCreateApartment(args: {
       action: "apartment.shared.update",
       entityType: "Apartment",
       entityId: createdApartment.id,
-      diff: { partitionBillingMode, source: "unit-create" } as unknown as Prisma.InputJsonValue,
+      diff: diff as Prisma.InputJsonValue,
     });
   }
 
@@ -421,6 +452,9 @@ function isApartmentOwnerUnassignable(err: unknown): boolean {
 const APARTMENT_BILLING_MODE_CONFLICT_MESSAGE =
   "This apartment already uses a different utility billing model. Change it from Edit shared details.";
 
+const APARTMENT_TNB_SUBSIDY_CAP_CONFLICT_MESSAGE =
+  "This apartment already uses a different monthly TNB owner subsidy cap. Change it from Edit shared details.";
+
 /**
  * I4. Thrown by `findOrCreateApartment` when a create carries a `partitionBillingMode`
  * that differs from the existing apartment's, and mapped back to a 409 by each create
@@ -439,6 +473,21 @@ function isApartmentBillingModeConflict(err: unknown): boolean {
     typeof err === "object" &&
     err !== null &&
     (err as { _apartmentBillingModeConflict?: boolean })._apartmentBillingModeConflict === true
+  );
+}
+
+function apartmentTnbSubsidyCapConflictError(): Error {
+  return Object.assign(new Error("APARTMENT_TNB_SUBSIDY_CAP_CONFLICT"), {
+    _apartmentTnbSubsidyCapConflict: true as const,
+  });
+}
+
+function isApartmentTnbSubsidyCapConflict(err: unknown): boolean {
+  return (
+    typeof err === "object" &&
+    err !== null &&
+    (err as { _apartmentTnbSubsidyCapConflict?: boolean })
+      ._apartmentTnbSubsidyCapConflict === true
   );
 }
 
@@ -788,6 +837,7 @@ export async function createUnitsBatchService(
   // Rooms this batch materialised a Tenancy for. Collected inside the
   // transaction, consumed AFTER it commits by the draft catch-up hook — a
   // billing follow-on must never ride a transaction that may roll back.
+  let batchManagementFeeOwnerPartyId: string | null = null;
   const occupiedUnitIds: string[] = [];
 
   const inChargePartyId = input.shared.inChargePartyId ?? null;
@@ -819,6 +869,7 @@ export async function createUnitsBatchService(
         listingType: firstType,
         shared: apartmentShared,
         partitionBillingMode: input.shared.partitionBillingMode,
+        tnbSubsidyCapMonthly: input.shared.tnbSubsidyCapMonthly,
         actor: { userId: session.userId, role: session.role },
       });
 
@@ -1071,6 +1122,59 @@ export async function createUnitsBatchService(
         }
       }
 
+      // Persist the apartment and its management-fee terms in one transaction.
+      // Previously the browser made a second POST after creating the rooms; if
+      // that request failed, Billing could only show RM0.00 / setup required.
+      const managementFeeConfig = input.shared.managementFeeConfig;
+      if (managementFeeConfig) {
+        if (!effectiveOwnerPartyId) {
+          throw unitHasNoOwnerError();
+        }
+        await tx.managementFeeConfig.updateMany({
+          where: {
+            organizationId: session.orgId,
+            apartmentId: apartment.id,
+            isActive: true,
+          },
+          data: { isActive: false, effectiveTo: new Date() },
+        });
+        const feeConfig = await tx.managementFeeConfig.create({
+          data: {
+            organizationId: session.orgId,
+            ownerPartyId: effectiveOwnerPartyId,
+            propertyId: input.shared.propertyId,
+            apartmentId: apartment.id,
+            feeType: managementFeeConfig.feeType,
+            feeValue: managementFeeConfig.feeValue,
+            capAmount: managementFeeConfig.capAmount ?? null,
+            sstPercent: "8",
+            freePeriodStart: managementFeeConfig.freePeriodStart
+              ? new Date(managementFeeConfig.freePeriodStart)
+              : null,
+            freePeriodEnd: managementFeeConfig.freePeriodEnd
+              ? new Date(managementFeeConfig.freePeriodEnd)
+              : null,
+            firstChargeMonth: managementFeeConfig.firstChargeMonth
+              ? new Date(managementFeeConfig.firstChargeMonth)
+              : null,
+            firstChargeBaseAmount: managementFeeConfig.firstChargeBaseAmount ?? null,
+            paxDeductionPerPerson: managementFeeConfig.paxDeductionPerPerson ?? null,
+            isActive: true,
+          },
+          select: { id: true },
+        });
+        await recordAudit(tx, {
+          organizationId: session.orgId,
+          actorUserId: session.userId,
+          actorRole: session.role,
+          action: "owner_billing.fee_config.created_with_unit_batch",
+          entityType: "ManagementFeeConfig",
+          entityId: feeConfig.id,
+          meta: { apartmentId: apartment.id, ownerPartyId: effectiveOwnerPartyId },
+        });
+        batchManagementFeeOwnerPartyId = effectiveOwnerPartyId;
+      }
+
       return { ids: created, updatedIds, apartmentId: apartment.id };
     });
 
@@ -1085,6 +1189,21 @@ export async function createUnitsBatchService(
         actorRole: session.role as OwnerBillingActorCtx["actorRole"],
       };
       await rematerializeOwnerRecentMonths(sysCtx, firstOwnerFanOutPartyId, new Date());
+    }
+    if (
+      batchManagementFeeOwnerPartyId &&
+      batchManagementFeeOwnerPartyId !== firstOwnerFanOutPartyId
+    ) {
+      const sysCtx: OwnerBillingActorCtx = {
+        orgId: session.orgId,
+        actorUserId: session.userId,
+        actorRole: session.role as OwnerBillingActorCtx["actorRole"],
+      };
+      await rematerializeOwnerRecentMonths(
+        sysCtx,
+        batchManagementFeeOwnerPartyId,
+        new Date(),
+      );
     }
 
     // Post-commit, never-throws: rooms created already-occupied missed this
@@ -1125,6 +1244,14 @@ export async function createUnitsBatchService(
         status: 409,
         code: "APARTMENT_BILLING_MODE_CONFLICT",
         error: APARTMENT_BILLING_MODE_CONFLICT_MESSAGE,
+      };
+    }
+    if (isApartmentTnbSubsidyCapConflict(err)) {
+      return {
+        ok: false,
+        status: 409,
+        code: "APARTMENT_TNB_SUBSIDY_CAP_CONFLICT",
+        error: APARTMENT_TNB_SUBSIDY_CAP_CONFLICT_MESSAGE,
       };
     }
     // T2 (orphan fix): a per-room occupied submission was missing part of the
@@ -1303,6 +1430,13 @@ export async function createUnitService(
       return { ok: false as const, status: 400 as const, error: "Assigned party is not an owner" };
     }
   }
+  if (input.managementFeeConfig && input.ownerPartyId == null) {
+    return {
+      ok: false as const,
+      status: 400 as const,
+      error: "Assign an owner before configuring the management fee.",
+    };
+  }
 
   // Resolve the apartment's CURRENT owner ONCE, before the transaction, so a
   // rejection returns before the transaction opens. Null for a brand-new /
@@ -1420,6 +1554,8 @@ export async function createUnitService(
     unitType: _unitType,
     // Sales-side flag kept in the legacy schema; ignored by the rental write.
     sourceFlag: _sourceFlag,
+    tnbSubsidyCapMonthly,
+    managementFeeConfig,
     ...listingFields
   } = cleaned;
   void _propertyId; void _unitCode; void _unitType; void _sourceFlag;
@@ -1442,6 +1578,7 @@ export async function createUnitService(
   // `updateApartmentSharedService`. Assigned inside the transaction, read after it
   // commits — a ledger rebuild must never ride a transaction that may roll back.
   let firstOwnerFanOutPartyId: string | null = null;
+  let managementFeeOwnerPartyId: string | null = null;
 
   // Find-or-create the apartment inside a single transaction with the
   // listing create so partial state is never visible.
@@ -1456,6 +1593,7 @@ export async function createUnitService(
       listingType: normalizedUnitType,
       shared: { bedrooms, bathrooms, floor, floorArea, amenities, highlights, description },
       partitionBillingMode: input.partitionBillingMode,
+      tnbSubsidyCapMonthly,
       actor: { userId: session.userId, role: session.role },
     });
 
@@ -1567,6 +1705,57 @@ export async function createUnitService(
       }
     }
 
+    // The unit and its commercial terms must either both exist or neither
+    // exist.  This replaces the former client-side second POST, which could be
+    // rejected after the Listing had already committed and was the source of
+    // RM0.00 / "Management fee setup required" rows in the Billing grid.
+    if (managementFeeConfig && effectiveOwnerPartyId) {
+      await tx.managementFeeConfig.updateMany({
+        where: {
+          organizationId: session.orgId,
+          apartmentId: apartment.id,
+          isActive: true,
+        },
+        data: { isActive: false, effectiveTo: new Date() },
+      });
+      const feeConfig = await tx.managementFeeConfig.create({
+        data: {
+          organizationId: session.orgId,
+          ownerPartyId: effectiveOwnerPartyId,
+          propertyId: input.propertyId,
+          apartmentId: apartment.id,
+          feeType: managementFeeConfig.feeType,
+          feeValue: managementFeeConfig.feeValue,
+          capAmount: managementFeeConfig.capAmount ?? null,
+          // KAEN management fees are always subject to 8% SST.
+          sstPercent: "8",
+          freePeriodStart: managementFeeConfig.freePeriodStart
+            ? new Date(managementFeeConfig.freePeriodStart)
+            : null,
+          freePeriodEnd: managementFeeConfig.freePeriodEnd
+            ? new Date(managementFeeConfig.freePeriodEnd)
+            : null,
+          firstChargeMonth: managementFeeConfig.firstChargeMonth
+            ? new Date(managementFeeConfig.firstChargeMonth)
+            : null,
+          firstChargeBaseAmount: managementFeeConfig.firstChargeBaseAmount ?? null,
+          paxDeductionPerPerson: managementFeeConfig.paxDeductionPerPerson ?? null,
+          isActive: true,
+        },
+        select: { id: true },
+      });
+      await recordAudit(tx, {
+        organizationId: session.orgId,
+        actorUserId: session.userId,
+        actorRole: session.role,
+        action: "owner_billing.fee_config.created_with_unit",
+        entityType: "ManagementFeeConfig",
+        entityId: feeConfig.id,
+        meta: { apartmentId: apartment.id, ownerPartyId: effectiveOwnerPartyId },
+      });
+      managementFeeOwnerPartyId = effectiveOwnerPartyId;
+    }
+
     // Materialise the Tenancy IN THE SAME TRANSACTION as the Apartment + Listing
     // writes, so a failure rolls all three back together -- an "occupied" Listing
     // with no Tenancy behind it (the bug this fixes) is never persistable. Mirrors
@@ -1637,6 +1826,14 @@ export async function createUnitService(
         error: APARTMENT_BILLING_MODE_CONFLICT_MESSAGE,
       };
     }
+    if (isApartmentTnbSubsidyCapConflict(err)) {
+      return {
+        ok: false as const,
+        status: 409 as const,
+        code: "APARTMENT_TNB_SUBSIDY_CAP_CONFLICT" as const,
+        error: APARTMENT_TNB_SUBSIDY_CAP_CONFLICT_MESSAGE,
+      };
+    }
     // Override C: syncOccupancyTenancy throws a marked error when the
     // reservation-gated flag is on and no explicit rent was supplied for a NEW
     // tenancy. Surface it as a clean 400 instead of letting it reach the global
@@ -1697,6 +1894,14 @@ export async function createUnitService(
       actorRole: session.role as OwnerBillingActorCtx["actorRole"],
     };
     await rematerializeOwnerRecentMonths(sysCtx, firstOwnerFanOutPartyId, new Date());
+  }
+  if (managementFeeOwnerPartyId && managementFeeOwnerPartyId !== firstOwnerFanOutPartyId) {
+    const sysCtx: OwnerBillingActorCtx = {
+      orgId: session.orgId,
+      actorUserId: session.userId,
+      actorRole: session.role as OwnerBillingActorCtx["actorRole"],
+    };
+    await rematerializeOwnerRecentMonths(sysCtx, managementFeeOwnerPartyId, new Date());
   }
 
   // Post-commit, never-throws: a unit created already-occupied missed this
@@ -2231,6 +2436,8 @@ export type ApartmentSummary = {
   // and to avoid forcing the unrelated portal apartment builder (which assigns to
   // this same type) to provide it. The admin builder below always sets it.
   partitionBillingMode?: "SUBSIDY" | "NO_SUBSIDY" | null;
+  /** Null defers to partitionBillingMode; a value takes priority for residual TNB. */
+  tnbSubsidyCapMonthly?: number | null;
   // Optional for the same reason as partitionBillingMode above: the admin
   // builder always sets these, but the portal apartment builder (which assigns
   // to this same type) does not select or surface owner contact info to
@@ -2401,6 +2608,8 @@ export async function getApartmentsByPropertyService(
       // (@default(NO_SUBSIDY)); the `include` query returns it on every row.
       // Typed nullable on the wire for forward-compat with the SPA shape.
       partitionBillingMode: apt.partitionBillingMode,
+      tnbSubsidyCapMonthly:
+        apt.tnbSubsidyCapMonthly == null ? null : Number(apt.tnbSubsidyCapMonthly),
       underManagement: apt.underManagement,
       ownerPartyId: ownerListing?.ownerPartyId ?? null,
       ownerName: ownerListing?.ownerParty?.displayName ?? null,

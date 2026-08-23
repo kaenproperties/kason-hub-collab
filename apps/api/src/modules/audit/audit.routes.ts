@@ -1,6 +1,6 @@
 import { Hono } from "hono";
 import type { SessionPayload } from "../../lib/auth";
-import { requireRole } from "../../middleware/require-role";
+import { requirePermission } from "../../middleware/require-permission";
 import { listAuditQuery } from "./audit.types";
 import { listAudit } from "./audit.service";
 import type { AdminRole } from "../../lib/rbac";
@@ -9,7 +9,7 @@ import { formatZodError } from "../../lib/zod-error-mapper";
 const auditRoutes = new Hono<{ Variables: { session: SessionPayload } }>();
 
 // Defence-in-depth: route-level gate + service-level atLeast() check.
-auditRoutes.use("*", requireRole("manager"));
+auditRoutes.use("*", requirePermission("audit.view"));
 
 auditRoutes.get("/", async (c) => {
   const session = c.get("session");

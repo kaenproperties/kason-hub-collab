@@ -248,7 +248,9 @@ dn("M2 service (integration)", () => {
     // Verify bill snapshot fields
     const billRow = await db.unitUtilityBill.findFirstOrThrow({ where: { id: billId } });
     expect(billRow.billingMode).toBe("subsidy");
+    expect(billRow.subsidyPolicySnapshot).toBe("legacy_per_pax");
     expect(Number(billRow.subsidyPerPax)).toBe(50);
+    expect(billRow.tnbSubsidyCapSnapshot).toBeNull();
     expect(Number(billRow.subsidyCovered)).toBeCloseTo(150, 1);
     // M6 seam: owner-borne = subsidyCovered(150) + 0 vacant aircond + 0 residual
     expect(Number(billRow.ownerBorneUtilitiesTotal)).toBeCloseTo(150, 1);

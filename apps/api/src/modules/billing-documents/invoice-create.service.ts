@@ -13,6 +13,13 @@ function chargeNumber(seq: number): string {
   return `MINV-${ymd}-${rand}-${seq}`;
 }
 
+const managerRevenueCategoryCodes = new Set([
+  "management_fee",
+  "letting_commission",
+  "tenancy_agreement_fee",
+  "renewal_fee",
+]);
+
 /**
  * R11: manual invoice create. Mints ONE posted Charge + issues ONE category-routed
  * BillingDocument (invoice/debit_note) per line, all in a single transaction.
@@ -31,6 +38,32 @@ export async function createManualInvoiceService(
     const result = await getDb().$transaction(async (tx) => {
       const documents: { id: string; documentNumber: string }[] = [];
       const chargeIds: string[] = [];
+      let selectedApartment: { propertyId: string; listingMode: "WHOLE" | "PARTITIONED"; listings: { id: string }[] } | null = null;
+      if (input.apartmentId) {
+        selectedApartment = await tx.apartment.findFirst({
+          where: { organizationId: session.orgId, id: input.apartmentId },
+          select: {
+            propertyId: true,
+            listingMode: true,
+            listings: {
+              where: { listingStatus: { not: "archived" } },
+              select: { id: true },
+              orderBy: { createdAt: "asc" },
+            },
+          },
+        });
+        if (!selectedApartment) throw new ManualInvoiceError(404, "APARTMENT_NOT_FOUND");
+      }
+      // An apartment maps unambiguously to a charge unit only for a whole-unit
+      // listing (or the rare case where exactly one listing exists). For a
+      // partitioned apartment with several rooms, keep the charge unit null
+      // rather than attributing revenue to an arbitrary tenant; the immutable
+      // document still retains the apartment for display and audit.
+      const chargeUnitId = selectedApartment?.listingMode === "WHOLE"
+        ? selectedApartment.listings[0]?.id ?? null
+        : selectedApartment?.listings.length === 1
+          ? selectedApartment.listings[0]?.id ?? null
+          : null;
       let seq = 0;
       for (const line of input.lines) {
         const category = await tx.chargeCategory.findFirst({
@@ -48,6 +81,7 @@ export async function createManualInvoiceService(
           {
             organizationId: session.orgId,
             chargeNumber: cn,
+            unitId: chargeUnitId,
             partyId: input.partyId,
             chargeType: category.code,
             categoryId: category.id,
@@ -61,7 +95,22 @@ export async function createManualInvoiceService(
         );
         // Post the charge so the document represents a live receivable (mirrors
         // postChargeService's status flip; outstanding already = amount).
-        await tx.charge.update({ where: { id: charge.id }, data: { status: "posted", postedAt: new Date() } });
+        const isManagerRevenue = managerRevenueCategoryCodes.has(category.code);
+        await tx.charge.update({
+          where: { id: charge.id },
+          data: {
+            status: "posted",
+            postedAt: new Date(),
+            ...(isManagerRevenue ? {
+              nature: "profit",
+              fundedBy: input.counterpartyType === "owner" ? "owner" : "tenant_funded",
+              revenueRecognition: "manager_revenue",
+              settlementRecipient: "manager",
+              commercialPurpose: category.code === "management_fee" ? "MANAGEMENT_FEE" : "SERVICE",
+              taxTreatment: "taxable_service",
+            } : {}),
+          },
+        });
         chargeIds.push(charge.id);
 
         const doc = await issueDocumentTx(tx, {
@@ -69,7 +118,9 @@ export async function createManualInvoiceService(
           docType: category.docType as "invoice" | "debit_note",
           counterpartyType: category.family === "owner_income" ? "owner" : "tenant",
           partyId: input.partyId,
+          propertyId: selectedApartment?.propertyId,
           apartmentId: input.apartmentId,
+          listingId: chargeUnitId ?? undefined,
           billingMonth: `${input.billingMonth}-01`,
           idempotencyKey: `manual-inv:${cn}`,
           lines: [

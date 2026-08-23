@@ -78,6 +78,12 @@ export function AssignTenantToUnitDialog({
   const [monthlyRentAmount, setMonthlyRentAmount] = useState("");
   const [startDate, setStartDate] = useState("");
   const [endDate, setEndDate] = useState("");
+  // Keep the party-page assignment flow financially equivalent to Create
+  // Tenancy and the Inventory occupancy flow. A blank value means no TA fee
+  // decision; an explicit "0" is deliberately sent so the billing grid can
+  // surface an accidental RM0 for review.
+  const [tenancyAgreementFeeAmount, setTenancyAgreementFeeAmount] = useState("");
+  const [tenancyAgreementFeeDueDate, setTenancyAgreementFeeDueDate] = useState("");
   // No depositAmount field: deposits are derived from the unit's configured
   // depositMonths and posted as their own Rental Deposits document
   // (DEPRENT-/DEPUTIL- charges), so a free-text amount here was a second,
@@ -100,6 +106,8 @@ export function AssignTenantToUnitDialog({
     setMonthlyRentAmount("");
     setStartDate("");
     setEndDate("");
+    setTenancyAgreementFeeAmount("");
+    setTenancyAgreementFeeDueDate("");
     setFirstMonthIsCommission(false);
     setCommissionSstBearer("owner");
     setUnitError(null);
@@ -281,6 +289,12 @@ export function AssignTenantToUnitDialog({
       monthlyRentAmount,
     };
     if (endDate) body.endDate = endDate;
+    if (tenancyAgreementFeeAmount !== "") {
+      body.tenancyAgreementFeeAmount = tenancyAgreementFeeAmount;
+      if (tenancyAgreementFeeDueDate) {
+        body.tenancyAgreementFeeDueDate = tenancyAgreementFeeDueDate;
+      }
+    }
     // Only carry the commission fields when actually opted in — leaving them off
     // keeps the server on its default (firstMonthIsCommission=false, owner bears
     // SST) and avoids tripping assertCommissionWritable for a plain assignment.
@@ -431,6 +445,31 @@ export function AssignTenantToUnitDialog({
               type="date"
               value={endDate}
               onChange={(e) => setEndDate(e.target.value)}
+            />
+          </Field>
+          <Field
+            label="TA (WITH SST) amount (RM)"
+            hint="Enter the final SST-inclusive amount. Leave blank when no fee applies; use 0 for an explicit RM0 decision."
+            error={fieldErrors.tenancyAgreementFeeAmount}
+          >
+            <TextInput
+              type="number"
+              min={0}
+              step="0.01"
+              value={tenancyAgreementFeeAmount}
+              onChange={(e) => setTenancyAgreementFeeAmount(e.target.value)}
+            />
+          </Field>
+          <Field
+            label="Agreement fee due date"
+            hint="Leave blank to use the tenancy start date."
+            error={fieldErrors.tenancyAgreementFeeDueDate}
+          >
+            <TextInput
+              type="date"
+              value={tenancyAgreementFeeDueDate}
+              onChange={(e) => setTenancyAgreementFeeDueDate(e.target.value)}
+              disabled={tenancyAgreementFeeAmount === ""}
             />
           </Field>
           <div className="flex flex-wrap items-center gap-2 sm:col-span-2">

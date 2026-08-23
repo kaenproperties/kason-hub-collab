@@ -69,7 +69,7 @@ const PV9_SECTIONS: YannieSections = {
       {
         category: "Management Fee",
         categoryKey: "management_fee",
-        description: null,
+        description: "KAEN management fee (per income line)",
         amount: "200.00",
         sstAmount: "16.00",
         paymentStatus: "paid",
@@ -98,7 +98,7 @@ describe("buildYanniePdfHtml", () => {
     const html = buildYanniePdfHtml(PV9_SECTIONS);
 
     // Section 1 — Header
-    expect(html).toContain("Owner Statement");
+    expect(html).toContain("Owner &amp; Payout Details");
     expect(html).toContain("Ahmad bin Razali");
     expect(html).toContain("Park Villa 9");
     expect(html).toContain("••••1234");
@@ -108,12 +108,25 @@ describe("buildYanniePdfHtml", () => {
 
     // Section 3 — Payout Summary
     expect(html).toContain("Payout Summary");
+    expect(html).toContain("Additions (+)");
+    expect(html).toContain("Deductions (−)");
+    expect(html).toContain('class="deduction-row"');
+    expect(html).toContain("− RM 400.00");
 
     // Section 4 — Income Breakdown
-    expect(html).toContain("Income Breakdown");
+    expect(html).toContain("Owner Income Breakdown");
 
-    // Section 5 — Expenses Breakdown
-    expect(html).toContain("Expenses Breakdown");
+    // Section 5 — Expense Deductions
+    expect(html).toContain("Expense Deductions");
+
+    // Formal, owner-facing wording and casing.
+    expect(html).toContain("Property Management Fee");
+    expect(html).toContain("Property Management Fee (Per Income Line)");
+    expect(html).toContain("Management Fee (RM)");
+    expect(html).toContain(">Paid<");
+    expect(html).not.toContain("Mgmt");
+    expect(html).not.toContain("KAEN management fee");
+    expect(html).not.toContain(">paid<");
 
     // Net payout value (1600.00 → formatted)
     expect(html).toContain("1,600.00");
@@ -137,7 +150,7 @@ describe("buildYanniePdfHtml", () => {
     };
     const html = buildYanniePdfHtml(withPayee);
     expect(html).toContain("Paid on behalf — Allianz");
-    expect(html).toContain("ref INV-1");
+    expect(html).toContain("Reference INV-1");
     expect(html).toContain("2026-06-15");
   });
 
@@ -148,11 +161,11 @@ describe("buildYanniePdfHtml", () => {
     const html = buildYanniePdfHtml(PV9_SECTIONS);
 
     // All 5 section headings still present…
-    expect(html).toContain("Owner Statement");
+    expect(html).toContain("Owner &amp; Payout Details");
     expect(html).toContain("Occupancy");
     expect(html).toContain("Payout Summary");
-    expect(html).toContain("Income Breakdown");
-    expect(html).toContain("Expenses Breakdown");
+    expect(html).toContain("Owner Income Breakdown");
+    expect(html).toContain("Expense Deductions");
 
     // …but never a receipt-image figure, a receipts list, or a receipt heading.
     expect(html).not.toContain('class="receipt-image"');

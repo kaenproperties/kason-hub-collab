@@ -246,7 +246,14 @@ export async function findCockpitBills(db: DbClient, orgId: string, periodMonth:
 
 // ── Apartment billing-mode helpers ──────────────────────────────────────────
 export async function findApartmentModes(db: DbClient, orgId: string, apartmentId: string) {
-  return db.apartment.findFirst({ where: { organizationId: orgId, id: apartmentId }, select: { listingMode: true, partitionBillingMode: true } });
+  return db.apartment.findFirst({
+    where: { organizationId: orgId, id: apartmentId },
+    select: {
+      listingMode: true,
+      partitionBillingMode: true,
+      tnbSubsidyCapMonthly: true,
+    },
+  });
 }
 
 export async function findUtilityBillingConfig(db: DbClient, orgId: string) {

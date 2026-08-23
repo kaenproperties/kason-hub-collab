@@ -8,8 +8,10 @@ import { OwnerTable } from "./owners-table";
 import { CreateOwnerDialog } from "./owners-action-dialogs";
 import { PartiesAreaTabs } from "./parties-area-tabs";
 import type { OwnerListItem } from "./owners-table";
+import { usePermission } from "@/components/permission-gate";
 
 export default function OwnersPage() {
+  const canCreateParty = usePermission("party.create");
   const [searchParams] = useSearchParams();
   const focusedPartyId = searchParams.get("partyId");
   const owners = useQuery({
@@ -68,13 +70,13 @@ export default function OwnersPage() {
         title="Owner records"
         description="Role-backed party records with status and screening visibility."
         actions={
-          <CreateOwnerDialog
+          canCreateParty ? <CreateOwnerDialog
             trigger={
               <Button variant="gold">
                 <Plus className="size-4" /> New Owner
               </Button>
             }
-          />
+          /> : undefined
         }
       >
         <OwnerTable owners={ownerList} focusedPartyId={focusedPartyId} />

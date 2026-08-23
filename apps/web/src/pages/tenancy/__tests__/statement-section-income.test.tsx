@@ -141,23 +141,25 @@ describe("StatementSectionIncome — Task 6: charged amount display", () => {
 describe("StatementSectionIncome — informational (letting commission) rows", () => {
   const informationalRow = () =>
     makeRow({
-      incomeType: "Letting Commission",
+      incomeType: "Admin Fee (First Month Rental)",
       amount: "3000.00",
       chargedAmount: "3000.00",
       paymentStatus: "paid",
-      detail: "First month rent retained by KAEN as letting commission",
+      detail: "First month rental retained by KAEN as Admin Fee",
       isInformational: true,
     });
 
   it("renders the retained-by-KAEN note so a blank commission month is explained", () => {
     renderIncome([informationalRow()]);
+    expect(screen.getByText("Admin Fee (First Month Rental)")).toBeTruthy();
+    expect(screen.queryByText("Letting Commission")).toBeNull();
     const note = screen.getByTestId("income-row-informational-0");
     expect(note.textContent).toContain("Retained by KAEN");
   });
 
   it("shows the ledger's own explanation as the row detail", () => {
     renderIncome([informationalRow()]);
-    expect(screen.getByText(/first month rent retained by kaen/i)).toBeTruthy();
+    expect(screen.getByText(/first month rental retained by kaen/i)).toBeTruthy();
   });
 
   it("renders the amount MUTED, never in the income green — it is not owner earnings", () => {
@@ -232,7 +234,7 @@ describe("StatementSectionIncome — Extra Electricity (partition aircond spread
   // Both kinds can appear in one month; each must keep its own copy.
   it("keeps each informational kind's copy distinct when both are present", () => {
     const commission = makeRow({
-      incomeType: "Letting Commission",
+      incomeType: "Admin Fee (First Month Rental)",
       amount: "3000.00",
       chargedAmount: "3000.00",
       isInformational: true,

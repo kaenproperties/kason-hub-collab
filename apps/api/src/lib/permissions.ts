@@ -79,6 +79,7 @@ export type PermissionOverrides = Partial<Record<Permission, boolean>>;
 const ALL = PERMISSION_CATALOG.map(([code]) => code);
 const FINANCE_ONLY = new Set<Permission>(["bank.import", "bank.manage_accounts", "bank.export"]);
 const SENIOR_FINANCE_ONLY = new Set<Permission>(["claim.approve", "claim.reimburse"]);
+const DIRECTOR_ONLY = new Set<Permission>(["owner_report.final_approve"]);
 const SUPER_ADMIN_ONLY = new Set<Permission>(["settings.manage", "important_record.delete"]);
 const OPERATIONS: Permission[] = ["portfolio.view","portfolio.create","portfolio.edit","party.view","party.create","party.edit","tenancy.view","tenancy.create","tenancy.edit","tenancy.move","tenancy.renew","agreement.view","agreement.generate","agreement.edit","agreement.download","billing.view","billing.charge.edit","billing.save","billing.bill","billing.document_manage","claim.create","owner_report.view","owner_report.download","bank.read","bank.categorize","bank.allocate_credit","bank.allocate_debit","bank.internal_transfer","accounting.view","settings.view"];
 // Business rule: Manager can operate every part of Tenant Management except
@@ -94,6 +95,7 @@ const ROLE_PERMISSIONS: Record<BusinessRole, ReadonlySet<Permission>> = {
 export function hasPermission(role: string | undefined, permission: Permission, overrides?: PermissionOverrides | null): boolean {
   if (role === "admin") return true;
   if (SUPER_ADMIN_ONLY.has(permission)) return false;
+  if (DIRECTOR_ONLY.has(permission) && role !== "director") return false;
   if (FINANCE_ONLY.has(permission) && role !== "accountant") return false;
   if (SENIOR_FINANCE_ONLY.has(permission) && role !== "accountant" && role !== "director") return false;
   const override = overrides?.[permission];
@@ -101,9 +103,31 @@ export function hasPermission(role: string | undefined, permission: Permission, 
 }
 export function permissionCanBeGrantedToRole(role: string | undefined, permission: Permission): boolean {
   if (SUPER_ADMIN_ONLY.has(permission)) return role === "admin";
+  if (DIRECTOR_ONLY.has(permission)) return role === "admin" || role === "director";
   if (FINANCE_ONLY.has(permission)) return role === "admin" || role === "accountant";
   if (SENIOR_FINANCE_ONLY.has(permission)) return role === "admin" || role === "accountant" || role === "director";
   return true;
 }
 export function permissionsFor(role: string | undefined): ReadonlySet<Permission> { return ROLE_PERMISSIONS[role as BusinessRole] ?? new Set<Permission>(); }
 export function effectivePermissions(role: string | undefined, overrides?: PermissionOverrides | null): Permission[] { return ALL.filter((code) => hasPermission(role, code, overrides)); }
+
+/**
+ * Staff-management hierarchy. Manager and Finance deliberately share one
+ * tier, so neither can administer the other. A user may only administer a
+ * strictly lower tier; permissions such as roles.manage are still required
+ * separately by the route middleware.
+ */
+const ROLE_TIER: Record<BusinessRole, number> = {
+  admin: 5,
+  director: 4,
+  manager: 3,
+  accountant: 3,
+  editor: 2,
+  viewer: 1,
+};
+
+export function canManageRole(actorRole: string | undefined, targetRole: string | undefined): boolean {
+  const actorTier = ROLE_TIER[actorRole as BusinessRole];
+  const targetTier = ROLE_TIER[targetRole as BusinessRole];
+  return Number.isFinite(actorTier) && Number.isFinite(targetTier) && actorTier > targetTier;
+}

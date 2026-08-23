@@ -17,7 +17,7 @@ import { Field, SelectInput, TextAreaInput, TextInput } from "@/components/form-
 import { CategoryCombobox } from "@/components/category-combobox";
 import { AttachmentsPanel } from "@/components/attachments-panel";
 import { apiFetch } from "@/lib/api-client";
-import { useAuth } from "@/lib/auth";
+import { usePermission } from "@/components/permission-gate";
 import { useUsers } from "@/api/users";
 import {
   ticketAttachmentsKey,
@@ -100,8 +100,7 @@ function formFromTicket(ticket: TicketRow): FormState {
 
 export function TicketDrawer({ open, onClose, unitId, ticket }: TicketDrawerProps) {
   const qc = useQueryClient();
-  const { user } = useAuth();
-  const canManage = user?.role === "manager" || user?.role === "admin";
+  const canManage = usePermission("portfolio.edit");
 
   const usersQuery = useUsers();
   const createTicket = useCreateTicket(unitId);

@@ -71,7 +71,7 @@ describe("PHASE2_FLAGS", () => {
 
   // New flags are APPENDED, so the tail is the newest. Update this alongside the
   // count in phase2-constants.test.ts whenever a flag joins the registry.
-  it("has the newest flag (tenancy-deposit-docs) as the last element", () => {
-    expect(PHASE2_FLAGS[PHASE2_FLAGS.length - 1]).toBe("ENABLE_TENANCY_DEPOSIT_DOCS");
+  it("has the newest flag (proforma invoices) as the last element", () => {
+    expect(PHASE2_FLAGS[PHASE2_FLAGS.length - 1]).toBe("ENABLE_PROFORMA_INVOICES");
   });
 });

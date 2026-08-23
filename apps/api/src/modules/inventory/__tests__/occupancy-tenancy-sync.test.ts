@@ -26,6 +26,17 @@ const buildTx = () => ({
   carpark: {
     update: vi.fn(),
   },
+  chargeCategory: {
+    findFirst: vi.fn().mockResolvedValue({ id: "cat-ta" }),
+  },
+  invoice: {
+    create: vi.fn().mockResolvedValue({ id: "invoice-ta" }),
+    update: vi.fn(),
+  },
+  charge: {
+    create: vi.fn().mockResolvedValue({ id: "ta-base" }),
+    findMany: vi.fn().mockResolvedValue([{ amount: "462.96" }, { amount: "37.04" }]),
+  },
 });
 
 describe("syncOccupancyTenancy", () => {
@@ -175,6 +186,43 @@ describe("syncOccupancyTenancy", () => {
     expect(tx.tenancy.create).toHaveBeenCalledWith({
       data: expect.objectContaining({ firstMonthIsCommission: false, commissionSstBearer: "owner" }),
       select: { id: true },
+    });
+  });
+
+  it("keeps the SST-inclusive initial TA amount unchanged in the tenancy start month", async () => {
+    const tx = buildTx();
+    await syncOccupancyTenancy({
+      tx: tx as any, orgId: "org-1",
+      unit: { id: "unit-1", propertyId: "prop-1", occupancyStatus: "vacant", rentalRate: 2600, ownerPartyId: "owner-1" },
+      incoming: {
+        occupancyStatus: "occupied", tenantPartyId: "party-link",
+        moveInDate: new Date("2026-04-25"), moveOutDate: new Date("2027-04-24"),
+        tenancyAgreementFeeAmount: 500,
+      },
+    });
+
+    expect(tx.charge.create).toHaveBeenNthCalledWith(1, {
+      data: expect.objectContaining({
+        chargeType: "tenancy_agreement_fee",
+        description: "TA (WITH SST)",
+        amount: "462.96",
+        outstandingAmount: "462.96",
+        sstRate: "8",
+        billingMonth: new Date("2026-04-01T00:00:00.000Z"),
+      }),
+      select: { id: true },
+    });
+    expect(tx.charge.create).toHaveBeenNthCalledWith(2, {
+      data: expect.objectContaining({
+        chargeNumber: "TAF-tenancy-new-SST",
+        chargeType: "tenancy_agreement_fee",
+        description: "TA (WITH SST) — SST 8%",
+        amount: "37.04",
+        outstandingAmount: "37.04",
+        sstRate: "0",
+        parentChargeId: "ta-base",
+        billingMonth: new Date("2026-04-01T00:00:00.000Z"),
+      }),
     });
   });
 

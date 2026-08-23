@@ -41,16 +41,16 @@ export type DraftInvoiceListItem = {
 // should never see those underscores — every surface renders a human label, a
 // colour-coded badge, and whether the row is an INVOICE or a STATEMENT.
 export type InvoiceTypeMeta = {
-  /** Human label incl. the document kind, e.g. "Rental Invoice" / "Owner Statement". */
+  /** Human label incl. the document kind, e.g. "Rental Payment Request" / "Owner Statement". */
   label: string;
-  /** Plural for tab headers, e.g. "Rental Invoices". */
+  /** Plural for tab headers, e.g. "Rental Payment Requests". */
   plural: string;
   variant: "sky" | "gold" | "emerald" | "outline";
   Icon: LucideIcon;
 };
 
 export const INVOICE_TYPE_META: Record<string, InvoiceTypeMeta> = {
-  tenant_rental: { label: "Rental Invoice", plural: "Rental Invoices", variant: "sky", Icon: Home },
+  tenant_rental: { label: "Rental Payment Request", plural: "Rental Payment Requests", variant: "sky", Icon: Home },
   tenant_aircon: { label: "Aircon Invoice", plural: "Aircon Invoices", variant: "emerald", Icon: Snowflake },
   owner_statement: { label: "Owner Statement", plural: "Owner Statements", variant: "gold", Icon: Building2 },
   // Move-in deposits. Wallet mirrors the "Deposits & parking" section icon on the
@@ -128,7 +128,7 @@ export function DraftApprovalsTable({
         </TableHead>
         <tbody>
           {invoices.length === 0 ? (
-            <EmptyRow colSpan={8} label="No draft invoices match the current filters." />
+            <EmptyRow colSpan={8} label="No draft billing documents match the current filters." />
           ) : (
             invoices.map((inv) => {
               const tone =

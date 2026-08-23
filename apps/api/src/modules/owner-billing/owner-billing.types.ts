@@ -37,6 +37,9 @@ export type ManagementFeeConfigRow = {
   sstPercent: string;
   freePeriodStart: string | null;
   freePeriodEnd: string | null;
+  firstChargeMonth: string | null;
+  firstChargeBaseAmount: string | null;
+  paxDeductionPerPerson: string | null;
   isActive: boolean;
   effectiveFrom: string | null;
   effectiveTo: string | null;
@@ -159,6 +162,9 @@ export type OwnerPayoutApprovalPreflight = {
   statementId: string;
   canFirstCheck: boolean;
   canApprove: boolean;
+  /** Actual cash transfer for the month, including deposits collected for onward transfer. */
+  totalPayoutToOwner: string;
+  /** Operating balance after expenses, excluding deposit custody transfers. */
   netPayoutToOwner: string;
   checks: OwnerPayoutSafetyCheck[];
 };

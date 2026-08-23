@@ -61,6 +61,8 @@ export type UnitDetail = {
   ownerPartyId: string | null;
   ownerName: string | null;
   ownerPhone: string | null;
+  /** Null defers to partitionBillingMode; a value takes priority for residual TNB. */
+  tnbSubsidyCapMonthly: number | null;
   property: {
     id: string;
     name: string;

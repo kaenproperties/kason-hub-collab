@@ -29,11 +29,12 @@
 //     field on createExpensesSchema — resolved to the `periodMonth` column here.
 import { getDb, Prisma } from "@kason/db";
 import { randomUUID } from "node:crypto";
-import { computeAllocation, ComputeError, type Bearers, type BillingMode, type ComputeResult, type PoolComponents, type RoomInput } from "../meter/compute";
+import { computeAllocation, ComputeError, type Bearers, type BillingMode, type ComputeResult, type PoolComponents, type RoomInput, type SubsidyPolicy } from "../meter/compute";
 import { recordAudit } from "../../lib/audit";
 import { isPhase2FlagEnabled } from "../../lib/feature-flags";
 import { createSignedDownloadUrl, deleteObject, objectExists, putObject, requireBucket } from "../../lib/storage";
 import { computeProratedRent, pickBaseRent } from "../../lib/rent-math";
+import { isCommissionMonth } from "../../lib/commission-month";
 import { tenancyPeriodWhere, primaryTenancyForPeriod } from "../../lib/tenancy-period";
 import { bearerDefaultsFor, DEFAULT_CLEANING_RECURRING_AMOUNT } from "./bearer-defaults";
 import { invalidateDocumentPdfsForAttachment } from "../billing-documents/attachment-pdf-invalidation";
@@ -59,8 +60,21 @@ import { syncOwnerLedgerForApartmentMonth } from "../owner-ledger/owner-ledger.s
 // collected. Same seam as the owner-ledger sync beside it: called after the row's money
 // tx commits, opens its own transaction, swallows its own failures.
 import { autoOffsetOwnerReceivablesForBilledApartment } from "../owner-billing/auto-offset-on-rent.hook";
-import type { GridRecurringDto, RecurringLineDto } from "@kason/shared";
-import { computeManagementFee, isInFreePeriod, shouldChargeMgmtFee } from "@kason/shared";
+import type {
+  GridBillTnbSubsidyBreakdownDto,
+  GridBillUtilityPlanDto,
+  GridBillUtilityPlanLineDto,
+  GridRecurringDto,
+  GridTnbSubsidyPolicy,
+  RecurringLineDto,
+} from "@kason/shared";
+import {
+  computeManagementFee,
+  computeManagementFeeRentBase,
+  effectiveWindowOverlapsBillingMonth,
+  isInFreePeriod,
+  resolveDocumentClassification,
+} from "@kason/shared";
 import { SCALAR_RECURRING_KINDS, SCALAR_RECURRING_KIND_LIST, isScalarRecurringKind, noScalarGovernance, type ScalarRecurringKind } from "@kason/shared";
 import { emptySettlementCells, settlementBucketFor, type GridSettlementDto, type SettlementBucket, type SettlementState } from "@kason/shared";
 // R11: the ONE definition of "this allocation represents money that actually
@@ -84,6 +98,8 @@ import { CASH_ALLOCATION_WHERE } from "@kason/shared";
 // that file's allowance; the OwnerLedgerEntry / UnitUtilityBill /
 // UtilityAllocation bans stay absolute in every file.
 import { issueGroupedGridInvoiceTx, expenseSstChargeNumber } from "./issue-grouped";
+import { CHARGE_TYPE_TO_CATEGORY_CODE } from "../billing-documents/issue.service";
+import { resolveUtilitySubsidyPolicy } from "../meter/subsidy-policy";
 import { assessPaidBlockers, type PaidBlocker } from "./rebill-assessment";
 import { docsSafeToCancel } from "./owner-offset-settlement";
 // The non-cash owner settlement rail. Read from the owner-remittance module, which owns
@@ -282,19 +298,16 @@ async function buildGridRooms(tx: Prisma.TransactionClient, orgId: string, entry
  * whose `pax === 0` — a zero-pax active partitioned room can't get a fair per-pax split, so
  * Task 5 turns each into a `pax_blocked` outcome rather than silently billing it RM0.
  */
-export async function buildBillRooms(
-  tx: Prisma.TransactionClient,
-  orgId: string,
-  entry: { id: string },
+export function billRoomsFromLoaded(
+  rawRooms: readonly RoomInput[],
   isWholeUnit: boolean,
   activeTenancy: { tenancyId: string; partyId: string; unitId: string } | null,
-): Promise<{ rooms: RoomInput[]; blockedTenancyIds: string[] }> {
+): { rooms: RoomInput[]; blockedTenancyIds: string[] } {
   if (isWholeUnit) {
     if (!activeTenancy) return { rooms: [], blockedTenancyIds: [] }; // vacant whole unit → nothing to bill
     // Sum aircon across the entry's (vacant-tenancyId) readings but allocate it to ONE
     // synthesized 1-pax occupied room so the whole-unit tenant gets 100% of the pool.
-    const { rooms } = await buildGridRooms(tx, orgId, entry.id);
-    const airconTotal = rooms.reduce((s, r) => s + r.airconCharge, 0);
+    const airconTotal = rawRooms.reduce((s, r) => s + r.airconCharge, 0);
     return {
       rooms: [
         {
@@ -308,7 +321,6 @@ export async function buildBillRooms(
       blockedTenancyIds: [],
     };
   }
-  const { rooms } = await buildGridRooms(tx, orgId, entry.id);
   // EXACT COMPLEMENT of compute.ts:88-92's `partition()` occupied rule
   // (`tenancyId != null && partyId != null && pax > 0`): block every ACTIVE-tenancy room
   // (`tenancyId != null`) that `partition()` would NOT put in `occupied` — i.e. NOT
@@ -319,10 +331,24 @@ export async function buildBillRooms(
   // signal) AND a partyId-null active room (latent orphan trap). Vacant rooms
   // (`tenancyId === null`) and healthy rooms (`partyId != null && pax > 0`) are never
   // blocked. Keep this in lock-step with `partition()` if that occupied rule ever changes.
-  const blockedTenancyIds = rooms
+  const blockedTenancyIds = rawRooms
     .filter((r) => r.tenancyId !== null && !(r.partyId !== null && r.pax > 0))
     .map((r) => r.tenancyId as string);
-  return { rooms, blockedTenancyIds };
+  return { rooms: [...rawRooms], blockedTenancyIds };
+}
+
+export async function buildBillRooms(
+  tx: Prisma.TransactionClient,
+  orgId: string,
+  entry: { id: string },
+  isWholeUnit: boolean,
+  activeTenancy: { tenancyId: string; partyId: string; unitId: string } | null,
+): Promise<{ rooms: RoomInput[]; blockedTenancyIds: string[] }> {
+  // Preserve the vacant-WHOLE fast path: the original implementation returned
+  // before loading readings/pax when there was no tenancy to invoice.
+  if (isWholeUnit && !activeTenancy) return billRoomsFromLoaded([], true, null);
+  const { rooms } = await buildGridRooms(tx, orgId, entry.id);
+  return billRoomsFromLoaded(rooms, isWholeUnit, activeTenancy);
 }
 
 // ─────────────────── Task 4: Bill → invoice issuance (flag-gated) ────────────
@@ -1244,6 +1270,304 @@ function aircondComponents(
     out.push({ unitId: a.unitId, tenancyId: a.tenancyId, partyId: a.partyId, amount });
   }
   return out;
+}
+
+/** PURE. Itemize only the utility Charges that {@link mintItemizedCharges}
+ * creates. The candidate membership, order, zero guards, tenant-direct skip and
+ * private-aircond source are deliberately the same declarations the mint uses.
+ * Recurring and GridExpense lines have their own exact read DTOs and never enter
+ * this utility-only plan. */
+export function toGridBillUtilityPlanLines(
+  entry: MintItemizedChargesEntryInput,
+  alloc: ComputeResult,
+  rooms: readonly RoomInput[],
+  ownerListingId: string | null,
+): GridBillUtilityPlanLineDto[] {
+  const lines: GridBillUtilityPlanLineDto[] = [];
+
+  // Actual mint order: pooled tenant components per occupied room first.
+  for (const a of alloc.allocations) {
+    if (!(a.computedAmount > 0)) continue;
+    for (const utility of TENANT_UTILITIES) {
+      const amount = TENANT_SHARE_OF[utility](a);
+      if (amount === 0) continue;
+      if (fundedByForUtility(entry, utility) === "tenant_direct") continue;
+      lines.push({
+        key: `utility:tenant:${a.unitId}:${utility}`,
+        code: utility,
+        label: UTILITY_DESCRIPTION[utility],
+        payer: "tenant",
+        amount: round2(amount).toFixed(2),
+        listingId: a.unitId,
+        tenancyId: a.tenancyId,
+      });
+    }
+  }
+
+  // Private submeter electricity is outside computedAmount, including for the
+  // synthesized WHOLE room and for a fully-subsidised RM0 pooled allocation.
+  for (const ac of aircondComponents(alloc, rooms)) {
+    lines.push({
+      key: `utility:tenant:${ac.unitId}:private_aircond`,
+      code: "private_aircond",
+      label: "Aircond (private meter)",
+      payer: "tenant",
+      amount: ac.amount.toFixed(2),
+      listingId: ac.unitId,
+      tenancyId: ac.tenancyId,
+    });
+  }
+
+  for (const utility of OWNER_UTILITIES) {
+    const amount = OWNER_AMOUNT_OF[utility](entry);
+    if (amount === 0) continue;
+    if (fundedByForUtility(entry, utility) === "tenant_direct") continue;
+    lines.push({
+      key: `utility:owner:${entry.apartmentId}:${utility}`,
+      code: utility,
+      label: UTILITY_DESCRIPTION[utility],
+      payer: "owner",
+      amount: round2(amount).toFixed(2),
+      listingId: ownerListingId,
+      tenancyId: null,
+    });
+  }
+
+  return lines;
+}
+
+type GridBillUtilityPlanEntry = MintItemizedChargesEntryInput & {
+  billedAt: Date | null;
+  invoicedAt: Date | null;
+};
+
+export interface ResolvedGridTnbSubsidy {
+  mode: BillingMode;
+  computePolicy: SubsidyPolicy;
+  policy: GridTnbSubsidyPolicy;
+  tnbSubsidyCap: number | null;
+  /** Written only by a first successful Bill; null denotes an already-locked or
+   * pre-snapshot historical row. */
+  snapshotOnBill: { policy: GridTnbSubsidyPolicy; cap: number | null } | null;
+}
+
+/**
+ * Resolve the grid's effective subsidy policy without changing historical money.
+ *
+ * A billed row with no snapshot predates the unit-cap feature and therefore stays
+ * on the legacy per-pax rail even if an apartment cap is configured later. A new
+ * row may adopt the apartment cap; once adopted, its entry snapshot wins for every
+ * read and re-Bill (including after the apartment setting changes).
+ */
+export function resolveGridTnbSubsidy(input: {
+  isWholeUnit: boolean;
+  partitionBillingMode: string;
+  subsidyPerPax: number;
+  apartmentTnbSubsidyCap: number | null;
+  billedAt: Date | null;
+  subsidyPolicySnapshot: string | null;
+  tnbSubsidyCapSnapshot: number | null;
+}): ResolvedGridTnbSubsidy {
+  // Keep one policy/validation implementation for both billing rails. The grid
+  // adapter supplies its own lock signal (`billedAt`) because, unlike
+  // UnitUtilityBill, UnitBillsGridEntry has no status/billingMode snapshot.
+  const liveMode: BillingMode = input.isWholeUnit
+    ? "whole"
+    : input.apartmentTnbSubsidyCap != null || input.partitionBillingMode === "SUBSIDY"
+      ? "subsidy"
+      : "no_subsidy";
+  const explicitSnapshot = input.subsidyPolicySnapshot != null;
+  const historicalLegacy = !input.isWholeUnit && input.billedAt != null && !explicitSnapshot;
+  const billBillingMode: BillingMode = input.isWholeUnit
+    ? "whole"
+    : input.subsidyPolicySnapshot === "none"
+      ? "no_subsidy"
+      : explicitSnapshot || historicalLegacy
+        ? "subsidy"
+        : liveMode;
+  const resolved = resolveUtilitySubsidyPolicy({
+    liveMode,
+    apartmentTnbSubsidyCap: input.apartmentTnbSubsidyCap,
+    organizationSubsidyPerPax: input.subsidyPerPax,
+    billStatus: input.billedAt == null ? "draft" : "charged",
+    billBillingMode,
+    billPolicySnapshot: input.subsidyPolicySnapshot,
+    billTnbSubsidyCapSnapshot: input.tnbSubsidyCapSnapshot,
+    // Grid entries have no legacy-rate snapshot column. An explicit legacy
+    // marker therefore continues the existing org-level rate at read/re-Bill.
+    billSubsidyPerPax: input.subsidyPolicySnapshot === "legacy_per_pax"
+      ? input.subsidyPerPax
+      : null,
+  });
+  const cap = resolved.subsidyPolicy.kind === "unit_tnb_cap_equal_tenancy"
+    ? resolved.subsidyPolicy.cap
+    : null;
+  return {
+    mode: resolved.mode,
+    computePolicy: resolved.subsidyPolicy,
+    policy: resolved.subsidyPolicy.kind,
+    tnbSubsidyCap: cap,
+    snapshotOnBill:
+      !input.isWholeUnit
+      && input.billedAt == null
+      && input.subsidyPolicySnapshot == null
+        ? { policy: resolved.subsidyPolicy.kind, cap }
+        : null,
+  };
+}
+
+export interface GridBillUtilityPlanInput {
+  entry: GridBillUtilityPlanEntry;
+  rawRooms: readonly RoomInput[];
+  isWholeUnit: boolean;
+  partitionBillingMode: string;
+  activeTenancy: { tenancyId: string; partyId: string; unitId: string } | null;
+  subsidyPerPax: number;
+  /** Server-resolved snapshot/current policy. Omitted by legacy pure callers. */
+  resolvedSubsidy?: ResolvedGridTnbSubsidy;
+  billingDocuments: boolean;
+  ownerListingId: string | null;
+}
+
+function emptyGridBillUtilityPlan(
+  status: GridBillUtilityPlanDto["status"] = "not_applicable",
+  mode: GridBillUtilityPlanDto["mode"] = null,
+  errorCode: string | null = null,
+  blockedTenancyIds: string[] = [],
+): GridBillUtilityPlanDto {
+  return {
+    status,
+    mode,
+    subsidyPerPax: "0.00",
+    subsidyPolicy: null,
+    tnbSubsidyCap: null,
+    tnbSubsidyBreakdown: null,
+    lines: [],
+    blockedTenancyIds,
+    errorCode,
+  };
+}
+
+/** PURE first-issuance preflight for the utility portion of Bill. It repeats
+ * Bill's validation order (raw-room shaping/compute, absorbed invariant, Bill
+ * room shaping, pax gate, configured-mode compute) but performs no reads/writes.
+ * The caller supplies the one org subsidy value and all room/tenancy facts from
+ * getGridService's page-wide batches. */
+export function buildGridBillUtilityPlan(input: GridBillUtilityPlanInput): GridBillUtilityPlanDto {
+  const resolved = input.resolvedSubsidy ?? resolveGridTnbSubsidy({
+    isWholeUnit: input.isWholeUnit,
+    partitionBillingMode: input.partitionBillingMode,
+    subsidyPerPax: input.subsidyPerPax,
+    apartmentTnbSubsidyCap: null,
+    billedAt: input.entry.billedAt,
+    subsidyPolicySnapshot: null,
+    tnbSubsidyCapSnapshot: null,
+  });
+  const mode = resolved.mode;
+  const subsidyPerPax = resolved.computePolicy.kind === "legacy_per_pax"
+    ? resolved.computePolicy.amountPerPax
+    : 0;
+  const base = (status: GridBillUtilityPlanDto["status"], errorCode: string | null = null, blockedTenancyIds: string[] = []): GridBillUtilityPlanDto => ({
+    ...emptyGridBillUtilityPlan(status, mode, errorCode, blockedTenancyIds),
+    subsidyPerPax: subsidyPerPax.toFixed(2),
+    subsidyPolicy: resolved.policy,
+    tnbSubsidyCap: resolved.tnbSubsidyCap?.toFixed(2) ?? null,
+  });
+
+  // No utility Charge is minted with the document rail dark. A legacy billed,
+  // document-less entry is also the exact already_billed short circuit in Bill.
+  if (!input.billingDocuments) return base("not_applicable");
+  if (input.entry.billedAt && input.entry.invoicedAt == null) return base("not_applicable");
+
+  try {
+    const rawRooms = [...input.rawRooms];
+    const rawTnbTotal = num(input.entry.tnbTotalRaw);
+    const rawAirSelangor = num(input.entry.airSelangorRaw);
+    if (!Number.isFinite(rawTnbTotal) || !Number.isFinite(rawAirSelangor)) {
+      return base("unavailable", "PREVIEW_FAILED");
+    }
+
+    const shaped = shapeUtilityPool({
+      tnbPattern: input.entry.tnbPattern as never,
+      airPattern: input.entry.airPattern as never,
+      rawTnbTotal,
+      rawAirSelangor,
+      rooms: rawRooms,
+    });
+    const pool: PoolComponents = {
+      tnbTotal: shaped.tnbTotal,
+      airSelangor: shaped.airSelangor,
+      indahWater: 0,
+      wifi: num(input.entry.wifi),
+      cleaning: num(input.entry.cleaning),
+      maintenance: num(input.entry.maintenanceFee),
+    };
+    const bearers: Bearers = {
+      indahWater: "owner",
+      cleaning: input.entry.cleaningBearer as never,
+      wifi: input.entry.wifiBearer as never,
+      maintenance: input.entry.maintenanceFeeBearer as never,
+    };
+    const privateAircond = !input.isWholeUnit;
+
+    // Bill performs this raw-room/no-subsidy compute before resolving the Bill
+    // room set. Keep that precedence so a compute error is not mislabeled pax.
+    computeAllocation("no_subsidy", 0, pool, rawRooms, bearers, privateAircond);
+
+    if (input.entry.tnbPattern === "absorbed" && !(rawTnbTotal > 0)) {
+      return base("unavailable", "ABSORBED_REQUIRES_OWNER_BORNE");
+    }
+    if (input.entry.airPattern === "absorbed" && !(rawAirSelangor > 0)) {
+      return base("unavailable", "ABSORBED_REQUIRES_OWNER_BORNE");
+    }
+
+    const built = billRoomsFromLoaded(rawRooms, input.isWholeUnit, input.activeTenancy);
+    if (built.blockedTenancyIds.length > 0) {
+      return base("pax_blocked", null, [...new Set(built.blockedTenancyIds)]);
+    }
+
+    const alloc = computeAllocation(mode, resolved.computePolicy, pool, built.rooms, bearers, privateAircond);
+
+    // A re-Bill may retain component identities already paid. The fresh split is
+    // useful for validation above but is not an honest list of newly-created lines.
+    if (input.entry.invoicedAt != null) return base("rebill_review");
+
+    const lines = toGridBillUtilityPlanLines(input.entry, alloc, built.rooms, input.ownerListingId);
+    if (lines.some((line) => line.payer === "owner") && input.ownerListingId == null) {
+      return base("unavailable", "OWNER_UNRESOLVED");
+    }
+    let tnbSubsidyBreakdown: GridBillTnbSubsidyBreakdownDto | null = null;
+    if (resolved.policy === "unit_tnb_cap_equal_tenancy" && resolved.tnbSubsidyCap != null && alloc.allocations.length > 0) {
+      const allocations = alloc.allocations.map((allocation) => ({
+        listingId: allocation.unitId,
+        tenancyId: allocation.tenancyId,
+        amount: round2(Math.max(0, allocation.tnbShare - allocation.subsidyDeduction)).toFixed(2),
+      }));
+      const tenantExcess = round2(allocations.reduce((sum, allocation) => sum + Number(allocation.amount), 0));
+      tnbSubsidyBreakdown = {
+        residual: round2(Math.max(0, alloc.leftoverTnb)).toFixed(2),
+        ownerCap: resolved.tnbSubsidyCap.toFixed(2),
+        ownerPortion: round2(alloc.subsidyCovered).toFixed(2),
+        tenantExcess: tenantExcess.toFixed(2),
+        occupiedRoomCount: alloc.allocations.length,
+        allocations,
+      };
+    }
+    return {
+      status: "ready",
+      mode,
+      subsidyPerPax: subsidyPerPax.toFixed(2),
+      subsidyPolicy: resolved.policy,
+      tnbSubsidyCap: resolved.tnbSubsidyCap?.toFixed(2) ?? null,
+      tnbSubsidyBreakdown,
+      lines,
+      blockedTenancyIds: [],
+      errorCode: null,
+    };
+  } catch (e) {
+    if (e instanceof ComputeError || e instanceof ShapeError) return base("unavailable", e.code);
+    return base("unavailable", "PREVIEW_FAILED");
+  }
 }
 
 /**
@@ -2890,7 +3214,7 @@ export async function billService(
         // flag-gated issuance block below (isWholeUnit).
         const aptModes = await tx.apartment.findFirstOrThrow({
           where: { id: entry.apartmentId, organizationId: session.orgId },
-          select: { listingMode: true, partitionBillingMode: true },
+          select: { listingMode: true, partitionBillingMode: true, tnbSubsidyCapMonthly: true },
         });
         const privateAircond = aptModes.listingMode !== "WHOLE";
         // The RESULT IS DISCARDED. We call compute only so a genuine ComputeError
@@ -2924,6 +3248,7 @@ export async function billService(
         // to the legacy path (no pax gate flag-off).
         let issuancePrep: {
           mode: BillingMode; subsidyPerPax: number;
+          snapshotOnBill: ResolvedGridTnbSubsidy["snapshotOnBill"];
           alloc: ComputeResult; ownerBorne: number; hasRecurring: boolean;
           // Carried across the lock alongside `alloc` because the room set is where each
           // room's private submeter money lives (`airconCharge`) — the allocation drops it.
@@ -2944,11 +3269,31 @@ export async function billService(
         let staleDocLessOwnerBorneChargeIds: string[] = [];
         if (isPhase2FlagEnabled("ENABLE_PHASE2_BILLING_DOCS")) {
           const isWholeUnit = aptModes.listingMode === "WHOLE"; // === !privateAircond
-          // Same mode mapping chargeUtilityBillService/buildComputeInputs use.
-          const mode: BillingMode = isWholeUnit ? "whole" : aptModes.partitionBillingMode === "SUBSIDY" ? "subsidy" : "no_subsidy";
-          const subsidyPerPax = mode === "subsidy"
+          // A historical null snapshot stays on the existing per-pax behaviour;
+          // a new/snapshotted apartment cap is resolved once and reused through
+          // compute + lock so a concurrent settings edit cannot reprice this Bill.
+          const needsLegacySubsidyRate = !isWholeUnit && (
+            aptModes.partitionBillingMode === "SUBSIDY"
+            || entry.subsidyPolicySnapshot === "legacy_per_pax"
+            || (entry.billedAt != null && entry.subsidyPolicySnapshot == null)
+          );
+          const subsidyPerPax = needsLegacySubsidyRate
             ? Number((await tx.utilityBillingConfig.findFirst({ where: { organizationId: session.orgId }, select: { subsidyPerPax: true } }))?.subsidyPerPax ?? 50)
             : 0;
+          const resolvedSubsidy = resolveGridTnbSubsidy({
+            isWholeUnit,
+            partitionBillingMode: aptModes.partitionBillingMode,
+            subsidyPerPax,
+            apartmentTnbSubsidyCap: aptModes.tnbSubsidyCapMonthly == null
+              ? null
+              : Number(aptModes.tnbSubsidyCapMonthly),
+            billedAt: entry.billedAt,
+            subsidyPolicySnapshot: entry.subsidyPolicySnapshot,
+            tnbSubsidyCapSnapshot: entry.tnbSubsidyCapSnapshot == null
+              ? null
+              : Number(entry.tnbSubsidyCapSnapshot),
+          });
+          const mode = resolvedSubsidy.mode;
 
           // Room set (Task 3). Whole units source their single active tenancy so the
           // synthesized 1-pax room classifies as occupied; a vacant whole unit yields
@@ -3018,7 +3363,7 @@ export async function billService(
           // indah hardcoded owner — Non-goal). PRE-LOCK: a ComputeError (AIRCON_EXCEEDS_TNB)
           // throws BEFORE the lock, so the catch's `compute_error` leaves billedAt NULL.
           const bearers: Bearers = { indahWater: "owner", cleaning: entry.cleaningBearer as never, wifi: entry.wifiBearer as never, maintenance: entry.maintenanceFeeBearer as never };
-          const alloc = computeAllocation(mode, subsidyPerPax, pool, billRooms, bearers, privateAircond);
+          const alloc = computeAllocation(mode, resolvedSubsidy.computePolicy, pool, billRooms, bearers, privateAircond);
 
           // Owner-borne total (spec §R2): absorbed TNB + AirSelangor + owner-bearer
           // Indah/cleaning/wifi. Indah is hardcoded owner (Non-goal, 0 in the pool).
@@ -3052,7 +3397,15 @@ export async function billService(
           const ownerRecurTotal = round2(recurLinesPrep.filter((l) => l.bearer === "owner").reduce((s, l) => s + num(l.amount), 0));
 
           const ownerBorne = round2((ownerBorneTnb ?? 0) + (ownerBorneAir ?? 0) + ownerBearerExtras + ownerRecurTotal);
-          issuancePrep = { mode, subsidyPerPax, alloc, ownerBorne, hasRecurring: recurLinesPrep.length > 0, rooms: billRooms };
+          issuancePrep = {
+            mode,
+            subsidyPerPax,
+            snapshotOnBill: resolvedSubsidy.snapshotOnBill,
+            alloc,
+            ownerBorne,
+            hasRecurring: recurLinesPrep.length > 0,
+            rooms: billRooms,
+          };
 
           // ── UNIFIED EXISTING-INVOICE DETECTION (billing-mechanism rework) ──────
           // Resolve the CURRENT live invoices of this unit-month by BILLING PROVENANCE
@@ -3118,6 +3471,12 @@ export async function billService(
             lockedBy: session.userId,
             ownerBorneTnb: ownerBorneTnb?.toFixed(2) ?? null,
             ownerBorneAir: ownerBorneAir?.toFixed(2) ?? null,
+            ...(issuancePrep?.snapshotOnBill
+              ? {
+                  subsidyPolicySnapshot: issuancePrep.snapshotOnBill.policy,
+                  tnbSubsidyCapSnapshot: issuancePrep.snapshotOnBill.cap?.toFixed(2) ?? null,
+                }
+              : {}),
             // paymentStatus is DELIBERATELY untouched — billing is not payment (R10).
             ...(staleDocLessOwnerBorneChargeIds.length > 0 ? { billRevision: { increment: 1 } } : {}),
           },
@@ -3502,9 +3861,12 @@ export async function updateLinesService(
       // needs its own analysis, not a symmetry argument.
       if (await entryHasActivePayment(tx, session.orgId, entry.id)) return err(409, "ENTRY_LOCKED");
 
+      // Cleaning and WiFi are owner-only grid charges. Keep accepting the legacy
+      // bearer fields so an older/stale client can still save its other settings,
+      // but never let a new entry snapshot reintroduce the removed tenant columns.
       const settings = {
         tnbPattern: body.tnbPattern, airPattern: body.airPattern,
-        cleaningBearer: body.cleaningBearer, wifiBearer: body.wifiBearer,
+        cleaningBearer: "owner", wifiBearer: "owner",
         maintenanceFeeBearer: body.maintenanceFeeBearer,
       };
       const where = body.expectedUpdatedAt
@@ -3588,13 +3950,13 @@ export async function resolveRoomRatesBatch(
  * a torn read. Callers that need snapshot consistency should pass a
  * `Prisma.TransactionClient` — exactly what the `db` union type invites.
  */
-export async function resolveRoomRentsBatch(
+async function resolveRoomRentFactsBatch(
   db: Prisma.TransactionClient | Db,
   orgId: string,
   tenancyIds: string[],
   period: Date,
-): Promise<Map<string, string>> {
-  const out = new Map<string, string>();
+): Promise<Map<string, { billedRent: string; fullMonthRent: string }>> {
+  const out = new Map<string, { billedRent: string; fullMonthRent: string }>();
   if (tenancyIds.length === 0) return out;
   const [tenancies, rcs] = await Promise.all([
     db.tenancy.findMany({
@@ -3615,9 +3977,22 @@ export async function resolveRoomRentsBatch(
       t.reservation?.agreedMonthlyRent != null ? Number(t.reservation.agreedMonthlyRent) : null,
       Number(t.monthlyRentAmount),
     );
-    out.set(t.id, computeProratedRent(base, t.startDate, t.endDate, period).toFixed(2));
+    out.set(t.id, {
+      billedRent: computeProratedRent(base, t.startDate, t.endDate, period).toFixed(2),
+      fullMonthRent: base.toFixed(2),
+    });
   }
   return out;
+}
+
+export async function resolveRoomRentsBatch(
+  db: Prisma.TransactionClient | Db,
+  orgId: string,
+  tenancyIds: string[],
+  period: Date,
+): Promise<Map<string, string>> {
+  const facts = await resolveRoomRentFactsBatch(db, orgId, tenancyIds, period);
+  return new Map([...facts].map(([id, value]) => [id, value.billedRent]));
 }
 
 /**
@@ -3735,9 +4110,18 @@ export interface GridBearerConfigDto {
 }
 
 /** Task 10: active-only expense totals, split tenant/owner, each further split by withSST. */
+export interface GridExpenseSummaryItemDto {
+  id: string;
+  description: string;
+  amount: string;
+  sst: string;
+  total: string;
+  withSST: boolean;
+}
+
 export interface GridExpensesDto {
-  tenant: { total: string; withSstTotal: string; count: number; nonSstCount: number; withSstCount: number; nonSstActionRequiredCount: number; withSstActionRequiredCount: number; nonSstGrossMargin: string; withSstGrossMargin: string };
-  owner: { total: string; withSstTotal: string; count: number; nonSstCount: number; withSstCount: number; nonSstActionRequiredCount: number; withSstActionRequiredCount: number; nonSstGrossMargin: string; withSstGrossMargin: string };
+  tenant: { total: string; withSstTotal: string; sstTotal: string; count: number; items: GridExpenseSummaryItemDto[]; nonSstCount: number; withSstCount: number; nonSstActionRequiredCount: number; withSstActionRequiredCount: number; nonSstGrossMargin: string; withSstGrossMargin: string };
+  owner: { total: string; withSstTotal: string; sstTotal: string; count: number; items: GridExpenseSummaryItemDto[]; nonSstCount: number; withSstCount: number; nonSstActionRequiredCount: number; withSstActionRequiredCount: number; nonSstGrossMargin: string; withSstGrossMargin: string };
 }
 
 /** Task 10: a brief attachment reference — no storageKey/contentType/etc on the grid row. */
@@ -3796,9 +4180,10 @@ export function toEntryDto(entry: EntryDtoInput | null, nameById?: ReadonlyMap<s
 }
 
 /** PURE. `expenses` is active-only — already filtered by the caller's query (`status: "active"`). */
-export function toExpensesDto(expenses: Array<{ bearer: string; amount: Prisma.Decimal; withSST: boolean; actualCost?: Prisma.Decimal | null; costPaymentStatus?: string }>): GridExpensesDto {
+export function toExpensesDto(expenses: Array<{ id?: string; description?: string; bearer: string; amount: Prisma.Decimal; withSST: boolean; actualCost?: Prisma.Decimal | null; costPaymentStatus?: string }>): GridExpensesDto {
   let tenantTotal = 0;
   let tenantWithSstTotal = 0;
+  let tenantSstTotal = 0;
   let tenantCount = 0;
   let tenantNonSstCount = 0;
   let tenantWithSstCount = 0;
@@ -3806,8 +4191,10 @@ export function toExpensesDto(expenses: Array<{ bearer: string; amount: Prisma.D
   let tenantWithSstActionRequiredCount = 0;
   let tenantNonSstActualCost = 0;
   let tenantWithSstActualCost = 0;
+  const tenantItems: GridExpenseSummaryItemDto[] = [];
   let ownerTotal = 0;
   let ownerWithSstTotal = 0;
+  let ownerSstTotal = 0;
   let ownerCount = 0;
   let ownerNonSstCount = 0;
   let ownerWithSstCount = 0;
@@ -3815,12 +4202,26 @@ export function toExpensesDto(expenses: Array<{ bearer: string; amount: Prisma.D
   let ownerWithSstActionRequiredCount = 0;
   let ownerNonSstActualCost = 0;
   let ownerWithSstActualCost = 0;
+  const ownerItems: GridExpenseSummaryItemDto[] = [];
   for (const e of expenses) {
     const amount = num(e.amount);
+    const sst = e.withSST ? expenseSstAmount(amount, EXPENSE_STANDARD_SST_RATE) : 0;
+    const item = e.id != null && e.description != null
+      ? {
+          id: e.id,
+          description: e.description,
+          amount: amount.toFixed(2),
+          sst: sst.toFixed(2),
+          total: round2(amount + sst).toFixed(2),
+          withSST: e.withSST,
+        }
+      : null;
     const actionRequired = e.actualCost == null || e.costPaymentStatus !== "paid";
     if (e.bearer === "tenant") {
       tenantTotal += amount;
+      tenantSstTotal = round2(tenantSstTotal + sst);
       tenantCount += 1;
+      if (item) tenantItems.push(item);
       if (e.withSST) {
         tenantWithSstTotal += amount;
         tenantWithSstCount += 1;
@@ -3833,7 +4234,9 @@ export function toExpensesDto(expenses: Array<{ bearer: string; amount: Prisma.D
       }
     } else if (e.bearer === "owner") {
       ownerTotal += amount;
+      ownerSstTotal = round2(ownerSstTotal + sst);
       ownerCount += 1;
+      if (item) ownerItems.push(item);
       if (e.withSST) {
         ownerWithSstTotal += amount;
         ownerWithSstCount += 1;
@@ -3850,7 +4253,9 @@ export function toExpensesDto(expenses: Array<{ bearer: string; amount: Prisma.D
     tenant: {
       total: tenantTotal.toFixed(2),
       withSstTotal: tenantWithSstTotal.toFixed(2),
+      sstTotal: tenantSstTotal.toFixed(2),
       count: tenantCount,
+      items: tenantItems,
       nonSstCount: tenantNonSstCount,
       withSstCount: tenantWithSstCount,
       nonSstActionRequiredCount: tenantNonSstActionRequiredCount,
@@ -3861,7 +4266,9 @@ export function toExpensesDto(expenses: Array<{ bearer: string; amount: Prisma.D
     owner: {
       total: ownerTotal.toFixed(2),
       withSstTotal: ownerWithSstTotal.toFixed(2),
+      sstTotal: ownerSstTotal.toFixed(2),
       count: ownerCount,
+      items: ownerItems,
       nonSstCount: ownerNonSstCount,
       withSstCount: ownerWithSstCount,
       nonSstActionRequiredCount: ownerNonSstActionRequiredCount,
@@ -3874,12 +4281,20 @@ export function toExpensesDto(expenses: Array<{ bearer: string; amount: Prisma.D
 
 /** Per-entry CUSTOM recurring totals (owner/tenant), summed from GridEntryRecurringLine.
  * Cleaning/WiFi are NOT here — they keep their own scalar columns (R9). */
-export interface GridRecurringTotals { ownerTotal: number; ownerCount: number; tenantTotal: number; tenantCount: number }
+export interface GridRecurringTotalItem { id: string; name: string; amount: string }
+export interface GridRecurringTotals {
+  ownerTotal: number;
+  ownerCount: number;
+  ownerItems?: GridRecurringTotalItem[];
+  tenantTotal: number;
+  tenantCount: number;
+  tenantItems?: GridRecurringTotalItem[];
+}
 
 export function toRecurringDto(t?: GridRecurringTotals): GridRecurringDto {
   return {
-    owner: { total: (t?.ownerTotal ?? 0).toFixed(2), count: t?.ownerCount ?? 0 },
-    tenant: { total: (t?.tenantTotal ?? 0).toFixed(2), count: t?.tenantCount ?? 0 },
+    owner: { total: (t?.ownerTotal ?? 0).toFixed(2), count: t?.ownerCount ?? 0, items: t?.ownerItems ?? [] },
+    tenant: { total: (t?.tenantTotal ?? 0).toFixed(2), count: t?.tenantCount ?? 0, items: t?.tenantItems ?? [] },
   };
 }
 
@@ -3890,13 +4305,14 @@ async function recurringTotalsByEntry(orgId: string, entryIds: string[]): Promis
   if (entryIds.length === 0) return map;
   const lines = await prisma.gridEntryRecurringLine.findMany({
     where: { organizationId: orgId, gridEntryId: { in: entryIds } },
-    select: { gridEntryId: true, amount: true, bearer: true },
+    select: { id: true, gridEntryId: true, name: true, amount: true, bearer: true },
   });
   for (const l of lines) {
     let t = map.get(l.gridEntryId);
-    if (!t) { t = { ownerTotal: 0, ownerCount: 0, tenantTotal: 0, tenantCount: 0 }; map.set(l.gridEntryId, t); }
-    if (l.bearer === "owner") { t.ownerTotal = round2(t.ownerTotal + num(l.amount)); t.ownerCount += 1; }
-    else { t.tenantTotal = round2(t.tenantTotal + num(l.amount)); t.tenantCount += 1; }
+    if (!t) { t = { ownerTotal: 0, ownerCount: 0, ownerItems: [], tenantTotal: 0, tenantCount: 0, tenantItems: [] }; map.set(l.gridEntryId, t); }
+    const item = { id: l.id, name: l.name, amount: l.amount.toFixed(2) };
+    if (l.bearer === "owner") { t.ownerTotal = round2(t.ownerTotal + num(l.amount)); t.ownerCount += 1; t.ownerItems!.push(item); }
+    else { t.tenantTotal = round2(t.tenantTotal + num(l.amount)); t.tenantCount += 1; t.tenantItems!.push(item); }
   }
   return map;
 }
@@ -3935,10 +4351,11 @@ export async function projectedRecurringTotalsByApartment(
   for (const aptId of candidates) {
     const resolved = await resolveRecurringForPeriod(prisma, orgId, aptId, period);
     if (resolved.customLines.length === 0) continue;
-    const tot: GridRecurringTotals = { ownerTotal: 0, ownerCount: 0, tenantTotal: 0, tenantCount: 0 };
+    const tot: GridRecurringTotals = { ownerTotal: 0, ownerCount: 0, ownerItems: [], tenantTotal: 0, tenantCount: 0, tenantItems: [] };
     for (const l of resolved.customLines) {
-      if (l.bearer === "owner") { tot.ownerTotal = round2(tot.ownerTotal + num(l.amount)); tot.ownerCount += 1; }
-      else { tot.tenantTotal = round2(tot.tenantTotal + num(l.amount)); tot.tenantCount += 1; }
+      const item = { id: l.definitionId, name: l.name, amount: l.amount.toFixed(2) };
+      if (l.bearer === "owner") { tot.ownerTotal = round2(tot.ownerTotal + num(l.amount)); tot.ownerCount += 1; tot.ownerItems!.push(item); }
+      else { tot.tenantTotal = round2(tot.tenantTotal + num(l.amount)); tot.tenantCount += 1; tot.tenantItems!.push(item); }
     }
     map.set(aptId, tot);
   }
@@ -4054,6 +4471,128 @@ export function toAttachmentBriefs(attachments: Array<{ id: string; filename: st
   return attachments.map((a) => ({ id: a.id, filename: a.filename, cellKey: a.cellKey, columnId: a.columnId, documentKind: a.documentKind }));
 }
 
+export type GridManagementFeeStatus =
+  | "not_configured"
+  | "before_first_charge"
+  | "free_period"
+  | "commission_month"
+  | "no_rental_income"
+  | "awaiting_rent"
+  | "chargeable"
+  | "posted";
+
+export interface GridManagementFeeDto {
+  nonSst: string;
+  sst: string;
+  total: string;
+  configured: boolean;
+  status: GridManagementFeeStatus;
+  reason: string | null;
+}
+
+export type PendingTenancyChargeKind =
+  | "rental"
+  | "deposit"
+  | "agreement_fee"
+  | "renewal_fee"
+  | "carpark"
+  | "other";
+
+export interface PendingTenancyChargeDto {
+  id: string;
+  description: string;
+  kind: PendingTenancyChargeKind;
+  payer: "tenant" | "owner";
+  baseAmount: string;
+  sst: string;
+  total: string;
+  /** Legacy wire name; contains the actual billed party name for either payer. */
+  tenantName: string | null;
+}
+
+interface PendingTenancyChargeInput {
+  id: string;
+  description: string | null;
+  chargeType: string;
+  chargeStatus: string;
+  amount: Prisma.Decimal;
+  sstRate: Prisma.Decimal | null;
+  categoryName?: string | null;
+  categorySstRate?: Prisma.Decimal | null;
+  exactSstAmount?: Prisma.Decimal | null;
+  payer: "tenant" | "owner";
+  invoiceStatus: string | null;
+  invoiceType: string | null;
+  tenantName: string | null;
+}
+
+const BILLABLE_TENANCY_INVOICE_TYPES = new Set([
+  "tenant_rental",
+  "tenant_deposit",
+  "tenant_agreement_fee",
+  "tenant_renewal",
+]);
+
+/** PURE. Maps every draft charge attached to one of the exact tenancy invoices the
+ * Bills Grid Bill action sends through bulk approval. Charge type does not gate the
+ * result: approval posts every attached draft charge, including carpark and manually
+ * attached extras. */
+export function toPendingTenancyChargeDto(input: PendingTenancyChargeInput): PendingTenancyChargeDto | null {
+  if (
+    input.invoiceStatus !== "draft"
+    || input.chargeStatus !== "draft"
+    || !input.invoiceType
+    || !BILLABLE_TENANCY_INVOICE_TYPES.has(input.invoiceType)
+  ) {
+    return null;
+  }
+  const kind: PendingTenancyChargeKind =
+    input.chargeType === "rent" || input.chargeType === "letting_commission"
+      ? "rental"
+      : input.chargeType === "security_deposit" || input.chargeType === "utility_deposit"
+        ? "deposit"
+        : input.chargeType === "tenancy_agreement_fee"
+          ? "agreement_fee"
+          : input.chargeType === "renewal_fee"
+            ? "renewal_fee"
+            : input.chargeType === "carpark"
+              ? "carpark"
+              : "other";
+
+  const fallbackDescription: Record<PendingTenancyChargeKind, string> = {
+    rental: "Rental",
+    deposit: "Deposit",
+    agreement_fee: "TA (WITH SST)",
+    renewal_fee: "Renewal TA (WITH SST)",
+    carpark: "Carpark rent",
+    other: "Additional charge",
+  };
+  const baseAmount = num(input.amount);
+  // Keep the preview cent-identical to issuance. Inclusive TA charges carry a
+  // payable tax sibling whose amount is the exact residual from the entered
+  // gross total; ordinary lines keep the standard amount × rate rounding.
+  const effectiveSstRate = input.sstRate ?? input.categorySstRate;
+  const sst = input.exactSstAmount != null
+    ? num(input.exactSstAmount)
+    : expenseSstAmount(baseAmount, effectiveSstRate?.toString() ?? "0");
+  return {
+    id: input.id,
+    description: (
+      kind === "agreement_fee" && input.description?.trim() === "Tenancy agreement fee"
+        ? fallbackDescription.agreement_fee
+        : kind === "renewal_fee" && input.description?.trim() === "Tenancy renewal fee"
+          ? fallbackDescription.renewal_fee
+          : input.description?.trim() || input.categoryName?.trim() || fallbackDescription[kind]
+    ),
+    kind,
+    payer: input.payer,
+    baseAmount: baseAmount.toFixed(2),
+    sst: sst.toFixed(2),
+    total: round2(baseAmount + sst).toFixed(2),
+    tenantName: input.tenantName,
+  };
+}
+
 export interface GridRowDto {
   /** R13: money settled against a proforma line that never got its tax invoice. The money
    *  is correct; only the document is missing, and it is repairable. */
@@ -4066,6 +4605,10 @@ export interface GridRowDto {
    * filter can show a name instead of a raw propertyId UUID. Sourced from
    * the apartment→property relation (Property.name). */
   propertyName: string;
+  /** Business-facing property short form (Property.propertyCode). The Unit
+   * column combines this with Apartment.unitCode instead of repeating the
+   * full condo name on every row. */
+  propertyCode: string;
   /** The unit owner's displayName (every room shares one owner via Listing.ownerPartyId).
    * Display + search only — never a billing-math input. null when the apartment has no
    * owned listing / no owner party. Owner PHONE is intentionally not surfaced here. */
@@ -4077,6 +4620,8 @@ export interface GridRowDto {
   preview: ComputeResult | null;
   /** Structured, never an HTTP status. `null` when the preview succeeded. */
   previewError: { code: string; detail?: unknown } | null;
+  /** Exact, server-effective first-issuance utility component plan. */
+  billUtilityPlan: GridBillUtilityPlanDto;
   /** NON-fatal row-level anomalies. An empty array is the healthy case. */
   warnings: RowWarning[];
   /** Nested tenant/room sub-rows, keyed on listingId (Foundation CORRECTION 2). */
@@ -4120,12 +4665,14 @@ export interface GridRowDto {
   /** Task 10: active-only expense totals. "0.00" totals when `entry` is null. */
   expenses: GridExpensesDto;
   /** Management fee base and SST split; SST is payable to government, not revenue. */
-  managementFee: { nonSst: string; sst: string; total: string };
+  managementFee: GridManagementFeeDto;
   /** Tenant agreement charges created outside the editable bills grid. */
   agreementFees: {
     new: { amount: string; outstanding: string; state: "none" | "saved" | "billed-unpaid" | "paid" };
     renewal: { amount: string; outstanding: string; state: "none" | "saved" | "billed-unpaid" | "paid" };
   };
+  /** Exact base/SST lines attached to draft tenancy invoices this row's Bill action approves. */
+  pendingTenancyCharges: PendingTenancyChargeDto[];
   /** Cash-basis owner payout and any owner top-up shortfall from the authoritative ledger. */
   ownerPayout: string;
   ownerTopUpRequired: string;
@@ -4389,7 +4936,7 @@ async function subRowsFor(
 
 export async function toGridRowDto(
   orgId: string,
-  apt: { id: string; unitCode: string; propertyId: string; propertyName: string; listingMode: string },
+  apt: { id: string; unitCode: string; propertyId: string; propertyName: string; propertyCode: string; listingMode: string },
   rooms: RoomTenancyInfo[],
   entry: GridEntryWithChildren | null,
   preview: ComputeResult | null,
@@ -4420,12 +4967,21 @@ export async function toGridRowDto(
   // R13: precomputed by getGridService's batched pendingGraduationEntryIds. Defaults false
   // for the pure-mapper unit tests, an unsaved entry, and a flag-dark read.
   graduationPending = false,
-  managementFee: { nonSst: string; sst: string; total: string } = { nonSst: "0.00", sst: "0.00", total: "0.00" },
+  managementFee: GridManagementFeeDto = {
+    nonSst: "0.00",
+    sst: "0.00",
+    total: "0.00",
+    configured: false,
+    status: "not_configured",
+    reason: "Management fee setup required",
+  },
   agreementFees: GridRowDto["agreementFees"] = {
     new: { amount: "0.00", outstanding: "0.00", state: "none" },
     renewal: { amount: "0.00", outstanding: "0.00", state: "none" },
   },
   ownerMoney: { payout: string; topUp: string } = { payout: "0.00", topUp: "0.00" },
+  pendingTenancyCharges: PendingTenancyChargeDto[] = [],
+  billUtilityPlan: GridBillUtilityPlanDto = emptyGridBillUtilityPlan(),
 ): Promise<GridRowDto> {
   const { subRows, warnings: negWarnings } = await subRowsFor(orgId, rooms, entry, nameById);
   return {
@@ -4433,11 +4989,13 @@ export async function toGridRowDto(
     unitCode: apt.unitCode,
     propertyId: apt.propertyId,
     propertyName: apt.propertyName,
+    propertyCode: apt.propertyCode,
     ownerName: owner?.name ?? null,
     ownerPartyId: owner?.id ?? null,
     entryId: entry?.id ?? null,
     preview,
     previewError,
+    billUtilityPlan,
     warnings: [...warnings, ...negWarnings],
     subRows,
     billedAt: entry?.billedAt?.toISOString() ?? null,
@@ -4458,6 +5016,7 @@ export async function toGridRowDto(
     expenses: toExpensesDto(entry?.expenses ?? []),
     managementFee,
     agreementFees,
+    pendingTenancyCharges,
     ownerPayout: ownerMoney.payout,
     ownerTopUpRequired: ownerMoney.topUp,
     recurring: toRecurringDto(recurring),
@@ -4551,7 +5110,17 @@ async function billedApartmentIds(
 export async function getGridService(
   session: { orgId: string },
   q: { period?: string; propertyId?: string; months: number },
-): Promise<Result<{ period: string; periods: string[]; rows: GridRowDto[] }>> {
+): Promise<Result<{
+  period: string;
+  periods: string[];
+  rows: GridRowDto[];
+  billingCapabilities: { billingDocuments: boolean; expensesAsCharges: boolean };
+}>> {
+  // The confirmation surface must describe the same feature world as the API that
+  // performs Bill. Vite flags can drift during a rolling deploy, so publish the
+  // server's effective capabilities with every grid snapshot.
+  const billingDocuments = isPhase2FlagEnabled("ENABLE_PHASE2_BILLING_DOCS");
+  const expensesAsCharges = billingDocuments && isPhase2FlagEnabled("ENABLE_BILL_EXPENSES_AS_CHARGES");
   const periods = await resolvePeriods(session.orgId, q.period, q.months); // latest-first
   const apartments = await prisma.apartment.findMany({
     where: { organizationId: session.orgId, ...(q.propertyId ? { propertyId: q.propertyId } : {}) },
@@ -4567,13 +5136,16 @@ export async function getGridService(
     // is keyed. It feeds ONLY the display-side subRows — the money preview below
     // still computes from entry.readings (frozen), untouched.
     include: {
-      property: { select: { name: true } },
+      property: { select: { name: true, propertyCode: true } },
       listings: {
         orderBy: [{ listingType: "asc" }, { id: "asc" }],
         select: {
           id: true,
           // Owner (display + search): every room of an apartment shares one owner.
           ownerPartyId: true,
+          // Exact Bill owner resolution ignores archived listings. The utility
+          // plan needs the same representative-listing eligibility without a query.
+          listingStatus: true,
           // PERIOD-scoped, not `status: "active"`. Reading a past month must show the
           // tenant who lived there THEN; selecting by current status priced the month
           // against a tenancy that may not overlap it at all (a replacement starting
@@ -4582,7 +5154,17 @@ export async function getGridService(
           tenancies: {
             where: tenancyPeriodWhere(periods[0]),
             orderBy: [{ startDate: "desc" }, { id: "asc" }],
-            select: { id: true, numberOfPax: true, startDate: true, endDate: true, status: true, renewalDecision: true, tenantParty: { select: { id: true, displayName: true, primaryPhone: true } } },
+            select: {
+              id: true,
+              numberOfPax: true,
+              monthlyRentAmount: true,
+              firstMonthIsCommission: true,
+              startDate: true,
+              endDate: true,
+              status: true,
+              renewalDecision: true,
+              tenantParty: { select: { id: true, displayName: true, primaryPhone: true } },
+            },
           },
         },
       },
@@ -4605,8 +5187,137 @@ export async function getGridService(
   // RoomTenancyInfo's own tenancyId — not a reading's snapshot.
   const allListingIds = apartments.flatMap((a) => a.listings.map((l) => l.id));
   const allTenancyIds = apartments.flatMap((a) => a.listings.flatMap((l) => l.tenancies.map((t) => t.id)));
+  const apartmentIdByListing = new Map(apartments.flatMap((apt) => apt.listings.map((listing) => [listing.id, apt.id] as const)));
+  const pendingTenancyChargesByApt = new Map<string, PendingTenancyChargeDto[]>();
+  const addPendingTenancyCharge = (apartmentId: string, item: PendingTenancyChargeDto | null): void => {
+    if (!item) return;
+    const items = pendingTenancyChargesByApt.get(apartmentId) ?? [];
+    items.push(item);
+    pendingTenancyChargesByApt.set(apartmentId, items);
+  };
+
+  // Confirm Bill approves these exact draft invoice types after the grid row succeeds,
+  // and approval posts every attached DRAFT charge. Load the same invoice rail once for
+  // the whole page so the dialog includes carpark and manually attached extras too; do
+  // not re-filter by chargeType/billingMonth or issue one query per apartment.
+  const pendingTenantDraftInvoices = apartments.length > 0
+    ? await prisma.invoice.findMany({
+        where: {
+          organizationId: session.orgId,
+          invoiceType: { in: [...BILLABLE_TENANCY_INVOICE_TYPES] },
+          status: "draft",
+          periodMonth: periods[0],
+          tenancy: { unit: { apartmentId: { in: apartments.map((apt) => apt.id) } } },
+        },
+        orderBy: [{ createdAt: "asc" }, { id: "asc" }],
+        select: {
+          invoiceType: true,
+          status: true,
+          tenancy: { select: { unit: { select: { apartmentId: true } } } },
+          charges: {
+            where: { organizationId: session.orgId, status: "draft" },
+            orderBy: [{ createdAt: "asc" }, { id: "asc" }],
+            select: {
+              id: true,
+              chargeNumber: true,
+              parentChargeId: true,
+              description: true,
+              chargeType: true,
+              status: true,
+              amount: true,
+              sstRate: true,
+              commercialPurpose: true,
+              fundedBy: true,
+              revenueRecognition: true,
+              settlementRecipient: true,
+              nonBillable: true,
+              category: { select: { name: true, family: true, defaultSstRate: true } },
+              party: { select: { displayName: true } },
+            },
+          },
+        },
+      })
+    : [];
+
+  // issueDocumentsForChargesTx resolves categoryId first, then this shared
+  // chargeType→category-code fallback. Mirror that fallback in one bounded lookup so
+  // descriptions and category-default SST match the document that will be issued.
+  const fallbackCategoryCodes = [...new Set(pendingTenantDraftInvoices.flatMap((invoice) =>
+    invoice.charges.flatMap((charge) => {
+      if (charge.category) return [];
+      const code = CHARGE_TYPE_TO_CATEGORY_CODE[charge.chargeType];
+      return code ? [code] : [];
+    }),
+  ))];
+  const fallbackCategories = fallbackCategoryCodes.length > 0
+    ? await prisma.chargeCategory.findMany({
+        where: { organizationId: session.orgId, code: { in: fallbackCategoryCodes } },
+        select: { code: true, name: true, family: true, defaultSstRate: true },
+      })
+    : [];
+  const fallbackCategoryByCode = new Map(fallbackCategories.map((category) => [category.code, category]));
+  const rentReclassificationEnabled = isPhase2FlagEnabled("ENABLE_PHASE2_RENT_RECLASSIFICATION");
+
+  for (const invoice of pendingTenantDraftInvoices) {
+    const apartmentId = invoice.tenancy?.unit.apartmentId;
+    if (!apartmentId) continue;
+    const chargeById = new Map(invoice.charges.map((charge) => [charge.id, charge]));
+    const taxChildByParentId = new Map<string, (typeof invoice.charges)[number]>();
+    const taxChildIds = new Set(invoice.charges.flatMap((charge) => {
+      if (!charge.parentChargeId) return [];
+      const parent = chargeById.get(charge.parentChargeId);
+      if (!parent || charge.chargeNumber !== `${parent.chargeNumber}-SST`) return [];
+      taxChildByParentId.set(parent.id, charge);
+      return [charge.id];
+    }));
+    for (const charge of invoice.charges) {
+      // The base row already previews its SST through sstRate. The linked
+      // payable sibling exists for settlement only and must not appear as a
+      // second Confirm Bill item.
+      if (taxChildIds.has(charge.id)) continue;
+      const fallbackCode = charge.category ? null : CHARGE_TYPE_TO_CATEGORY_CODE[charge.chargeType];
+      const category = charge.category ?? (fallbackCode ? fallbackCategoryByCode.get(fallbackCode) : null);
+      let payer: "tenant" | "owner" = category?.family === "owner_income" ? "owner" : "tenant";
+      if (rentReclassificationEnabled) {
+        const routed = resolveDocumentClassification({
+          commercialPurpose: charge.commercialPurpose,
+          fundedBy: charge.fundedBy,
+          revenueRecognition: charge.revenueRecognition,
+          settlementRecipient: charge.settlementRecipient,
+          nonBillable: charge.nonBillable,
+        } as Parameters<typeof resolveDocumentClassification>[0]);
+        if (routed.kind !== "NEEDS_ECONOMIC_CLASSIFICATION" && routed.kind !== "NO_DOCUMENT") {
+          payer = routed.commercialDocumentType === "OWNER_SERVICE_INVOICE" ? "owner" : "tenant";
+        }
+      }
+      addPendingTenancyCharge(apartmentId, toPendingTenancyChargeDto({
+        id: charge.id,
+        description: charge.description,
+        chargeType: charge.chargeType,
+        chargeStatus: charge.status,
+        amount: charge.amount,
+        sstRate: charge.sstRate,
+        categoryName: category?.name ?? null,
+        categorySstRate: category?.defaultSstRate ?? null,
+        exactSstAmount: taxChildByParentId.get(charge.id)?.amount ?? null,
+        payer,
+        invoiceStatus: invoice.status,
+        invoiceType: invoice.invoiceType,
+        tenantName: charge.party.displayName,
+      }));
+    }
+  }
+
   const rateByListing = await resolveRoomRatesBatch(prisma, session.orgId, allListingIds);
-  const rentByTenancy = await resolveRoomRentsBatch(prisma, session.orgId, allTenancyIds, periods[0]);
+  const rentFactsByTenancy = await resolveRoomRentFactsBatch(
+    prisma,
+    session.orgId,
+    allTenancyIds,
+    periods[0],
+  );
+  const rentByTenancy = new Map(
+    [...rentFactsByTenancy].map(([id, value]) => [id, value.billedRent]),
+  );
 
   // Rental and deposit documents are independent from the bills-grid Bill button.
   // Load their real charge/document/payment states in one bounded query so their
@@ -4681,7 +5392,6 @@ export async function getGridService(
   type AgreementFeePair = { new: AgreementFeeLine; renewal: AgreementFeeLine };
   const emptyAgreementLine = (): AgreementFeeLine => ({ amount: 0, outstanding: 0, state: "none" });
   const agreementFeesByApt = new Map<string, AgreementFeePair>();
-  const apartmentIdByListing = new Map(apartments.flatMap((apt) => apt.listings.map((listing) => [listing.id, apt.id] as const)));
   const agreementRank: Record<AgreementFeeState, number> = { none: 0, paid: 1, "billed-unpaid": 2, saved: 3 };
   for (const charge of agreementFeeCharges) {
     if (!charge.unitId) continue;
@@ -4719,6 +5429,7 @@ export async function getGridService(
     entry: GridEntryWithChildren | null;
     preview: ComputeResult | null;
     previewError: { code: string; detail?: unknown } | null;
+    billUtilityPlan: GridBillUtilityPlanDto;
     warnings: RowWarning[];
   };
   // Batch EVERY apartment's entry for the period in ONE query (was a per-apartment
@@ -4729,6 +5440,24 @@ export async function getGridService(
     include: { readings: true, expenses: { where: { status: "active" } }, attachments: true },
   });
   const entryByApt = new Map(entries.map((e) => [e.apartmentId, e]));
+  // The Bill transaction resolves this singleton once per SUBSIDY row. The read
+  // path needs the same value, but page-wide: one bounded query, never N queries.
+  const hasSubsidyEntry = billingDocuments && apartments.some((apt) => {
+    const entry = entryByApt.get(apt.id);
+    return entry != null
+      && apt.listingMode !== "WHOLE"
+      && (
+        apt.partitionBillingMode === "SUBSIDY"
+        || entry.subsidyPolicySnapshot === "legacy_per_pax"
+        || (entry.billedAt != null && entry.subsidyPolicySnapshot == null)
+      );
+  });
+  const subsidyPerPax = hasSubsidyEntry
+    ? Number((await prisma.utilityBillingConfig.findFirst({
+        where: { organizationId: session.orgId },
+        select: { subsidyPerPax: true },
+      }))?.subsidyPerPax ?? 50)
+    : 0;
   // Batch pax for ALL entries' readings in ONE query (was per-entry inside the loop).
   // roomsFromReadings is pure and consumes this shared map.
   const paxByTenancy = await paxByTenancyFor(prisma, session.orgId, entries.flatMap((e) => e.readings));
@@ -4738,11 +5467,12 @@ export async function getGridService(
 
     let preview: ComputeResult | null = null;
     let previewError: { code: string; detail?: unknown } | null = null;
+    let billUtilityPlan = emptyGridBillUtilityPlan();
     let warnings: RowWarning[] = [];
     if (entry) {
+      const built = roomsFromReadings(entry.readings, paxByTenancy);
+      warnings = built.warnings; // surfaced even if either compute later throws
       try {
-        const built = roomsFromReadings(entry.readings, paxByTenancy);
-        warnings = built.warnings; // surfaced even if compute later throws
         const shaped = shapeUtilityPool({
           tnbPattern: entry.tnbPattern as never, airPattern: entry.airPattern as never,
           rawTnbTotal: num(entry.tnbTotalRaw), rawAirSelangor: num(entry.airSelangorRaw), rooms: built.rooms,
@@ -4758,6 +5488,58 @@ export async function getGridService(
         if (e instanceof ComputeError) previewError = { code: e.code };
         else if (e instanceof ShapeError) previewError = { code: e.code, detail: e.detail };
         else previewError = { code: "PREVIEW_FAILED" };
+      }
+
+      // WHOLE Bill resolves ONE apartment-wide majority occupant, not one per
+      // listing. The apartment query above already loaded the same period-scoped
+      // candidate set, so flatten + reuse primaryTenancyForPeriod with zero I/O.
+      const wholePrimary = apt.listingMode === "WHOLE"
+        ? primaryTenancyForPeriod(
+            apt.listings.flatMap((listing) => listing.tenancies.map((tenancy) => ({
+              ...tenancy,
+              unitId: listing.id,
+              partyId: tenancy.tenantParty.id,
+            }))),
+            periods[0],
+          )
+        : null;
+      const activeTenancy = wholePrimary
+        ? { tenancyId: wholePrimary.id, partyId: wholePrimary.partyId, unitId: wholePrimary.unitId }
+        : null;
+      const ownerListingId = apt.listings.find(
+        (listing) => listing.listingStatus !== "archived" && listing.ownerPartyId != null,
+      )?.id ?? null;
+      try {
+        const resolvedSubsidy = resolveGridTnbSubsidy({
+          isWholeUnit: apt.listingMode === "WHOLE",
+          partitionBillingMode: apt.partitionBillingMode,
+          subsidyPerPax,
+          apartmentTnbSubsidyCap: apt.tnbSubsidyCapMonthly == null
+            ? null
+            : Number(apt.tnbSubsidyCapMonthly),
+          billedAt: entry.billedAt,
+          subsidyPolicySnapshot: entry.subsidyPolicySnapshot,
+          tnbSubsidyCapSnapshot: entry.tnbSubsidyCapSnapshot == null
+            ? null
+            : Number(entry.tnbSubsidyCapSnapshot),
+        });
+        billUtilityPlan = buildGridBillUtilityPlan({
+          entry,
+          rawRooms: built.rooms,
+          isWholeUnit: apt.listingMode === "WHOLE",
+          partitionBillingMode: apt.partitionBillingMode,
+          activeTenancy,
+          subsidyPerPax,
+          resolvedSubsidy,
+          billingDocuments,
+          ownerListingId,
+        });
+      } catch (error) {
+        billUtilityPlan = emptyGridBillUtilityPlan(
+          "unavailable",
+          null,
+          error instanceof ComputeError ? error.code : "PREVIEW_FAILED",
+        );
       }
     }
     // One room per Listing; its active tenant (latest-first) supplies the name
@@ -4813,7 +5595,7 @@ export async function getGridService(
         numberOfPax: primary?.numberOfPax ?? null,
       };
     });
-    interim.push({ apt, rooms, entry, preview, previewError, warnings });
+    interim.push({ apt, rooms, entry, preview, previewError, billUtilityPlan, warnings });
   }
 
   // P5: resolve every last-editor fullName in ONE org-scoped query for the WHOLE
@@ -4915,10 +5697,26 @@ export async function getGridService(
     },
     select: { apartmentId: true, amount: true, sstAmount: true },
   });
-  const managementFeeByApt = new Map<string, { nonSst: number; sst: number }>();
+  type ManagementFeeView = {
+    nonSst: number;
+    sst: number;
+    configured: boolean;
+    status: GridManagementFeeStatus;
+    reason: string | null;
+  };
+  const managementFeeByApt = new Map<string, ManagementFeeView>();
   for (const line of managementFeeLines) {
     if (!line.apartmentId) continue;
-    const current = managementFeeByApt.get(line.apartmentId) ?? { nonSst: 0, sst: 0 };
+    // An existing ledger line remains authoritative even if its old config has
+    // since been retired. It proves that the unit-month was configured when the
+    // fee was generated, so it must not be mislabelled as "Not configured".
+    const current = managementFeeByApt.get(line.apartmentId) ?? {
+      nonSst: 0,
+      sst: 0,
+      configured: true,
+      status: "posted" as const,
+      reason: null,
+    };
     current.nonSst += Number(line.amount);
     current.sst += Number(line.sstAmount ?? 0);
     managementFeeByApt.set(line.apartmentId, current);
@@ -4938,25 +5736,101 @@ export async function getGridService(
       cfg.ownerPartyId === ownerPartyId &&
       (cfg.apartmentId === it.apt.id ||
         (cfg.apartmentId === null && (cfg.propertyId === null || cfg.propertyId === it.apt.propertyId))) &&
-      (!cfg.effectiveFrom || periods[0] >= cfg.effectiveFrom) &&
-      (!cfg.effectiveTo || periods[0] <= cfg.effectiveTo));
+      effectiveWindowOverlapsBillingMonth(billingYm, {
+        effectiveFrom: cfg.effectiveFrom,
+        effectiveTo: cfg.effectiveTo,
+      }));
     const cfg = eligible.find((row) => row.apartmentId === it.apt.id)
       ?? eligible.find((row) => row.apartmentId === null && row.propertyId === it.apt.propertyId)
       ?? eligible.find((row) => row.apartmentId === null && row.propertyId === null);
     if (!cfg) continue;
-    const monthlyRent = it.rooms.reduce((sum, room) => sum + Number(room.rental ?? 0), 0);
+    const firstChargeMonth = cfg.firstChargeMonth == null
+      ? null
+      : new Date(Date.UTC(cfg.firstChargeMonth.getUTCFullYear(), cfg.firstChargeMonth.getUTCMonth(), 1));
+    if (firstChargeMonth && periods[0].getTime() < firstChargeMonth.getTime()) {
+      managementFeeByApt.set(it.apt.id, {
+        nonSst: 0,
+        sst: 0,
+        configured: true,
+        status: "before_first_charge",
+        reason: `Starts in ${firstChargeMonth.toLocaleDateString("en-MY", { month: "short", year: "numeric", timeZone: "UTC" })}`,
+      });
+      continue;
+    }
     const inFreePeriod = isInFreePeriod(billingYm, {
       freePeriodStart: cfg.freePeriodStart?.toISOString() ?? null,
       freePeriodEnd: cfg.freePeriodEnd?.toISOString() ?? null,
     });
-    if (!shouldChargeMgmtFee({ hasActiveTenancy: monthlyRent > 0, inFreePeriod })) continue;
-    const fee = computeManagementFee({
-      feeType: cfg.feeType as "percent" | "fixed" | "cap",
-      feeValue: cfg.feeValue.toString(),
-      capAmount: cfg.capAmount?.toString() ?? null,
-      sstPercent: cfg.sstPercent.toString(),
-    }, monthlyRent.toFixed(2));
-    managementFeeByApt.set(it.apt.id, { nonSst: Number(fee.base), sst: Number(fee.sst) });
+    if (inFreePeriod) {
+      managementFeeByApt.set(it.apt.id, {
+        nonSst: 0,
+        sst: 0,
+        configured: true,
+        status: "free_period",
+        reason: "No management fee — free period",
+      });
+      continue;
+    }
+
+    const rent = computeManagementFeeRentBase(
+      it.apt.listings.flatMap((listing) => listing.tenancies.map((tenancy) => {
+        const facts = rentFactsByTenancy.get(tenancy.id);
+        return {
+          billedRent: facts?.billedRent ?? "0.00",
+          fullMonthRent: facts?.fullMonthRent ?? tenancy.monthlyRentAmount.toString(),
+          numberOfPax: tenancy.numberOfPax,
+          isCommissionMonth: isCommissionMonth(tenancy, periods[0]),
+          fullyCollected: rentalStatesByTenancy.get(tenancy.id) === "paid",
+        };
+      })),
+      cfg.paxDeductionPerPerson?.toString() ?? null,
+    );
+
+    if (rent.reason === "commission_month") {
+      managementFeeByApt.set(it.apt.id, {
+        nonSst: 0,
+        sst: 0,
+        configured: true,
+        status: "commission_month",
+        reason: "No management fee — first full-month rent retained as commission",
+      });
+      continue;
+    }
+    if (rent.reason === "no_rental_income") {
+      managementFeeByApt.set(it.apt.id, {
+        nonSst: 0,
+        sst: 0,
+        configured: true,
+        status: "no_rental_income",
+        reason: "No management fee — no owner rental income",
+      });
+      continue;
+    }
+
+    const useFirstChargeOverride =
+      firstChargeMonth != null &&
+      cfg.firstChargeBaseAmount != null &&
+      firstChargeMonth.getTime() === periods[0].getTime();
+    const fee = computeManagementFee(
+      useFirstChargeOverride
+        ? { feeType: "fixed", feeValue: cfg.firstChargeBaseAmount!.toString(), capAmount: null, sstPercent: "8" }
+        : {
+            feeType: cfg.feeType as "percent" | "fixed" | "cap",
+            feeValue: cfg.feeValue.toString(),
+            capAmount: cfg.capAmount?.toString() ?? null,
+            sstPercent: "8",
+          },
+      rent.eligibleRentBase,
+    );
+    managementFeeByApt.set(it.apt.id, {
+      nonSst: Number(fee.base),
+      sst: Number(fee.sst),
+      configured: true,
+      status: rent.fullyCollected ? "chargeable" : "awaiting_rent",
+      reason: rent.fullyCollected
+        ? null
+        : "Forecast only — collect the tenant's rent before charging the owner",
+    });
   }
 
   const unitMonthMoney = await prisma.unitMonthLedger.findMany({
@@ -4979,7 +5853,14 @@ export async function getGridService(
     rows.push(
       await toGridRowDto(
         session.orgId,
-        { id: it.apt.id, unitCode: it.apt.unitCode, propertyId: it.apt.propertyId, propertyName: it.apt.property.name, listingMode: it.apt.listingMode },
+        {
+          id: it.apt.id,
+          unitCode: it.apt.unitCode,
+          propertyId: it.apt.propertyId,
+          propertyName: it.apt.property.name,
+          propertyCode: it.apt.property.propertyCode,
+          listingMode: it.apt.listingMode,
+        },
         it.rooms,
         it.entry, it.preview, it.previewError, it.warnings, periods.slice(1), configByApt.get(it.apt.id) ?? null, nameById,
         it.entry ? paidEntryIds.has(it.entry.id) : false,
@@ -4990,8 +5871,21 @@ export async function getGridService(
         it.entry ? settlementByEntryId.get(it.entry.id) : undefined,
         it.entry ? graduationPendingIds.has(it.entry.id) : false,
         (() => {
-          const fee = managementFeeByApt.get(it.apt.id) ?? { nonSst: 0, sst: 0 };
-          return { nonSst: fee.nonSst.toFixed(2), sst: fee.sst.toFixed(2), total: (fee.nonSst + fee.sst).toFixed(2) };
+          const fee = managementFeeByApt.get(it.apt.id) ?? {
+            nonSst: 0,
+            sst: 0,
+            configured: false,
+            status: "not_configured" as const,
+            reason: "Management fee setup required",
+          };
+          return {
+            nonSst: fee.nonSst.toFixed(2),
+            sst: fee.sst.toFixed(2),
+            total: (fee.nonSst + fee.sst).toFixed(2),
+            configured: fee.configured,
+            status: fee.status,
+            reason: fee.reason,
+          };
         })(),
         (() => {
           const fees = agreementFeesByApt.get(it.apt.id) ?? { new: emptyAgreementLine(), renewal: emptyAgreementLine() };
@@ -5001,10 +5895,17 @@ export async function getGridService(
           };
         })(),
         ownerMoneyByApt.get(it.apt.id) ?? { payout: "0.00", topUp: "0.00" },
+        pendingTenancyChargesByApt.get(it.apt.id) ?? [],
+        it.billUtilityPlan,
       ),
     );
   }
-  return ok({ period: iso(periods[0]), periods: periods.map(iso), rows });
+  return ok({
+    period: iso(periods[0]),
+    periods: periods.map(iso),
+    rows,
+    billingCapabilities: { billingDocuments, expensesAsCharges },
+  });
 }
 
 // ─────────────────────────────── READINGS ───────────────────────────────────
@@ -5245,6 +6146,13 @@ export async function setBearerConfigService(
   const apt = await prisma.apartment.findFirst({ where: { id: apartmentId, organizationId: session.orgId } });
   if (!apt) return err(404, "APARTMENT_NOT_FOUND");
   const org = await prisma.organization.findUniqueOrThrow({ where: { id: session.orgId }, select: { timezone: true } });
+  // Cleaning and WiFi no longer have tenant-side grid columns. Keep accepting the
+  // legacy wire vocabulary so a rolling/stale client does not fail its entire Save,
+  // but canonicalise every NEW config write to Owner server-side. Exceptional tenant
+  // recovery is created through Tenant Expenses instead. Existing paid/frozen period
+  // snapshots remain protected by the sync guards below and are never rewritten here.
+  const cleaningBearer = "owner";
+  const wifiBearer = "owner";
   try {
     return await prisma.$transaction(async (tx) => {
       const existing = await tx.unitBillsBearerConfig.findUnique({
@@ -5261,7 +6169,7 @@ export async function setBearerConfigService(
 
       const data = {
         tnbPattern: body.tnbPattern, airPattern: body.airPattern,
-        cleaningBearer: body.cleaningBearer, wifiBearer: body.wifiBearer, maintenanceFeeBearer: body.maintenanceFeeBearer,
+        cleaningBearer, wifiBearer, maintenanceFeeBearer: body.maintenanceFeeBearer,
         cleaningRecurringAmount: body.cleaningRecurringAmount,
         isLocked: true, lockedAt: new Date(), lockedBy: session.userId,
         // charge-nature gate: `undefined` (field absent on the wire) leaves the stored value
@@ -5317,9 +6225,9 @@ export async function setBearerConfigService(
         const patch = {
           tnbPattern: body.tnbPattern,
           airPattern: body.airPattern,
-          cleaningBearer: body.cleaningBearer,
+          cleaningBearer,
           ...(body.cleaningNature !== undefined ? { cleaningNature: body.cleaningNature } : {}),
-          wifiBearer: body.wifiBearer,
+          wifiBearer,
           ...(body.wifiNature !== undefined ? { wifiNature: body.wifiNature } : {}),
           maintenanceFeeBearer: body.maintenanceFeeBearer,
         };
@@ -5480,6 +6388,7 @@ export interface ExpenseListItem {
 export async function listExpensesService(
   session: { orgId: string },
   q: { apartmentId?: string; billingMonth?: string; bearer?: string; q?: string },
+  options: { includeInternalCosts?: boolean } = {},
 ): Promise<Result<{ items: ExpenseListItem[]; total: string }>> {
   const where: Prisma.GridExpenseWhereInput = { organizationId: session.orgId };
   if (q.apartmentId) where.apartmentId = q.apartmentId;
@@ -5546,12 +6455,15 @@ export async function listExpensesService(
   const items: ExpenseListItem[] = rows.map((r) => ({
     id: r.id, apartmentId: r.apartmentId, periodMonth: iso(r.periodMonth), bearer: r.bearer,
     description: r.description, amount: r.amount.toFixed(2), withSST: r.withSST, partyId: r.partyId, status: r.status,
-    actualCost: r.actualCost?.toFixed(2) ?? null,
-    costVendor: r.costVendor,
-    costPaymentStatus: r.costPaymentStatus,
-    costPaymentDate: r.costPaymentDate ? iso(r.costPaymentDate) : null,
-    costPaymentAccount: r.costPaymentAccount,
-    costNotes: r.costNotes,
+    // Internal cost and margin data is a separate permission from customer-facing
+    // billing. Returning nulls (rather than relying on the UI to hide controls)
+    // prevents a billing-only user from reading supplier/payee data in DevTools.
+    actualCost: options.includeInternalCosts ? (r.actualCost?.toFixed(2) ?? null) : null,
+    costVendor: options.includeInternalCosts ? r.costVendor : null,
+    costPaymentStatus: options.includeInternalCosts ? r.costPaymentStatus : "unpaid",
+    costPaymentDate: options.includeInternalCosts && r.costPaymentDate ? iso(r.costPaymentDate) : null,
+    costPaymentAccount: options.includeInternalCosts ? r.costPaymentAccount : null,
+    costNotes: options.includeInternalCosts ? r.costNotes : null,
     updatedAt: r.updatedAt.toISOString(),
     partyName: r.partyId ? (ownerNames.get(r.partyId) ?? null) : null,
     // Review fix (T4): null the id itself when the org-scoped relation resolved to

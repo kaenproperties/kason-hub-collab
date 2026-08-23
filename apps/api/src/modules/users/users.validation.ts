@@ -2,7 +2,12 @@ import { z } from "zod";
 import { PERMISSION_CATALOG } from "../../lib/permissions";
 
 const permissionCodes = PERMISSION_CATALOG.map(([code]) => code) as [string, ...string[]];
-const permissionOverridesSchema = z.record(z.enum(permissionCodes), z.boolean()).default({});
+// Zod 4 treats `z.record(z.enum(...), value)` as an exhaustive record and
+// therefore requires every permission code to be present. Permission
+// overrides are intentionally sparse: an empty object means "use the role
+// defaults", while only customised permissions are stored. Use
+// `partialRecord` so omitted permission codes remain valid.
+const permissionOverridesSchema = z.partialRecord(z.enum(permissionCodes), z.boolean()).default({});
 
 export const createUserSchema = z.object({
   email: z.string().email("Invalid email address"),

@@ -34,6 +34,10 @@ function makeModelSpies() {
     partyRole: {
       findFirst: vi.fn(),
     },
+    managementFeeConfig: {
+      updateMany: vi.fn(),
+      create: vi.fn(),
+    },
     auditLog: {
       create: vi.fn(),
     },
@@ -215,9 +219,20 @@ function countConflictTierScans(m: ModelSpies): number {
 }
 
 /** Apartment `apt-1` already exists, on BOTH clients (pre-tx read + in-tx read). */
-function stubExistingApartment(partitionBillingMode: string | null = "NO_SUBSIDY") {
-  prismaMock.apartment.findFirst.mockResolvedValue({ id: "apt-1", partitionBillingMode });
-  txMock.apartment.findFirst.mockResolvedValue({ id: "apt-1", partitionBillingMode });
+function stubExistingApartment(
+  partitionBillingMode: string | null = "NO_SUBSIDY",
+  tnbSubsidyCapMonthly: number | null = null,
+) {
+  prismaMock.apartment.findFirst.mockResolvedValue({
+    id: "apt-1",
+    partitionBillingMode,
+    tnbSubsidyCapMonthly,
+  });
+  txMock.apartment.findFirst.mockResolvedValue({
+    id: "apt-1",
+    partitionBillingMode,
+    tnbSubsidyCapMonthly,
+  });
 }
 
 function stubDefaults(m: ModelSpies) {
@@ -233,6 +248,8 @@ function stubDefaults(m: ModelSpies) {
   m.carpark.updateMany.mockResolvedValue({ count: 0 });
   // Owner-role check passes by default; overridden per-test for the reject case.
   m.partyRole.findFirst.mockResolvedValue({ id: "role-1" });
+  m.managementFeeConfig.updateMany.mockResolvedValue({ count: 0 });
+  m.managementFeeConfig.create.mockResolvedValue({ id: "fee-config-1" });
   m.auditLog.create.mockResolvedValue(undefined);
 }
 
@@ -1630,6 +1647,151 @@ describe("createUnitsBatchService — owner + billing mode", () => {
     expect((res as { code?: string }).code).toBe("APARTMENT_OWNER_CONFLICT");
     expect(txMock.listing.create).not.toHaveBeenCalled();
     expect(txMock.listing.updateMany).not.toHaveBeenCalled();
+  });
+});
+
+describe("findOrCreateApartment — apartment TNB subsidy cap", () => {
+  it("persists and audits an opt-in monthly cap on a new apartment", async () => {
+    const res = await createUnitService(session as never, {
+      propertyId: PROPERTY,
+      unitCode: "A-21-03",
+      unitType: "Master",
+      depositMonths: 2,
+      utilitiesDepositMonths: 1,
+      occupancyStatus: "vacant",
+      tnbSubsidyCapMonthly: 200,
+    } as never);
+
+    expect(res.ok).toBe(true);
+    expect(txMock.apartment.create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({ tnbSubsidyCapMonthly: 200 }),
+      }),
+    );
+    expect(txAudit("apartment.shared.update")).toEqual(
+      expect.objectContaining({
+        diff: expect.objectContaining({
+          tnbSubsidyCapMonthly: 200,
+          source: "unit-create",
+        }),
+      }),
+    );
+  });
+
+  it("rejects a room create that contradicts an existing apartment cap", async () => {
+    stubExistingApartment("SUBSIDY", 200);
+    stubOwnerScans(prismaMock, {});
+    stubOwnerScans(txMock, {});
+
+    const res = await createUnitService(session as never, {
+      propertyId: PROPERTY,
+      unitCode: "A-12-03",
+      unitType: "Small",
+      depositMonths: 2,
+      utilitiesDepositMonths: 1,
+      occupancyStatus: "vacant",
+      tnbSubsidyCapMonthly: 100,
+    } as never);
+
+    expect(res.ok).toBe(false);
+    if (res.ok) return;
+    expect(res.status).toBe(409);
+    expect((res as { code?: string }).code).toBe(
+      "APARTMENT_TNB_SUBSIDY_CAP_CONFLICT",
+    );
+    expect(mockedRepo.createListingTx).not.toHaveBeenCalled();
+  });
+
+  it("allows a matching cap without rewriting the apartment", async () => {
+    stubExistingApartment("SUBSIDY", 200);
+    stubOwnerScans(prismaMock, {});
+    stubOwnerScans(txMock, {});
+
+    const matching = await createUnitService(session as never, {
+      propertyId: PROPERTY,
+      unitCode: "A-12-03",
+      unitType: "Small",
+      depositMonths: 2,
+      utilitiesDepositMonths: 1,
+      occupancyStatus: "vacant",
+      tnbSubsidyCapMonthly: 200,
+    } as never);
+    expect(matching.ok).toBe(true);
+    expect(txMock.apartment.update).not.toHaveBeenCalled();
+  });
+});
+
+describe("unit create — management fee is atomic with the unit", () => {
+  const managementFeeConfig = {
+    feeType: "cap",
+    feeValue: "10",
+    capAmount: "250",
+    sstPercent: "8",
+    freePeriodStart: null,
+    freePeriodEnd: null,
+    firstChargeMonth: "2026-08-01T00:00:00.000Z",
+    firstChargeBaseAmount: null,
+    paxDeductionPerPerson: null,
+  };
+
+  it("creates the single-unit fee config on the same transaction handle", async () => {
+    const res = await createUnitService(session as never, {
+      propertyId: PROPERTY,
+      unitCode: "A-01-01",
+      unitType: "Whole Unit",
+      depositMonths: 2,
+      utilitiesDepositMonths: 1,
+      occupancyStatus: "vacant",
+      ownerPartyId: OWNER,
+      managementFeeConfig,
+    } as never);
+
+    expect(res.ok).toBe(true);
+    expect(txMock.managementFeeConfig.create).toHaveBeenCalledWith({
+      data: expect.objectContaining({
+        apartmentId: "apt-new",
+        ownerPartyId: OWNER,
+        feeType: "cap",
+        feeValue: "10",
+        capAmount: "250",
+        sstPercent: "8",
+      }),
+      select: { id: true },
+    });
+    expect(prismaMock.managementFeeConfig.create).not.toHaveBeenCalled();
+    expect(txAudit("owner_billing.fee_config.created_with_unit")).toEqual(
+      expect.objectContaining({ entityId: "fee-config-1" }),
+    );
+  });
+
+  it("creates the partition fee config on the same transaction handle", async () => {
+    const res = await createUnitsBatchService(session as never, {
+      shared: {
+        propertyId: PROPERTY,
+        unitCode: "B-01-01",
+        ownerPartyId: OWNER,
+        partitionBillingMode: "NO_SUBSIDY",
+        managementFeeConfig,
+      },
+      rooms: [{ unitType: "Master", depositMonths: 2, utilitiesDepositMonths: 1 }],
+    } as never);
+
+    expect(res.ok).toBe(true);
+    expect(txMock.managementFeeConfig.create).toHaveBeenCalledWith({
+      data: expect.objectContaining({
+        apartmentId: "apt-new",
+        ownerPartyId: OWNER,
+        feeType: "cap",
+        feeValue: "10",
+        capAmount: "250",
+        sstPercent: "8",
+      }),
+      select: { id: true },
+    });
+    expect(prismaMock.managementFeeConfig.create).not.toHaveBeenCalled();
+    expect(txAudit("owner_billing.fee_config.created_with_unit_batch")).toEqual(
+      expect.objectContaining({ entityId: "fee-config-1" }),
+    );
   });
 });
 

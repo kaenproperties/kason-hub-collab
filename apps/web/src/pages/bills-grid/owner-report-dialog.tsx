@@ -10,12 +10,11 @@ import { useApproveStatement, useFirstCheckStatement, useGenerateStatement, useS
 import { Button } from "@/components/ui/button";
 import { toast } from "sonner";
 import { useEffect, useState } from "react";
-import { useAuth } from "@/lib/auth";
+import { usePermission } from "@/components/permission-gate";
 
 export function OwnerReportDialog({ row, month, onClose }: { row: GridRow | null; month: string; onClose: () => void }) {
-  const { user } = useAuth();
-  const canFirstCheck = user?.permissions?.includes("owner_report.first_check") ?? ["admin", "director", "manager"].includes(user?.role ?? "");
-  const canFinalApprove = user?.permissions?.includes("owner_report.final_approve") ?? ["admin", "director"].includes(user?.role ?? "");
+  const canFirstCheck = usePermission("owner_report.first_check");
+  const canFinalApprove = usePermission("owner_report.final_approve");
   const ownerPartyId = row?.ownerPartyId ?? undefined;
   const apartmentId = row?.apartmentId;
   const summaries = useOwnerMonthlySummaries(ownerPartyId, apartmentId);
@@ -23,6 +22,8 @@ export function OwnerReportDialog({ row, month, onClose }: { row: GridRow | null
   const statementId = monthSummary?.statementId ?? undefined;
   const statementStatus = monthSummary?.statementStatus ?? "draft";
   const [localStatement, setLocalStatement] = useState<{ id: string; status: string } | null>(null);
+  // Reset optimistic state when the dialog is reused for another unit/month.
+  // eslint-disable-next-line react-hooks/set-state-in-effect
   useEffect(() => setLocalStatement(null), [row?.apartmentId, month]);
   const effectiveStatementId = localStatement?.id ?? statementId;
   const effectiveStatementStatus = localStatement?.status ?? statementStatus;
@@ -33,6 +34,9 @@ export function OwnerReportDialog({ row, month, onClose }: { row: GridRow | null
   const issued = useStatementSections(effectiveStatementId);
   const live = useLiveStatementSections(effectiveStatementId ? undefined : ownerPartyId, effectiveStatementId ? undefined : month, apartmentId);
   const sections = issued.data?.data ?? live.data?.data;
+  const totalPayoutToOwner = sections?.payoutSummary.lines.find(
+    (line) => line.label === "Total Payout to Owner",
+  )?.amount ?? sections?.payoutSummary.netPayoutToOwner;
   const loading = summaries.isLoading || issued.isLoading || live.isLoading;
   const failed = summaries.isError || issued.isError || live.isError;
   const changingStatus = generate.isPending || firstCheck.isPending || approve.isPending;
@@ -112,7 +116,7 @@ export function OwnerReportDialog({ row, month, onClose }: { row: GridRow | null
                 <div className="mb-2 flex items-center justify-between gap-3">
                   <strong className="text-base text-[var(--navy-text)]">Owner Payout Safety Check</strong>
                   <span className="text-sm font-bold text-[var(--navy-text)]">
-                    Payout RM {preflight.data?.data.netPayoutToOwner ?? sections.payoutSummary.netPayoutToOwner}
+                    Total cash payout RM {preflight.data?.data.totalPayoutToOwner ?? totalPayoutToOwner}
                   </span>
                 </div>
                 {preflight.isLoading ? (

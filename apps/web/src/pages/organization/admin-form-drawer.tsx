@@ -3,7 +3,7 @@ import { useQuery } from "@tanstack/react-query";
 import { FormDrawer } from "@/components/ui/form-drawer";
 import { Callout } from "@/components/ui/callout";
 import { Field, TextInput, SelectInput } from "@/components/form-ui";
-import { apiFetch } from "@/lib/api-client";
+import { apiFetch, ApiError } from "@/lib/api-client";
 import { useCreateUser, useUpdateUser, useSetPartyUpline } from "@/api/users";
 import type { OperatorUser, CreateUserInput, UpdateUserInput } from "@/api/users";
 import { PERMISSION_GROUPS, effectivePermission, permissionCanBeGrantedToRole, roleHasPermission, type PermissionCode, type PermissionOverrides } from "@/lib/permissions";
@@ -188,6 +188,7 @@ export function AdminFormDrawer({ open, mode, user, onClose, forcedRole, availab
   const [form, setForm] = useState<FormState>(() => blankForm(forcedRole));
   const [errors, setErrors] = useState<FormErrors>({});
   const [permissionSearch, setPermissionSearch] = useState("");
+  const [submitError, setSubmitError] = useState("");
 
   useEffect(() => {
     if (open) {
@@ -208,6 +209,7 @@ export function AdminFormDrawer({ open, mode, user, onClose, forcedRole, availab
         setForm(blankForm(forcedRole));
       }
       setErrors({});
+      setSubmitError("");
       setPermissionSearch("");
     }
   }, [open, mode, user?.id, forcedRole]);
@@ -246,7 +248,17 @@ export function AdminFormDrawer({ open, mode, user, onClose, forcedRole, availab
         password: form.password,
         permissionOverrides: form.permissionOverrides,
       };
-      createUser.mutate(input, { onSuccess: onClose });
+      setSubmitError("");
+      createUser.mutate(input, {
+        onSuccess: onClose,
+        onError: (error) => {
+          setSubmitError(
+            error instanceof ApiError
+              ? error.message
+              : "The user could not be created. Please check the details and try again.",
+          );
+        },
+      });
     } else if (user) {
       const input: UpdateUserInput & { id: string } = {
         id: user.id,
@@ -259,6 +271,7 @@ export function AdminFormDrawer({ open, mode, user, onClose, forcedRole, availab
       // doesn't accept uplineId by design — it's a Party concern).
       const originalUplineId = user.party?.uplineId ?? null;
       const uplineChanged = form.uplineId !== originalUplineId;
+      setSubmitError("");
       updateUser.mutate(input, {
         onSuccess: () => {
           if (uplineChanged && user.partyId) {
@@ -269,6 +282,13 @@ export function AdminFormDrawer({ open, mode, user, onClose, forcedRole, availab
           } else {
             onClose();
           }
+        },
+        onError: (error) => {
+          setSubmitError(
+            error instanceof ApiError
+              ? error.message
+              : "The permissions could not be saved. Please try again.",
+          );
         },
       });
     }
@@ -296,6 +316,12 @@ export function AdminFormDrawer({ open, mode, user, onClose, forcedRole, availab
       }}
     >
       <div className="grid gap-4">
+        {submitError && (
+          <Callout variant="danger" title={mode === "create" ? "User not created" : "Changes not saved"}>
+            {submitError}
+          </Callout>
+        )}
+
         <Field label="Full name">
           <TextInput
             value={form.fullName}

@@ -35,8 +35,8 @@ export interface GridContextMenuProps {
   onViewReceipt?: () => void;
   onMarkPaid?: () => void;
   onCopy: () => void;
-  onClearContents: () => void;
-  onApplyColour: (colour: string) => void;
+  onClearContents?: () => void;
+  onApplyColour?: (colour: string) => void;
   onHideColumn: () => void;
   onClose: () => void;
 }
@@ -131,7 +131,7 @@ export function GridContextMenu({
         <Copy className="h-4 w-4 text-muted-foreground" />
         Copy
       </button>
-      <button
+      {onClearContents && <button
         type="button"
         role="menuitem"
         data-testid="ctx-clear"
@@ -141,11 +141,11 @@ export function GridContextMenu({
       >
         <Eraser className="h-4 w-4 text-muted-foreground" />
         Clear contents
-      </button>
+      </button>}
 
-      <div className="my-1 h-px bg-border/60" />
+      {onApplyColour && <div className="my-1 h-px bg-border/60" />}
 
-      <div className="px-2 py-1">
+      {onApplyColour && <div className="px-2 py-1">
         <div className="mb-1 flex items-center gap-2 text-xs text-muted-foreground">
           <PaintBucket className="h-3.5 w-3.5" />
           Colour
@@ -158,7 +158,7 @@ export function GridContextMenu({
               aria-label={`Fill selection ${s.label}`}
               data-testid={`ctx-colour-${s.colour}`}
               disabled={!hasSelection}
-              onClick={() => run(() => onApplyColour(s.colour))}
+              onClick={() => run(() => onApplyColour?.(s.colour))}
               style={{ backgroundColor: s.colour }}
               className="h-6 w-6 rounded-full border-2 border-white shadow-sm ring-1 ring-[var(--navy)] transition hover:scale-110 hover:shadow-md focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--gold)] disabled:cursor-not-allowed disabled:opacity-65"
             />
@@ -167,13 +167,13 @@ export function GridContextMenu({
             type="button"
             data-testid="ctx-colour-clear"
             disabled={!hasSelection}
-            onClick={() => run(() => onApplyColour(""))}
+            onClick={() => run(() => onApplyColour?.(""))}
             className="rounded-md border border-[var(--border)] px-1.5 py-0.5 text-xs text-muted-foreground transition hover:bg-muted/40 disabled:cursor-not-allowed disabled:opacity-40"
           >
             Clear
           </button>
         </div>
-      </div>
+      </div>}
 
       <div className="my-1 h-px bg-border/60" />
 

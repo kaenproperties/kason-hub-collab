@@ -51,18 +51,20 @@ describe("recurring summary columns (Task 8)", () => {
     expect(screen.getByTestId("cell-ownerRecurring")).not.toHaveTextContent("100.00");
   });
 
-  it("cleaning/WiFi cells are read-only when governed by an enabled recurring def (locked true / undefined)", () => {
+  it("shows only owner Cleaning/WiFi columns, read-only when governed by an enabled recurring def", () => {
     const row = makeRow({
       entryId: "E1",
-      entry: makeEntry({ cleaning: "100.00", wifi: "50.00", cleaningBearer: "owner", wifiBearer: "tenant" }),
-      bearerConfig: makeBearerConfig({ cleaningBearer: "owner", wifiBearer: "tenant" }),
+      entry: makeEntry({ cleaning: "100.00", wifi: "50.00", cleaningBearer: "owner", wifiBearer: "owner" }),
+      bearerConfig: makeBearerConfig({ cleaningBearer: "owner", wifiBearer: "owner" }),
       cleaningRecurringLocked: true,
       wifiRecurringLocked: true,
     });
     render(<GridTable rows={[row]} columns={CURRENT_COLUMNS} />);
-    for (const id of ["cell-cleaningOwner", "cell-cleaningTenant", "cell-wifiOwner", "cell-wifiTenant"]) {
+    for (const id of ["cell-cleaningOwner", "cell-wifiOwner"]) {
       expect(within(screen.getByTestId(id)).queryByRole("textbox"), `${id} must be read-only`).toBeNull();
     }
+    expect(screen.queryByTestId("cell-cleaningTenant")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("cell-wifiTenant")).not.toBeInTheDocument();
   });
 
   it("governed cell with NO entry (unopened month) shows the GENERATED amount, not '—'", () => {

@@ -464,8 +464,8 @@ export function TenancyForms({
           </div>
           <div className="grid gap-4 md:grid-cols-2">
             <Field
-              label="Tenant agreement fee (RM)"
-              hint="Paid by the tenant in addition to the first-month booking rent. This creates a draft invoice to the tenant."
+              label="TA (WITH SST) amount (RM)"
+              hint="Enter the final SST-inclusive amount. This creates a separate draft invoice to the tenant."
             >
               <TextInput name="tenancyAgreementFeeAmount" type="number" min={0} step="0.01" defaultValue="0" />
             </Field>
@@ -580,8 +580,8 @@ export function TenancyForms({
             />
           </Field>
           <Field
-            label="Tenancy renewal fee (RM)"
-            hint="Confirm this on every renewal. Enter 0 when no fee applies; any amount entered will appear as Saved · not billed for review."
+            label="Renewal TA (WITH SST) amount (RM)"
+            hint="Enter the final SST-inclusive amount. Use 0 when no fee applies; it will appear as Saved · not billed for review."
           >
             <TextInput name="renewalFeeAmount" type="number" min={0} step="0.01" defaultValue="0" required />
           </Field>

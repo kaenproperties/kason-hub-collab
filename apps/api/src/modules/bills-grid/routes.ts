@@ -35,7 +35,7 @@ import {
 import type { SessionPayload } from "../../lib/auth";
 import { isPhase2FlagEnabled } from "../../lib/feature-flags";
 import { formatZodError } from "../../lib/zod-error-mapper";
-import { requireRole } from "../../middleware/require-role";
+import { requireAllPermissions, requirePermission, userHasPermission } from "../../middleware/require-permission";
 import {
   billService,
   createExpensesService,
@@ -116,7 +116,7 @@ function badId(c: Context) {
 }
 
 // ── 1. Batched grid read (§1) — editor, read-only, always 200 ────────────────
-billsGridRoutes.get("/", requireRole("editor"), async (c) => {
+billsGridRoutes.get("/", requirePermission("billing.view"), async (c) => {
   const parsed = gridQuerySchema.safeParse(c.req.query());
   if (!parsed.success) return zodBadRequest(c, parsed.error);
   const r = await getGridService(c.get("session"), parsed.data);
@@ -125,22 +125,35 @@ billsGridRoutes.get("/", requireRole("editor"), async (c) => {
 
 // Reporting is a separate request by design. A reporting failure must never
 // blank the operational grid or hide its saved apartment rows.
-billsGridRoutes.get("/funds-summary", requireRole("editor"), async (c) => {
+billsGridRoutes.get("/funds-summary", requirePermission("billing.view"), async (c) => {
   const parsed = z.object({ period: periodMonth }).safeParse(c.req.query());
   if (!parsed.success) return zodBadRequest(c, parsed.error);
   const month = new Date(`${parsed.data.period.slice(0, 7)}-01T00:00:00.000Z`);
-  return c.json(await getBillingFundsSummary(c.get("session").orgId, month), 200);
+  const summary = await getBillingFundsSummary(c.get("session").orgId, month);
+  if (!(await userHasPermission(c.get("session"), "cost.view"))) {
+    // Billing totals remain visible, but supplier-cost and margin facts do not.
+    // This is response-level redaction so browser DevTools cannot bypass the UI.
+    return c.json({
+      ...summary,
+      tenantExpenseDirectCosts: "0.00",
+      tenantExpenseGrossMargin: "0.00",
+      tenantExpenseCostPendingCount: 0,
+      tenantExpenseActionRequiredCount: 0,
+      tenantExpenseActionItems: [],
+    }, 200);
+  }
+  return c.json(summary, 200);
 });
 
 const summaryNoteSchema = z.object({ period: periodMonth, note: z.string().max(500) });
 
-billsGridRoutes.get("/summary-notes", requireRole("editor"), async (c) => {
+billsGridRoutes.get("/summary-notes", requirePermission("billing.view"), async (c) => {
   const parsed = z.object({ period: periodMonth }).safeParse(c.req.query());
   if (!parsed.success) return zodBadRequest(c, parsed.error);
   return c.json({ data: await listSummaryNotesService(c.get("session"), parsed.data.period) }, 200);
 });
 
-billsGridRoutes.put("/apartments/:apartmentId/summary-note", requireRole("editor"), async (c) => {
+billsGridRoutes.put("/apartments/:apartmentId/summary-note", requirePermission("billing.save"), async (c) => {
   if (!idParam.safeParse(c.req.param("apartmentId")).success) return badId(c);
   const parsed = summaryNoteSchema.safeParse(await c.req.json().catch(() => null));
   if (!parsed.success) return zodBadRequest(c, parsed.error);
@@ -150,7 +163,7 @@ billsGridRoutes.put("/apartments/:apartmentId/summary-note", requireRole("editor
 });
 
 // ── 2. Save draft (§2) — editor. amounts-only; no pattern/bearer ─────────────
-billsGridRoutes.put("/apartments/:apartmentId/entries", requireRole("editor"), async (c) => {
+billsGridRoutes.put("/apartments/:apartmentId/entries", requireAllPermissions("billing.charge.edit", "billing.save"), async (c) => {
   if (!idParam.safeParse(c.req.param("apartmentId")).success) return badId(c);
   const parsed = saveEntrySchema.safeParse(await c.req.json().catch(() => null));
   if (!parsed.success) return zodBadRequest(c, parsed.error);
@@ -160,7 +173,7 @@ billsGridRoutes.put("/apartments/:apartmentId/entries", requireRole("editor"), a
 });
 
 // ── 2a. Update line settings on an unbilled entry (§2a) — MANAGER (editor 403) ─
-billsGridRoutes.patch("/entries/:id/lines", requireRole("manager"), async (c) => {
+billsGridRoutes.patch("/entries/:id/lines", requirePermission("billing.rebill"), async (c) => {
   if (!idParam.safeParse(c.req.param("id")).success) return badId(c);
   const parsed = lineSettingsSchema.safeParse(await c.req.json().catch(() => null));
   if (!parsed.success) return zodBadRequest(c, parsed.error);
@@ -171,7 +184,7 @@ billsGridRoutes.patch("/entries/:id/lines", requireRole("manager"), async (c) =>
 
 // ── 3. Bill (§3) — MANAGER (mirrors meter `charge`). 200 manifest even when rows
 // fail; there is NO request-level abort and NO 422. ──────────────────────────
-billsGridRoutes.post("/bill", requireRole("manager"), async (c) => {
+billsGridRoutes.post("/bill", requirePermission("billing.bill"), async (c) => {
   const parsed = billSchema.safeParse(await c.req.json().catch(() => null));
   if (!parsed.success) return zodBadRequest(c, parsed.error);
   const r = await billService(c.get("session"), parsed.data);
@@ -179,7 +192,7 @@ billsGridRoutes.post("/bill", requireRole("manager"), async (c) => {
 });
 
 // ── 4. Bearer-config read (§5) — editor (may read; writes require manager) ────
-billsGridRoutes.get("/apartments/:apartmentId/bearer-config", requireRole("editor"), async (c) => {
+billsGridRoutes.get("/apartments/:apartmentId/bearer-config", requirePermission("billing.view"), async (c) => {
   if (!idParam.safeParse(c.req.param("apartmentId")).success) return badId(c);
   const r = await getBearerConfigService(c.get("session"), c.req.param("apartmentId"));
   if (!r.ok) return c.json({ error: r.error }, r.status as 404);
@@ -187,7 +200,7 @@ billsGridRoutes.get("/apartments/:apartmentId/bearer-config", requireRole("edito
 });
 
 // ── 5. Bearer-config write (§5) — MANAGER (editor 403). Set-once + audited unlock.
-billsGridRoutes.put("/apartments/:apartmentId/bearer-config", requireRole("manager"), async (c) => {
+billsGridRoutes.put("/apartments/:apartmentId/bearer-config", requirePermission("billing.charge.edit"), async (c) => {
   if (!idParam.safeParse(c.req.param("apartmentId")).success) return badId(c);
   const parsed = bearerConfigSchema.safeParse(await c.req.json().catch(() => null));
   if (!parsed.success) return zodBadRequest(c, parsed.error);
@@ -200,14 +213,14 @@ billsGridRoutes.put("/apartments/:apartmentId/bearer-config", requireRole("manag
 // Manager-only (mirrors bearer-config). Additionally gated on ENABLE_PHASE2_BILLING_DOCS:
 // dark ⇒ 404 (flag-dark hides existence), matching the spec's flag-dark contract. The
 // service re-checks every syncability guard; apply is atomic block-all (409 carries conflicts).
-billsGridRoutes.get("/apartments/:apartmentId/recurring", requireRole("editor"), async (c) => {
+billsGridRoutes.get("/apartments/:apartmentId/recurring", requirePermission("billing.view"), async (c) => {
   if (!isPhase2FlagEnabled("ENABLE_PHASE2_BILLING_DOCS")) return c.json({ error: "not_found" }, 404);
   if (!idParam.safeParse(c.req.param("apartmentId")).success) return badId(c);
   const r = await listRecurringService(c.get("session"), c.req.param("apartmentId"));
   if (!r.ok) return c.json({ error: r.error }, r.status as 404);
   return c.json(r.data, r.status as 200);
 });
-billsGridRoutes.get("/apartments/:apartmentId/recurring/lines", requireRole("editor"), async (c) => {
+billsGridRoutes.get("/apartments/:apartmentId/recurring/lines", requirePermission("billing.view"), async (c) => {
   if (!isPhase2FlagEnabled("ENABLE_PHASE2_BILLING_DOCS")) return c.json({ error: "not_found" }, 404);
   if (!idParam.safeParse(c.req.param("apartmentId")).success) return badId(c);
   const parsed = attachmentQuerySchema.safeParse(c.req.query()); // { period }
@@ -216,7 +229,7 @@ billsGridRoutes.get("/apartments/:apartmentId/recurring/lines", requireRole("edi
   if (!r.ok) return c.json({ error: r.error }, r.status as 404);
   return c.json(r.data, r.status as 200);
 });
-billsGridRoutes.post("/apartments/:apartmentId/recurring/preview", requireRole("manager"), async (c) => {
+billsGridRoutes.post("/apartments/:apartmentId/recurring/preview", requirePermission("billing.charge.edit"), async (c) => {
   if (!isPhase2FlagEnabled("ENABLE_PHASE2_BILLING_DOCS")) return c.json({ error: "not_found" }, 404);
   if (!idParam.safeParse(c.req.param("apartmentId")).success) return badId(c);
   const parsed = recurringUpsertSchema.safeParse(await c.req.json().catch(() => null));
@@ -225,7 +238,7 @@ billsGridRoutes.post("/apartments/:apartmentId/recurring/preview", requireRole("
   if (!r.ok) return c.json({ error: r.error }, r.status as 404);
   return c.json(r.data, r.status as 200);
 });
-billsGridRoutes.post("/apartments/:apartmentId/recurring/apply", requireRole("manager"), async (c) => {
+billsGridRoutes.post("/apartments/:apartmentId/recurring/apply", requirePermission("billing.charge.edit"), async (c) => {
   if (!isPhase2FlagEnabled("ENABLE_PHASE2_BILLING_DOCS")) return c.json({ error: "not_found" }, 404);
   if (!idParam.safeParse(c.req.param("apartmentId")).success) return badId(c);
   const parsed = recurringApplyWithNatureSchema.safeParse(await c.req.json().catch(() => null));
@@ -252,7 +265,7 @@ billsGridRoutes.post("/apartments/:apartmentId/recurring/apply", requireRole("ma
   }
   return c.json(r.data, r.status as 200);
 });
-billsGridRoutes.post("/apartments/:apartmentId/recurring/:definitionId/disable", requireRole("manager"), async (c) => {
+billsGridRoutes.post("/apartments/:apartmentId/recurring/:definitionId/disable", requirePermission("billing.charge.edit"), async (c) => {
   if (!isPhase2FlagEnabled("ENABLE_PHASE2_BILLING_DOCS")) return c.json({ error: "not_found" }, 404);
   if (!idParam.safeParse(c.req.param("apartmentId")).success || !idParam.safeParse(c.req.param("definitionId")).success) return badId(c);
   const r = await disableRecurringService(c.get("session"), c.req.param("apartmentId"), c.req.param("definitionId"));
@@ -262,7 +275,7 @@ billsGridRoutes.post("/apartments/:apartmentId/recurring/:definitionId/disable",
   }
   return c.json(r.data, r.status as 200);
 });
-billsGridRoutes.post("/apartments/:apartmentId/recurring/:definitionId/archive", requireRole("manager"), async (c) => {
+billsGridRoutes.post("/apartments/:apartmentId/recurring/:definitionId/archive", requirePermission("billing.charge.edit"), async (c) => {
   if (!isPhase2FlagEnabled("ENABLE_PHASE2_BILLING_DOCS")) return c.json({ error: "not_found" }, 404);
   if (!idParam.safeParse(c.req.param("apartmentId")).success || !idParam.safeParse(c.req.param("definitionId")).success) return badId(c);
   const r = await archiveRecurringService(c.get("session"), c.req.param("apartmentId"), c.req.param("definitionId"));
@@ -271,28 +284,50 @@ billsGridRoutes.post("/apartments/:apartmentId/recurring/:definitionId/archive",
 });
 
 // ── 6. Expenses (§5) — create/list/edit editor; void MANAGER ─────────────────
-billsGridRoutes.post("/expenses", requireRole("editor"), async (c) => {
+billsGridRoutes.post("/expenses", requirePermission("billing.charge.edit"), async (c) => {
   const parsed = createExpensesSchema.safeParse(await c.req.json().catch(() => null));
   if (!parsed.success) return zodBadRequest(c, parsed.error);
+  const includesInternalCost = parsed.data.items.some((item) =>
+    item.actualCost !== undefined ||
+    item.costVendor !== undefined ||
+    item.costPaymentStatus !== undefined ||
+    item.costPaymentDate !== undefined ||
+    item.costPaymentAccount !== undefined ||
+    item.costNotes !== undefined,
+  );
+  if (includesInternalCost && !(await userHasPermission(c.get("session"), "cost.create"))) {
+    return c.json({ error: "permission_forbidden", permission: "cost.create" }, 403);
+  }
   const r = await createExpensesService(c.get("session"), parsed.data);
   if (!r.ok) return c.json({ error: r.error }, r.status as 404 | 409);
   return c.json(r.data, r.status as 201);
 });
-billsGridRoutes.get("/expenses", requireRole("editor"), async (c) => {
+billsGridRoutes.get("/expenses", requirePermission("billing.view"), async (c) => {
   const parsed = expenseListQuerySchema.safeParse(c.req.query());
   if (!parsed.success) return zodBadRequest(c, parsed.error);
-  const r = await listExpensesService(c.get("session"), parsed.data);
+  const includeInternalCosts = await userHasPermission(c.get("session"), "cost.view");
+  const r = await listExpensesService(c.get("session"), parsed.data, { includeInternalCosts });
   return c.json(r.ok ? r.data : { error: r.error }, r.status as 200);
 });
-billsGridRoutes.patch("/expenses/:id", requireRole("editor"), async (c) => {
+billsGridRoutes.patch("/expenses/:id", requirePermission("billing.charge.edit"), async (c) => {
   if (!idParam.safeParse(c.req.param("id")).success) return badId(c);
   const parsed = updateExpenseSchema.safeParse(await c.req.json().catch(() => null));
   if (!parsed.success) return zodBadRequest(c, parsed.error);
+  const includesInternalCost =
+    parsed.data.actualCost !== undefined ||
+    parsed.data.costVendor !== undefined ||
+    parsed.data.costPaymentStatus !== undefined ||
+    parsed.data.costPaymentDate !== undefined ||
+    parsed.data.costPaymentAccount !== undefined ||
+    parsed.data.costNotes !== undefined;
+  if (includesInternalCost && !(await userHasPermission(c.get("session"), "cost.edit"))) {
+    return c.json({ error: "permission_forbidden", permission: "cost.edit" }, 403);
+  }
   const r = await updateExpenseService(c.get("session"), c.req.param("id"), parsed.data);
   if (!r.ok) return c.json({ error: r.error }, r.status as 404 | 409 | 500);
   return c.json(r.data, r.status as 200);
 });
-billsGridRoutes.post("/expenses/:id/void", requireRole("manager"), async (c) => {
+billsGridRoutes.post("/expenses/:id/void", requirePermission("billing.rebill"), async (c) => {
   if (!idParam.safeParse(c.req.param("id")).success) return badId(c);
   const r = await voidExpenseService(c.get("session"), c.req.param("id"));
   if (!r.ok) return c.json({ error: r.error }, r.status as 404 | 409 | 500);
@@ -305,7 +340,7 @@ billsGridRoutes.post("/expenses/:id/void", requireRole("manager"), async (c) => 
 // `graduation.issue_failed` audit rows. Idempotent: it re-derives what is missing rather
 // than replaying a remembered failure, so an empty result is the ordinary answer once
 // someone has already repaired it -- 200, not an error.
-billsGridRoutes.post("/entries/:entryId/graduate-retry", requireRole("manager"), async (c) => {
+billsGridRoutes.post("/entries/:entryId/graduate-retry", requirePermission("billing.bill"), async (c) => {
   if (!idParam.safeParse(c.req.param("entryId")).success) return badId(c);
   const r = await retryGraduationForEntryService(c.get("session"), c.req.param("entryId"));
   if (!r.ok) return c.json({ error: r.error }, r.status as 404 | 409);
@@ -313,7 +348,7 @@ billsGridRoutes.post("/entries/:entryId/graduate-retry", requireRole("manager"),
 });
 
 // ── 7. Meter-reading write (§6) — editor. Upsert per (apartment, period, room) ─
-billsGridRoutes.put("/apartments/:apartmentId/meter-readings", requireRole("editor"), async (c) => {
+billsGridRoutes.put("/apartments/:apartmentId/meter-readings", requireAllPermissions("billing.charge.edit", "billing.save"), async (c) => {
   if (!idParam.safeParse(c.req.param("apartmentId")).success) return badId(c);
   const parsed = saveReadingsSchema.safeParse(await c.req.json().catch(() => null));
   if (!parsed.success) return zodBadRequest(c, parsed.error);
@@ -327,7 +362,7 @@ billsGridRoutes.put("/apartments/:apartmentId/meter-readings", requireRole("edit
 // is addressed by ?period=YYYY-MM-DD. The GridAttachment row is written by the
 // service only after a confirmed 2xx putObject (R28); a per-file storage fault is
 // 502. Empty/invalid form → 400 {error:"Invalid form body"}.
-billsGridRoutes.post("/apartments/:apartmentId/attachments", requireRole("editor"), async (c) => {
+billsGridRoutes.post("/apartments/:apartmentId/attachments", requirePermission("billing.document_manage"), async (c) => {
   if (!idParam.safeParse(c.req.param("apartmentId")).success) return badId(c);
   const parsedQuery = attachmentQuerySchema.safeParse(c.req.query());
   if (!parsedQuery.success) return zodBadRequest(c, parsedQuery.error);
@@ -353,7 +388,7 @@ billsGridRoutes.post("/apartments/:apartmentId/attachments", requireRole("editor
   }
   return c.json({ data }, 201);
 });
-billsGridRoutes.get("/apartments/:apartmentId/attachments", requireRole("editor"), async (c) => {
+billsGridRoutes.get("/apartments/:apartmentId/attachments", requirePermission("billing.document_manage"), async (c) => {
   if (!idParam.safeParse(c.req.param("apartmentId")).success) return badId(c);
   const parsedQuery = attachmentQuerySchema.safeParse(c.req.query());
   if (!parsedQuery.success) return zodBadRequest(c, parsedQuery.error);
@@ -366,7 +401,7 @@ billsGridRoutes.get("/apartments/:apartmentId/attachments", requireRole("editor"
 });
 // Delete: object first (fail-closed), then the row; a genuine storage failure is
 // 502 ATTACHMENT_DELETE_FAILED with the row retained (no orphan).
-billsGridRoutes.delete("/apartments/:apartmentId/attachments/:attId", requireRole("manager"), async (c) => {
+billsGridRoutes.delete("/apartments/:apartmentId/attachments/:attId", requirePermission("billing.document_manage"), async (c) => {
   if (!idParam.safeParse(c.req.param("attId")).success) return badId(c);
   const r = await deleteAttachmentService(c.get("session"), c.req.param("attId"));
   if (!r.ok) return c.json({ error: r.error }, r.status as 404 | 502);
@@ -378,7 +413,7 @@ billsGridRoutes.delete("/apartments/:apartmentId/attachments/:attId", requireRol
 // the expense already carries its entry/apartment/period. Delete is UNCHANGED —
 // the existing manager-gated DELETE .../attachments/:attId route above is reused
 // verbatim (an attachment id alone identifies the row + object).
-billsGridRoutes.post("/expenses/:expenseId/attachments", requireRole("editor"), async (c) => {
+billsGridRoutes.post("/expenses/:expenseId/attachments", requirePermission("billing.document_manage"), async (c) => {
   if (!idParam.safeParse(c.req.param("expenseId")).success) return badId(c);
   const form = await c.req.formData().catch(() => null);
   if (!form) return c.json({ error: "Invalid form body" }, 400);
@@ -397,7 +432,7 @@ billsGridRoutes.post("/expenses/:expenseId/attachments", requireRole("editor"), 
   }
   return c.json({ data }, 201);
 });
-billsGridRoutes.get("/expenses/:expenseId/attachments", requireRole("editor"), async (c) => {
+billsGridRoutes.get("/expenses/:expenseId/attachments", requirePermission("billing.document_manage"), async (c) => {
   if (!idParam.safeParse(c.req.param("expenseId")).success) return badId(c);
   const r = await listLineAttachmentService(c.get("session"), c.req.param("expenseId"));
   return c.json(r.ok ? r.data : { error: r.error }, r.status as 200 | 404);
@@ -407,7 +442,7 @@ billsGridRoutes.get("/expenses/:expenseId/attachments", requireRole("editor"), a
 // INLINE view of an attachment. SHARED for entry-level AND per-line attachments:
 // an attachment id alone identifies the row + object (same basis as the reused
 // manager DELETE route). Editor-gated read, matching the list routes above.
-billsGridRoutes.get("/attachments/:attId/url", requireRole("editor"), async (c) => {
+billsGridRoutes.get("/attachments/:attId/url", requirePermission("billing.document_manage"), async (c) => {
   if (!idParam.safeParse(c.req.param("attId")).success) return badId(c);
   const r = await getAttachmentUrlService(c.get("session"), c.req.param("attId"));
   return c.json(r.ok ? r.data : { error: r.error }, r.status as 200 | 404);

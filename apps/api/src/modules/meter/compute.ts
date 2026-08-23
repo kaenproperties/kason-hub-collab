@@ -26,6 +26,26 @@ export function endOfMonthISO(d: Date): string {
 
 export type BillingMode = "whole" | "subsidy" | "no_subsidy";
 
+/**
+ * Subsidy input accepted by the pure allocation engine.
+ *
+ * A bare number is intentionally still accepted by {@link computeAllocation}: it
+ * normalizes to `legacy_per_pax`, preserving every existing caller and historical
+ * test while the per-apartment cap policy is rolled out additively.
+ */
+export type SubsidyPolicy =
+  | { kind: "none" }
+  | { kind: "legacy_per_pax"; amountPerPax: number }
+  | { kind: "unit_tnb_cap_equal_tenancy"; cap: number };
+
+export type SubsidyPolicyInput = number | SubsidyPolicy;
+
+export function normalizeSubsidyPolicy(input: SubsidyPolicyInput): SubsidyPolicy {
+  return typeof input === "number"
+    ? { kind: "legacy_per_pax", amountPerPax: input }
+    : input;
+}
+
 export type PoolComponents = {
   tnbTotal: number;
   airSelangor: number;
@@ -88,19 +108,56 @@ export type ComputeResult = {
 type OccupiedRoom = RoomInput & { tenancyId: string; partyId: string };
 
 function partition(rooms: RoomInput[]) {
-  const occupied = rooms.filter(
-    (r): r is OccupiedRoom => r.tenancyId !== null && r.partyId !== null && r.pax > 0,
+  const activeTenancies = rooms.filter(
+    (r): r is OccupiedRoom => r.tenancyId !== null && r.partyId !== null,
   );
+  // Legacy per-pax allocation deliberately retains its historical pax>0 gate.
+  const occupied = activeTenancies.filter((r) => r.pax > 0);
   const vacant = rooms.filter((r) => r.tenancyId === null);
-  return { occupied, vacant };
+  return { occupied, activeTenancies, vacant };
 }
 
-// One per-apartment model. The shared pool always splits per-pax; aircond is
-// billed separately per room (NOT part of the pool). SUBSIDY knocks RM(rate)×pax
-// off each room (owner covers it, capped so no charge goes negative).
+/** Raw string comparison, deliberately independent of host locale/collation. */
+function compareIdentity(a: OccupiedRoom, b: OccupiedRoom): number {
+  if (a.unitId !== b.unitId) return a.unitId < b.unitId ? -1 : 1;
+  if (a.tenancyId !== b.tenancyId) return a.tenancyId < b.tenancyId ? -1 : 1;
+  if (a.partyId !== b.partyId) return a.partyId < b.partyId ? -1 : 1;
+  return 0;
+}
+
+/** Convert an already-money-shaped RM amount to integer sen. */
+function moneyCents(amount: number): number {
+  return Math.round(round2(amount) * 100);
+}
+
+/**
+ * Split non-negative integer sen equally across occupied tenancy/rooms.
+ *
+ * The quotient goes to everyone and the first `remainder` canonical identities
+ * receive one extra sen. The returned map is keyed by the original room objects,
+ * so callers may preserve their input/output order while the money assignment is
+ * invariant to DB/input ordering.
+ */
+function splitCentsEqually(totalCents: number, rooms: OccupiedRoom[]): Map<OccupiedRoom, number> {
+  const shares = new Map<OccupiedRoom, number>();
+  if (rooms.length === 0) return shares;
+
+  const ordered = [...rooms].sort(compareIdentity);
+  const quotient = Math.floor(totalCents / ordered.length);
+  const remainder = totalCents % ordered.length;
+  ordered.forEach((room, index) => {
+    shares.set(room, (quotient + (index < remainder ? 1 : 0)) / 100);
+  });
+  return shares;
+}
+
+// One per-apartment model. Aircond/private-meter money is billed separately per
+// room (NOT part of the shared pool). Legacy/no-subsidy components split per pax.
+// The additive unit-cap policy changes ONLY leftover TNB: the owner covers at most
+// one monthly unit cap and the excess splits equally per occupied tenancy/room.
 export function computeAllocation(
   mode: BillingMode,
-  subsidyPerPax: number,
+  subsidyInput: SubsidyPolicyInput,
   pool: PoolComponents,
   rooms: RoomInput[],
   bearers: Bearers = DEFAULT_BEARERS,
@@ -112,7 +169,13 @@ export function computeAllocation(
   // mistake there. Default false keeps the shared master-meter model byte-identical.
   privateAircond = false,
 ): ComputeResult {
-  const { occupied, vacant } = partition(rooms);
+  const { occupied, activeTenancies, vacant } = partition(rooms);
+  const subsidyPolicy = normalizeSubsidyPolicy(subsidyInput);
+  const unitCapPolicy = mode === "subsidy" && subsidyPolicy.kind === "unit_tnb_cap_equal_tenancy";
+  // A unit cap is per active tenancy/room, never per pax. Keep legacy callers on
+  // the old pax>0 allocation set, but do not silently drop an active room merely
+  // because its pax field has not been filled in yet.
+  const allocationRooms = unitCapPolicy ? activeTenancies : occupied;
   const totalAircond = round2(rooms.reduce((s, r) => s + r.airconCharge, 0)); // incl. vacant
   if (!privateAircond && totalAircond > pool.tnbTotal + 0.01) {
     throw new ComputeError("AIRCON_EXCEEDS_TNB", `Submetered aircond (${totalAircond}) exceeds TNB total (${pool.tnbTotal})`);
@@ -142,24 +205,50 @@ export function computeAllocation(
   const ownerAttributableAircond = round2(vacant.reduce((s, r) => s + r.airconCharge, 0));
 
   const base = { totalAircond, leftoverTnb, sharedPool, totalPax, ownerAttributableAircond, ownerBorneUtilities };
-  if (totalPax === 0) {
+  if (totalPax === 0 && allocationRooms.length === 0) {
     const roundingResidual = round2(sharedPool);
     return { ...base, allocations: [], subsidyCovered: 0, roundingResidual, ownerBorneUtilitiesTotal: round2(ownerAttributableAircond + ownerBorneUtilities + roundingResidual) };
   }
 
-  const allocations: AllocationLine[] = occupied.map((r) => {
+  // New unit-level TNB cap policy. Work entirely in integer sen and split the
+  // tenant EXCESS directly. Splitting the cap separately and subtracting it can
+  // hand the remainder sen to a different room, violating "excess split equally".
+  // Gross TNB stays visible as `tnbShare`; the difference is the existing negative
+  // subsidy component, preserving document/charge and owner-ledger invariants.
+  let unitCapGrossTnb = new Map<OccupiedRoom, number>();
+  let unitCapTenantExcess = new Map<OccupiedRoom, number>();
+  if (unitCapPolicy) {
+    if (!Number.isFinite(subsidyPolicy.cap) || subsidyPolicy.cap < 0) {
+      throw new ComputeError("INVALID_SUBSIDY_CAP", `Unit TNB subsidy cap must be non-negative: ${subsidyPolicy.cap}`);
+    }
+    const grossTnbCents = moneyCents(Math.max(0, leftoverTnb));
+    const capCents = moneyCents(subsidyPolicy.cap);
+    const tenantExcessCents = Math.max(0, grossTnbCents - capCents);
+    unitCapGrossTnb = splitCentsEqually(grossTnbCents, allocationRooms);
+    unitCapTenantExcess = splitCentsEqually(tenantExcessCents, allocationRooms);
+  }
+
+  const allocations: AllocationLine[] = allocationRooms.map((r) => {
     const shares: ShareComponents = {
-      tnbShare: round2((leftoverTnb / totalPax) * r.pax),
-      airSelangorShare: round2((pool.airSelangor / totalPax) * r.pax),
-      indahShare: round2((poolIndah / totalPax) * r.pax),
-      wifiShare: round2((poolWifi / totalPax) * r.pax),
-      cleaningShare: round2((poolCleaning / totalPax) * r.pax),
-      maintenanceShare: round2((poolMaintenance / totalPax) * r.pax),
+      tnbShare: unitCapPolicy
+        ? (unitCapGrossTnb.get(r) ?? 0)
+        : round2((leftoverTnb / totalPax) * r.pax),
+      airSelangorShare: totalPax > 0 ? round2((pool.airSelangor / totalPax) * r.pax) : 0,
+      indahShare: totalPax > 0 ? round2((poolIndah / totalPax) * r.pax) : 0,
+      wifiShare: totalPax > 0 ? round2((poolWifi / totalPax) * r.pax) : 0,
+      cleaningShare: totalPax > 0 ? round2((poolCleaning / totalPax) * r.pax) : 0,
+      maintenanceShare: totalPax > 0 ? round2((poolMaintenance / totalPax) * r.pax) : 0,
     };
     // Σ derived from the map — Object.values keeps the literal key order, so this adds the SAME
     // numbers in the SAME sequence as the previous hand-written sum (identical floating point).
     const grossShareTotal = round2(Object.values(shares).reduce((sum, n) => sum + n, 0));
-    const subsidyDeduction = mode === "subsidy" ? round2(Math.min(grossShareTotal, subsidyPerPax * r.pax)) : 0;
+    const subsidyDeduction = mode !== "subsidy"
+      ? 0
+      : subsidyPolicy.kind === "legacy_per_pax"
+        ? round2(Math.min(grossShareTotal, subsidyPolicy.amountPerPax * r.pax))
+        : subsidyPolicy.kind === "unit_tnb_cap_equal_tenancy"
+          ? round2(shares.tnbShare - (unitCapTenantExcess.get(r) ?? 0))
+          : 0;
     const computedAmount = round2(grossShareTotal - subsidyDeduction);
     return { unitId: r.unitId, tenancyId: r.tenancyId, partyId: r.partyId, pax: r.pax, ...shares, grossShareTotal, subsidyDeduction, computedAmount, unitCode: r.unitCode ?? null, listingType: r.listingType ?? null };
   });

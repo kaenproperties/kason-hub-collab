@@ -22,26 +22,26 @@ import {
   updateUnitSchema,
 } from "./inventory.validation";
 import { formatZodError } from "../../lib/zod-error-mapper";
+import { requirePermission } from "../../middleware/require-permission";
 
 const inventoryRoutes = new Hono<{ Variables: { session: InventorySession } }>();
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
-inventoryRoutes.get("/summary", async (c) => {
+inventoryRoutes.get("/summary", requirePermission("portfolio.view"), async (c) => {
   const session = c.get("session");
   const data = await getInventorySummaryService(session);
   return c.json({ data });
 });
 
-inventoryRoutes.get("/properties", async (c) => {
+inventoryRoutes.get("/properties", requirePermission("portfolio.view"), async (c) => {
   const session = c.get("session");
   const data = await getInventoryPropertiesService(session);
   return c.json({ data });
 });
 
-inventoryRoutes.post("/properties", async (c) => {
+inventoryRoutes.post("/properties", requirePermission("portfolio.create"), async (c) => {
   const session = c.get("session");
-  if (session.role === "viewer") return c.json({ error: "Read-only access" }, 403);
 
   const body = await c.req.json();
   const parsed = createPropertySchema.safeParse(body);
@@ -63,7 +63,7 @@ inventoryRoutes.post("/properties", async (c) => {
 // task (post C-series). This module strictly serves the approved-inventory
 // tree (Property + Apartment + Listing).
 
-inventoryRoutes.get("/properties/:propertyId", async (c) => {
+inventoryRoutes.get("/properties/:propertyId", requirePermission("portfolio.view"), async (c) => {
   const session = c.get("session");
   const propertyId = c.req.param("propertyId");
   if (!UUID_RE.test(propertyId)) return c.json({ error: "Invalid property id" }, 400);
@@ -72,9 +72,8 @@ inventoryRoutes.get("/properties/:propertyId", async (c) => {
   return c.json({ data: result.data });
 });
 
-inventoryRoutes.put("/properties/:propertyId", async (c) => {
+inventoryRoutes.put("/properties/:propertyId", requirePermission("portfolio.edit"), async (c) => {
   const session = c.get("session");
-  if (session.role === "viewer") return c.json({ error: "Read-only access" }, 403);
 
   const body = await c.req.json();
   const parsed = updatePropertySchema.safeParse({ ...body, propertyId: c.req.param("propertyId") });
@@ -88,7 +87,7 @@ inventoryRoutes.put("/properties/:propertyId", async (c) => {
   return c.json(result.data);
 });
 
-inventoryRoutes.get("/units", async (c) => {
+inventoryRoutes.get("/units", requirePermission("portfolio.view"), async (c) => {
   const session = c.get("session");
   const q = c.req.query("q") ?? undefined;
   const status = c.req.query("status") ?? undefined;
@@ -96,7 +95,7 @@ inventoryRoutes.get("/units", async (c) => {
   return c.json({ data });
 });
 
-inventoryRoutes.get("/units/:id", async (c) => {
+inventoryRoutes.get("/units/:id", requirePermission("portfolio.view"), async (c) => {
   const session = c.get("session");
   const id = c.req.param("id");
   if (!UUID_RE.test(id)) return c.json({ error: "Invalid unit id" }, 400);
@@ -109,7 +108,7 @@ inventoryRoutes.get("/units/:id", async (c) => {
 // drawer picks an Apartment by unitCode. Registered BEFORE the longer
 // "/apartments/by-property/:propertyId" path; Hono matches static segments so
 // the exact "/apartments" never shadows it.
-inventoryRoutes.get("/apartments", async (c) => {
+inventoryRoutes.get("/apartments", requirePermission("portfolio.view"), async (c) => {
   const session = c.get("session");
   const q = c.req.query("q") ?? undefined;
   const data = await searchApartmentsService(session, { q });
@@ -119,7 +118,7 @@ inventoryRoutes.get("/apartments", async (c) => {
 // Apartment-grouped view of a property. Used by the property page to
 // render rooms grouped under their apartment + by the +Rooms typeahead
 // to detect existing apartments when admin adds a new room.
-inventoryRoutes.get("/apartments/by-property/:propertyId", async (c) => {
+inventoryRoutes.get("/apartments/by-property/:propertyId", requirePermission("portfolio.view"), async (c) => {
   const session = c.get("session");
   const propertyId = c.req.param("propertyId");
   if (!UUID_RE.test(propertyId)) {
@@ -133,11 +132,8 @@ inventoryRoutes.get("/apartments/by-property/:propertyId", async (c) => {
 // Admin multi-room batch — atomic create of N rooms sharing one apartment.
 // Registered BEFORE POST /units/:unitId so the literal /batch path takes
 // priority.
-inventoryRoutes.post("/units/batch", async (c) => {
+inventoryRoutes.post("/units/batch", requirePermission("portfolio.create"), async (c) => {
   const session = c.get("session");
-  if (session.role === "viewer") {
-    return c.json({ error: "Read-only access" }, 403);
-  }
   const body = await c.req.json().catch(() => null);
   if (!body) return c.json({ error: "Invalid JSON body" }, 400);
   const parsed = createUnitsBatchSchema.safeParse(body);
@@ -162,9 +158,8 @@ inventoryRoutes.post("/units/batch", async (c) => {
   return c.json({ data: result.data }, result.status as 201);
 });
 
-inventoryRoutes.post("/units", async (c) => {
+inventoryRoutes.post("/units", requirePermission("portfolio.create"), async (c) => {
   const session = c.get("session");
-  if (session.role === "viewer") return c.json({ error: "Read-only access" }, 403);
 
   const body = await c.req.json();
   const parsed = createUnitSchema.safeParse(body);
@@ -219,9 +214,8 @@ inventoryRoutes.post("/units", async (c) => {
   return c.json({ ...result.data, ...(warnings ? { warnings } : {}) }, result.status as 201);
 });
 
-inventoryRoutes.put("/units/:unitId", async (c) => {
+inventoryRoutes.put("/units/:unitId", requirePermission("portfolio.edit"), async (c) => {
   const session = c.get("session");
-  if (session.role === "viewer") return c.json({ error: "Read-only access" }, 403);
 
   const body = await c.req.json();
   const parsed = updateUnitSchema.safeParse({ ...body, unitId: c.req.param("unitId") });

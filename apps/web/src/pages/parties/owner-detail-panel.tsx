@@ -27,7 +27,7 @@ import { displayPhone } from "@/pages/tenancy/tenant-tracker/phone-display";
 import { useOwnerDetail } from "@/api/parties-detail";
 import { useFeeConfigs } from "@/api/owner-billing";
 import { isPhase2FlagEnabled } from "@/lib/feature-flags";
-import { getStoredUser } from "@/lib/auth";
+import { usePermission } from "@/components/permission-gate";
 import { apiFetch } from "@/lib/api-client";
 import { FeeConfigDrawer } from "@/pages/settings/sections/owner-billing/fee-config-drawer";
 import { PartyDetailPanel, IcRevealField } from "./party-detail-panel";
@@ -315,7 +315,7 @@ function OwnerFeeSummary({
   const { data, isError } = useFeeConfigs({ ownerPartyId: partyId, isActive: "true" });
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [drawerMode, setDrawerMode] = useState<"create" | "edit">("create");
-  const isAdmin = getStoredUser()?.role === "admin";
+  const canConfigureManagementFee = usePermission("management_fee.configure");
   const activeConfigs = !isError ? data?.data?.items?.filter((c) => c.isActive) ?? [] : [];
   const activeConfig = activeConfigs.find((c) => !c.apartmentId) ?? activeConfigs[0];
   const unitConfigCount = activeConfigs.filter((c) => Boolean(c.apartmentId)).length;
@@ -325,7 +325,7 @@ function OwnerFeeSummary({
   const propertiesQuery = useQuery({
     queryKey: ["inventory", "properties"],
     queryFn: () => apiFetch<{ data: Array<{ id: string; name: string }> }>("/inventory/properties"),
-    enabled: isAdmin,
+    enabled: canConfigureManagementFee,
   });
 
   const feeLabel = activeConfig
@@ -342,7 +342,7 @@ function OwnerFeeSummary({
       {unitConfigCount > 0 && (
         <DetailField label="Unit fee overrides">{unitConfigCount}</DetailField>
       )}
-      {isAdmin && (
+      {canConfigureManagementFee && (
         <>
           <button
             type="button"

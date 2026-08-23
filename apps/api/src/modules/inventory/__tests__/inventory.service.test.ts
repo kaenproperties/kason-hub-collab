@@ -923,7 +923,12 @@ describe("getApartmentsByPropertyService — owner resolution", () => {
       inChargePartyId: null,
       ownerPartyId: OWNER_PARTY_ID,
       ownerParty: { displayName: "Alice Tan", primaryPhone: "+60123456789" },
-      tenancies: [] as Array<{ tenantParty: { displayName: string } }>,
+      tenancies: [] as Array<{
+        tenantPartyId: string;
+        tenantParty: { displayName: string };
+        startDate: Date;
+        endDate: Date | null;
+      }>,
     };
   }
 
@@ -937,7 +942,12 @@ describe("getApartmentsByPropertyService — owner resolution", () => {
       inChargePartyId: null,
       ownerPartyId: null,
       ownerParty: null,
-      tenancies: [] as Array<{ tenantParty: { displayName: string } }>,
+      tenancies: [] as Array<{
+        tenantPartyId: string;
+        tenantParty: { displayName: string };
+        startDate: Date;
+        endDate: Date | null;
+      }>,
     };
   }
 
@@ -960,6 +970,9 @@ describe("getApartmentsByPropertyService — owner resolution", () => {
       highlights: [],
       publishedDescription: null,
       listingMode: "WHOLE",
+      partitionBillingMode: "NO_SUBSIDY",
+      tnbSubsidyCapMonthly: null,
+      underManagement: true,
       listings,
     };
   }
@@ -1033,6 +1046,19 @@ describe("getApartmentsByPropertyService — owner resolution", () => {
     expect(apt!.ownerPartyId).toBeNull();
     expect(apt!.ownerName).toBeNull();
     expect(apt!.ownerPhone).toBeNull();
+  });
+
+  it("surfaces the apartment monthly TNB subsidy cap as a wire number", async () => {
+    prismaMock.apartment.findMany.mockResolvedValue([
+      { ...makeApartment([]), tnbSubsidyCapMonthly: "200.00" },
+    ]);
+
+    const { getApartmentsByPropertyService } = await import("../inventory.service");
+    const result = await getApartmentsByPropertyService(session, PROP_ID);
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) throw new Error("expected ok");
+    expect(result.data[0]!.tnbSubsidyCapMonthly).toBe(200);
   });
 
   it("surfaces owner from a non-null listing when first listing has no owner (find-first-non-null traversal)", async () => {
@@ -1162,7 +1188,15 @@ describe("getApartmentsByPropertyService — owner resolution", () => {
   it("surfaces tenantName from the active tenancy on a room", async () => {
     prismaMock.apartment.findMany.mockResolvedValue([
       makeApartment([
-        { ...makeListingWithOwner("l-1"), tenancies: [{ tenantParty: { displayName: "Bob Lim" } }] },
+        {
+          ...makeListingWithOwner("l-1"),
+          tenancies: [{
+            tenantPartyId: "tenant-bob",
+            tenantParty: { displayName: "Bob Lim" },
+            startDate: new Date("2026-08-01T00:00:00.000Z"),
+            endDate: null,
+          }],
+        },
       ]),
     ]);
     const { getApartmentsByPropertyService } = await import("../inventory.service");

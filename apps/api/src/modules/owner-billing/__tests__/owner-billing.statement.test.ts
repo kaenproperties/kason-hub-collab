@@ -126,10 +126,20 @@ function cfg(overrides: Partial<DbManagementFeeConfig> = {}): DbManagementFeeCon
 }
 
 function occUnit(overrides: Partial<OwnerUnitForMonth> = {}): OwnerUnitForMonth {
-  return { unitId: UNIT_OCC, apartmentId: APT_OCC, unitCode: "A-1", propertyId: PROPERTY, occupied: true, rentBase: "2000", rentBaseForMonth: "2000", ...overrides };
+  const unit = { unitId: UNIT_OCC, apartmentId: APT_OCC, unitCode: "A-1", propertyId: PROPERTY, occupied: true, rentBase: "2000", rentBaseForMonth: "2000", ...overrides };
+  return {
+    ...unit,
+    managementFeeRentComponents: overrides.managementFeeRentComponents ?? [{
+      billedRent: unit.rentBaseForMonth,
+      fullMonthRent: unit.rentBase,
+      numberOfPax: null,
+      isCommissionMonth: false,
+      fullyCollected: true,
+    }],
+  };
 }
 function vacUnit(overrides: Partial<OwnerUnitForMonth> = {}): OwnerUnitForMonth {
-  return { unitId: UNIT_VAC, apartmentId: APT_VAC, unitCode: "A-2", propertyId: PROPERTY, occupied: false, rentBase: "0", rentBaseForMonth: "0", ...overrides };
+  return { unitId: UNIT_VAC, apartmentId: APT_VAC, unitCode: "A-2", propertyId: PROPERTY, occupied: false, rentBase: "0", rentBaseForMonth: "0", ...overrides, managementFeeRentComponents: overrides.managementFeeRentComponents ?? [] };
 }
 
 // A built statement Invoice with line Charges (what findInvoiceByIdInTx /
@@ -267,6 +277,14 @@ describe("generateStatementService — occupied unit", () => {
     expect(mgmt!.amount).toBe("200.00");
     expect(mgmt!.unitId).toBe(UNIT_OCC);
     expect(mgmt!.organizationId).toBe(ORG);
+    expect(mgmt).toMatchObject({
+      nature: "profit",
+      fundedBy: "owner",
+      revenueRecognition: "manager_revenue",
+      settlementRecipient: "manager",
+      commercialPurpose: "MANAGEMENT_FEE",
+      taxTreatment: "taxable_service",
+    });
     // Cleaning is NOT issued by the statement at all now: it duplicated the bills grid, which
     // bills owner cleaning as chargeType "utility" / cleaning_owner. Neither inline nor via the
     // shared helper.
@@ -317,10 +335,20 @@ describe("generateStatementService — letting commission SST (Phase 3)", () => 
     const sst = chargeArgs.find((a) => a.chargeType === "letting_commission_sst");
     expect(commission?.amount).toBe("1500.00");
     expect(commission?.partyId).toBe(OWNER);
+    expect(commission?.description).toBe("Admin Fee (First Month Rental)");
+    expect(commission).toMatchObject({
+      nature: "profit",
+      fundedBy: "owner",
+      revenueRecognition: "manager_revenue",
+      settlementRecipient: "manager",
+      commercialPurpose: "SERVICE",
+      taxTreatment: "taxable_service",
+    });
     expect(sst).toBeDefined();
     expect(sst!.amount).toBe("120.00"); // 8% of the actual commission (M-F2), billed to the owner
     expect(sst!.unitId).toBe(UNIT_OCC);
     expect(sst!.partyId).toBe(OWNER); // OWNER pays the SST (IVOWN), not the tenant
+    expect(sst!.description).toBe("SST on Admin Fee (First Month Rental)");
     // M-B2 hardening: the SST charge must NOT carry nature="expense" — otherwise owner-ledger
     // Source 6 (owner-borne deduct) would double-book it alongside Source 2. Deducts via Source 2 only.
     expect(sst!.nature).not.toBe("expense");

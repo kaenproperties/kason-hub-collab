@@ -547,6 +547,7 @@ export async function findUnitDetail(
           amenities: true,
           highlights: true,
           publishedDescription: true,
+          tnbSubsidyCapMonthly: true,
           property: {
             select: {
               id: true,
@@ -676,6 +677,10 @@ export async function findUnitDetail(
     ownerPartyId: listing.ownerPartyId,
     ownerName: listing.ownerParty?.displayName ?? null,
     ownerPhone: listing.ownerParty?.primaryPhone ?? null,
+    tnbSubsidyCapMonthly:
+      apartment.tnbSubsidyCapMonthly == null
+        ? null
+        : Number(apartment.tnbSubsidyCapMonthly.toString()),
     property: property
       ? {
           id: property.id,

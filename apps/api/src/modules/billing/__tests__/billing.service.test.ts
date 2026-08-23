@@ -113,7 +113,7 @@ describe("billing.service", () => {
 
   it("prevents posting void charge", async () => {
     mockedRepo.findChargeById.mockResolvedValueOnce({
-      id: "charge-1", chargeNumber: "CHG-001", status: "void", unitId: null, billingMonth: null, dueDate: new Date("2026-04-15"),
+      id: "charge-1", chargeNumber: "CHG-001", chargeType: "rent", status: "void", parentChargeId: null, invoiceId: null, sstRate: null, unitId: null, billingMonth: null, dueDate: new Date("2026-04-15"),
     });
 
     const result = await postChargeService(session, { chargeId: "charge-1" });
@@ -127,7 +127,7 @@ describe("billing.service", () => {
 
   it("voids a charge and records event", async () => {
     mockedRepo.findChargeById.mockResolvedValueOnce({
-      id: "charge-1", chargeNumber: "CHG-001", status: "posted", unitId: null, billingMonth: null, dueDate: new Date("2026-04-15"),
+      id: "charge-1", chargeNumber: "CHG-001", chargeType: "rent", status: "posted", parentChargeId: null, invoiceId: null, sstRate: null, unitId: null, billingMonth: null, dueDate: new Date("2026-04-15"),
     });
 
     const result = await voidChargeService(session, {
@@ -149,7 +149,7 @@ describe("billing.service", () => {
     process.env.ENABLE_PHASE2_BILLING_DOCS = "1";
     try {
       mockedRepo.findChargeById.mockResolvedValueOnce({
-        id: "charge-9", chargeNumber: "CHG-009", status: "draft", unitId: null, billingMonth: null, dueDate: new Date("2026-04-15"),
+        id: "charge-9", chargeNumber: "CHG-009", chargeType: "rent", status: "draft", parentChargeId: null, invoiceId: null, sstRate: null, unitId: null, billingMonth: null, dueDate: new Date("2026-04-15"),
       });
       const result = await postChargeService(session, { chargeId: "charge-9" });
       expect(result.ok).toBe(true);
@@ -167,7 +167,7 @@ describe("billing.service", () => {
   it("postChargeService flag dark: posts the charge with NO mint call (byte-identical legacy behavior)", async () => {
     delete process.env.ENABLE_PHASE2_BILLING_DOCS;
     mockedRepo.findChargeById.mockResolvedValueOnce({
-      id: "charge-10", chargeNumber: "CHG-010", status: "draft", unitId: null, billingMonth: null, dueDate: new Date("2026-04-15"),
+      id: "charge-10", chargeNumber: "CHG-010", chargeType: "rent", status: "draft", parentChargeId: null, invoiceId: null, sstRate: null, unitId: null, billingMonth: null, dueDate: new Date("2026-04-15"),
     });
     const result = await postChargeService(session, { chargeId: "charge-10" });
     expect(result.ok).toBe(true);
@@ -179,7 +179,7 @@ describe("billing.service", () => {
     process.env.ENABLE_PHASE2_BILLING_DOCS = "1";
     try {
       mockedRepo.findChargeById.mockResolvedValueOnce({
-        id: "charge-11", chargeNumber: "CHG-011", status: "draft", unitId: null, billingMonth: null, dueDate: new Date("2026-04-15"),
+        id: "charge-11", chargeNumber: "CHG-011", chargeType: "rent", status: "draft", parentChargeId: null, invoiceId: null, sstRate: null, unitId: null, billingMonth: null, dueDate: new Date("2026-04-15"),
       });
       vi.mocked(issueDocumentsForChargesTx).mockRejectedValueOnce(new Error("DOCUMENT_CATEGORY_UNRESOLVED"));
       await expect(postChargeService(session, { chargeId: "charge-11" })).rejects.toThrow(

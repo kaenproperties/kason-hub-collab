@@ -1,4 +1,4 @@
-import { StrictMode, useState, useCallback, useMemo } from "react";
+import { StrictMode, useState, useCallback, useMemo, useEffect } from "react";
 import { createRoot } from "react-dom/client";
 import { RouterProvider } from "react-router-dom";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
@@ -11,6 +11,7 @@ import {
   clearStoredAuth,
 } from "@/lib/auth";
 import { ApiError } from "@/lib/api-client";
+import { fetchAdminSession } from "@/api/admin-auth";
 import { router } from "@/router";
 import "./globals.css";
 
@@ -55,6 +56,48 @@ function AuthProvider({ children }: { children: React.ReactNode }) {
     setUser(null);
     queryClient.clear();
   }, []);
+
+  // Permissions are editable while staff are logged in. Refresh the current
+  // operator from the server so a grant/revocation takes effect without a
+  // logout, hard refresh or stale localStorage session.
+  useEffect(() => {
+    if (!user || user.userType !== "operator") return;
+    let cancelled = false;
+    const refresh = async () => {
+      try {
+        const session = await fetchAdminSession();
+        if (cancelled) return;
+        setAuth({
+          id: session.id,
+          fullName: session.fullName,
+          email: session.email,
+          role: session.role,
+          orgId: session.orgId,
+          userType: session.userType,
+          permissions: session.permissions,
+        });
+      } catch {
+        // apiFetch handles expired sessions. A transient refresh failure must
+        // not throw away an otherwise valid working session.
+      }
+    };
+    void refresh();
+    // The API already enforces the latest permissions on every request. Keep
+    // navigation and buttons nearly in sync as well, so a staff member does
+    // not keep seeing a revoked action (or miss a new grant) for 15 seconds.
+    const timer = window.setInterval(refresh, 5_000);
+    window.addEventListener("focus", refresh);
+    const refreshWhenVisible = () => {
+      if (document.visibilityState === "visible") void refresh();
+    };
+    document.addEventListener("visibilitychange", refreshWhenVisible);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+      window.removeEventListener("focus", refresh);
+      document.removeEventListener("visibilitychange", refreshWhenVisible);
+    };
+  }, [user?.id, user?.userType, setAuth]);
 
   const value = useMemo(
     () => ({

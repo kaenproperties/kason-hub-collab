@@ -19,7 +19,7 @@ import {
   DropdownMenuItem,
   DropdownMenuSeparator,
 } from "@/components/ui/dropdown-menu";
-import { RoleGate } from "@/components/role-gate";
+import { PermissionGate, usePermission } from "@/components/permission-gate";
 import { useUsers } from "@/api/users";
 import { useAuth } from "@/lib/auth";
 import { AdminFormDrawer } from "./admin-form-drawer";
@@ -29,6 +29,7 @@ import { TeamAreaTabs } from "./team-area-tabs";
 import type { OperatorUser } from "@/api/users";
 import type { DeactivateMode } from "./admin-deactivate-drawer";
 import { MoreHorizontalIcon } from "lucide-react";
+import { canManageRole } from "@/lib/permissions";
 import {
   TableWrap,
   DataTable,
@@ -79,6 +80,9 @@ const ROLE_FILTERS: { id: RoleFilter; label: string }[] = [
 
 export default function StaffPage() {
   const { user: session } = useAuth();
+  const assignableRoles = (["director", "accountant", "manager", "editor", "viewer"] as const).filter((role) =>
+    canManageRole(session?.role, role),
+  );
   // Fetch the four operator ROLES the Staff register manages — the exact union
   // the retired Managers + Admin pages covered. Deliberately EXCLUDES the
   // "accountant" capability role (managed via the Accounting workspace, never
@@ -88,6 +92,9 @@ export default function StaffPage() {
   const users = useUsers({ roles: ["admin", "director", "accountant", "manager", "editor", "viewer"] });
   const [drawer, setDrawer] = useState<DrawerState>(null);
   const [roleFilter, setRoleFilter] = useState<RoleFilter>("all");
+  const canManageUsers = usePermission("roles.manage");
+  const canDisableUsers = usePermission("user.disable");
+  const canResetPasswords = usePermission("user.reset_password");
 
   // Metrics describe the WHOLE team (stable regardless of the chip filter);
   // the chips only narrow the register table below.
@@ -112,22 +119,42 @@ export default function StaffPage() {
           { label: "Disabled", value: String(all.filter((u) => u.status === "disabled").length), hint: "Deactivated accounts" },
         ]}
         actions={
-          <RoleGate min="admin">
+          <PermissionGate permission="roles.manage">
             <Button
               variant="gold"
-              disabled={drawer !== null}
+              disabled={drawer !== null || assignableRoles.length === 0}
               onClick={() => setDrawer({ kind: "form", mode: "create", user: null })}
             >
               + Add user
             </Button>
-          </RoleGate>
+          </PermissionGate>
         }
       />
 
       <Surface
         title="Operator register"
-        description="Only Super Admin can create users, assign roles, deactivate access or reset passwords. The Super Admin account itself is protected."
+        description="Staff administration follows the company hierarchy. A user must have the relevant permission and can only manage staff below their own role level."
       >
+        <div className="mb-4 rounded-xl border border-[var(--border)] bg-[var(--page-bg)] px-4 py-3">
+          <div className="text-[11px] font-extrabold uppercase tracking-wider text-[var(--text-secondary)]">
+            Permission-management hierarchy
+          </div>
+          <div className="mt-2 flex flex-wrap items-center gap-2 text-xs font-bold text-[var(--navy-text)]">
+            <span className="rounded-full bg-[var(--navy)] px-3 py-1.5 text-white">Super Admin</span>
+            <span aria-hidden="true" className="text-[var(--gold)]">→</span>
+            <span className="rounded-full border border-[var(--gold)] bg-white px-3 py-1.5">Director</span>
+            <span aria-hidden="true" className="text-[var(--gold)]">→</span>
+            <span className="rounded-full border border-[var(--border)] bg-white px-3 py-1.5">Manager / Finance</span>
+            <span aria-hidden="true" className="text-[var(--gold)]">→</span>
+            <span className="rounded-full border border-[var(--border)] bg-white px-3 py-1.5">Operations Admin</span>
+            <span aria-hidden="true" className="text-[var(--gold)]">→</span>
+            <span className="rounded-full border border-[var(--border)] bg-white px-3 py-1.5">Viewer</span>
+          </div>
+          <p className="mt-2 text-[11px] text-[var(--text-secondary)]">
+            Only users with Manage users and permissions can edit staff, and only below their own level. Manager and Finance are the same level and cannot edit each other.
+          </p>
+        </div>
+
         {/* Role filter — 'Manager' reproduces the old Managers tab exactly. */}
         <div className="mb-4 flex flex-wrap items-center gap-2" role="group" aria-label="Filter by role">
           <span className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">Role</span>
@@ -187,6 +214,7 @@ export default function StaffPage() {
                 ) : (
                   list.map((user) => {
                     const isSelf = session?.id === user.id;
+                    const canManageThisUser = !isSelf && canManageRole(session?.role, user.role);
                     return (
                       <Row key={user.id}>
                         <BodyCell>
@@ -213,7 +241,7 @@ export default function StaffPage() {
                         </BodyCell>
                         <BodyCell className="text-right">
                           {/* Admin-tier rows are managed out-of-band (glossary): no UI mutation. */}
-                          {user.role !== "admin" && (
+                          {canManageThisUser && (canManageUsers || canDisableUsers || canResetPasswords) && (
                             <DropdownMenu>
                               <DropdownMenuTrigger
                                 aria-label={`Actions for ${user.fullName}`}
@@ -223,44 +251,45 @@ export default function StaffPage() {
                                 <MoreHorizontalIcon className="h-4 w-4" />
                               </DropdownMenuTrigger>
                               <DropdownMenuContent align="end">
-                                <RoleGate min="admin">
+                                {canManageUsers && (
                                   <DropdownMenuItem
                                     onClick={() => setDrawer({ kind: "form", mode: "edit", user })}
                                   >
                                     Edit
                                   </DropdownMenuItem>
+                                )}
 
-                                  {!isSelf && (
-                                    <>
-                                      {user.status === "active" ? (
-                                        <DropdownMenuItem
-                                          onClick={() =>
-                                            setDrawer({ kind: "deactivate", mode: "deactivate", user })
-                                          }
-                                          className="text-rose-600 data-highlighted:bg-rose-500/10 data-highlighted:text-rose-700"
-                                        >
-                                          Deactivate
-                                        </DropdownMenuItem>
-                                      ) : (
-                                        <DropdownMenuItem
-                                          onClick={() =>
-                                            setDrawer({ kind: "deactivate", mode: "activate", user })
-                                          }
-                                        >
-                                          Activate
-                                        </DropdownMenuItem>
-                                      )}
-                                    </>
-                                  )}
+                                {canDisableUsers && (
+                                  user.status === "active" ? (
+                                    <DropdownMenuItem
+                                      onClick={() =>
+                                        setDrawer({ kind: "deactivate", mode: "deactivate", user })
+                                      }
+                                      className="text-rose-600 data-highlighted:bg-rose-500/10 data-highlighted:text-rose-700"
+                                    >
+                                      Deactivate
+                                    </DropdownMenuItem>
+                                  ) : (
+                                    <DropdownMenuItem
+                                      onClick={() =>
+                                        setDrawer({ kind: "deactivate", mode: "activate", user })
+                                      }
+                                    >
+                                      Activate
+                                    </DropdownMenuItem>
+                                  )
+                                )}
 
-                                  <DropdownMenuSeparator />
-
-                                  <DropdownMenuItem
-                                    onClick={() => setDrawer({ kind: "resetPassword", user })}
-                                  >
-                                    Reset password
-                                  </DropdownMenuItem>
-                                </RoleGate>
+                                {canResetPasswords && (
+                                  <>
+                                    <DropdownMenuSeparator />
+                                    <DropdownMenuItem
+                                      onClick={() => setDrawer({ kind: "resetPassword", user })}
+                                    >
+                                      Reset password
+                                    </DropdownMenuItem>
+                                  </>
+                                )}
                               </DropdownMenuContent>
                             </DropdownMenu>
                           )}
@@ -279,7 +308,7 @@ export default function StaffPage() {
         open={drawer?.kind === "form"}
         mode={drawer?.kind === "form" ? drawer.mode : "create"}
         user={drawer?.kind === "form" ? drawer.user : null}
-        availableRoles={["director", "accountant", "manager", "editor", "viewer"]}
+        availableRoles={assignableRoles}
         onClose={closeDrawer}
       />
 

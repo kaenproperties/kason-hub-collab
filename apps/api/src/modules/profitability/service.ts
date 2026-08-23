@@ -4,6 +4,12 @@ type View = "owner" | "tenant";
 
 const money = (value: number) => value.toFixed(2);
 const excludedStatuses = ["void", "credited", "cancelled", "draft"];
+const legacyManagerRevenueChargeTypes = [
+  "management_fee",
+  "letting_commission",
+  "tenancy_agreement_fee",
+  "renewal_fee",
+];
 
 export type ProfitabilityFilters = { view: View; month?: string; q?: string };
 
@@ -14,7 +20,17 @@ export async function getProfitability(orgId: string, filters: ProfitabilityFilt
   const charges = await db.charge.findMany({
     where: {
       organizationId: orgId,
-      revenueRecognition: "manager_revenue",
+      // Economic treatment is authoritative for all new charges.  Older rows
+      // predate that field, so retain a deliberately narrow compatibility
+      // path: an explicitly profit-natured charge, or one of the four system
+      // service-fee types whose business meaning is unambiguous.  This avoids
+      // guessing from descriptions while making historical profitability
+      // visible without mutating production accounting records.
+      OR: [
+        { revenueRecognition: "manager_revenue" },
+        { revenueRecognition: null, nature: "profit" },
+        { revenueRecognition: null, chargeType: { in: legacyManagerRevenueChargeTypes } },
+      ],
       nonBillable: false,
       status: { notIn: excludedStatuses },
       ...(start && end ? { billingMonth: { gte: start, lt: end } } : {}),
@@ -34,7 +50,49 @@ export async function getProfitability(orgId: string, filters: ProfitabilityFilt
     },
   });
 
-  const allocationIds = charges.flatMap((charge) => charge.allocations.map((item) => item.id));
+  // Tax-sibling Charges are real receivables, but they are tax collected for the
+  // government rather than KAEN revenue. Identify them from the immutable
+  // BillingDocumentLine.isTax snapshot (parentChargeId is generic lineage and
+  // cannot safely classify tax by itself), then leave them out of profitability.
+  // The same batched read also recovers the apartment identity for historical
+  // manual documents whose Charge predates unit attribution.
+  const allChargeIds = charges.map((charge) => charge.id);
+  const documentLines = allChargeIds.length ? await db.billingDocumentLine.findMany({
+    where: { chargeId: { in: allChargeIds }, document: { organizationId: orgId } },
+    select: {
+      chargeId: true,
+      isTax: true,
+      sstAmount: true,
+      document: { select: { apartmentId: true } },
+    },
+  }) : [];
+  const taxChargeIds = new Set(
+    documentLines.flatMap((line) => line.isTax && line.chargeId ? [line.chargeId] : []),
+  );
+  const revenueCharges = charges.filter((charge) => !taxChargeIds.has(charge.id));
+  const exactSstByCharge = new Map<string, number>();
+  for (const line of documentLines) {
+    if (!line.isTax && line.chargeId) {
+      exactSstByCharge.set(
+        line.chargeId,
+        (exactSstByCharge.get(line.chargeId) ?? 0) + Number(line.sstAmount),
+      );
+    }
+  }
+  const apartmentIdByCharge = new Map<string, string>();
+  for (const line of documentLines) {
+    if (line.chargeId && line.document.apartmentId && !apartmentIdByCharge.has(line.chargeId)) {
+      apartmentIdByCharge.set(line.chargeId, line.document.apartmentId);
+    }
+  }
+  const fallbackApartmentIds = [...new Set(apartmentIdByCharge.values())];
+  const fallbackApartments = fallbackApartmentIds.length ? await db.apartment.findMany({
+    where: { organizationId: orgId, id: { in: fallbackApartmentIds } },
+    select: { id: true, unitCode: true, property: { select: { name: true } } },
+  }) : [];
+  const fallbackApartmentById = new Map(fallbackApartments.map((apartment) => [apartment.id, apartment]));
+
+  const allocationIds = revenueCharges.flatMap((charge) => charge.allocations.map((item) => item.id));
   const reversals = allocationIds.length ? await db.paymentAllocationReversal.findMany({
     where: { organizationId: orgId, originalAllocationId: { in: allocationIds } },
     select: { originalAllocationId: true, amount: true },
@@ -42,7 +100,7 @@ export async function getProfitability(orgId: string, filters: ProfitabilityFilt
   const reversed = new Map<string, number>();
   for (const item of reversals) reversed.set(item.originalAllocationId, (reversed.get(item.originalAllocationId) ?? 0) + Number(item.amount));
 
-  const details = charges.map((charge) => {
+  const details = revenueCharges.map((charge) => {
     const charged = Number(charge.amount);
     const gridCost = charge.sourceGridExpense?.actualCost;
     const missingCost = !!charge.sourceGridExpenseId && gridCost == null && charge.actualCost == null;
@@ -55,6 +113,7 @@ export async function getProfitability(orgId: string, filters: ProfitabilityFilt
     const collectionRatio = charged > 0 ? Math.min(1, collected / charged) : 0;
     const collectedProfit = grossProfit == null ? null : grossProfit * collectionRatio;
     const sstRate = Number(charge.sstRate ?? charge.taxRate ?? charge.category?.defaultSstRate ?? 0);
+    const fallbackApartment = fallbackApartmentById.get(apartmentIdByCharge.get(charge.id) ?? "");
     return {
       id: charge.id,
       partyId: charge.party.id,
@@ -64,11 +123,11 @@ export async function getProfitability(orgId: string, filters: ProfitabilityFilt
       chargeNumber: charge.chargeNumber,
       category: charge.category?.name ?? charge.chargeType,
       description: charge.description ?? charge.category?.name ?? charge.chargeType,
-      property: charge.unit?.apartment.property.name ?? "—",
-      unit: charge.unit?.apartment.unitCode ?? "—",
+      property: charge.unit?.apartment.property.name ?? fallbackApartment?.property.name ?? "—",
+      unit: charge.unit?.apartment.unitCode ?? fallbackApartment?.unitCode ?? "—",
       tenancyCode: charge.tenancy?.tenancyCode ?? null,
       chargedBeforeSst: money(charged),
-      sst: money(charged * sstRate / 100),
+      sst: money(exactSstByCharge.get(charge.id) ?? charged * sstRate / 100),
       actualCost: actualCost == null ? null : money(actualCost),
       grossProfit: grossProfit == null ? null : money(grossProfit),
       collectedProfit: collectedProfit == null ? null : money(collectedProfit),

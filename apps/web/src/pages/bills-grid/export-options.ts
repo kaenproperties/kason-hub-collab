@@ -48,7 +48,6 @@ function payoutSummaryRow(row: GridRow, owner: OwnerDetail | null) {
   const deposit = row.subRows.reduce((sum, item) => sum + amount(item.deposit), 0);
   const cleaning = amount(row.cleaningRecurringAmount ?? row.entry?.cleaning);
   const cleaningOwner = isApplicable(row, "cleaningOwner") ? cleaning : 0;
-  const cleaningTenant = isApplicable(row, "cleaningTenant") ? cleaning : 0;
   const tnb = amount(row.entry?.tnbTotal);
   const tnbTenant = isApplicable(row, "tnbTenant") ? tnb : 0;
   const tnbOwner = isApplicable(row, "tnbOwner") ? tnb : 0;
@@ -56,7 +55,6 @@ function payoutSummaryRow(row: GridRow, owner: OwnerDetail | null) {
   const waterTenant = isApplicable(row, "airTenant") ? water : 0;
   const waterOwner = isApplicable(row, "airOwner") ? water : 0;
   const wifi = amount(row.wifiRecurringAmount ?? row.entry?.wifi);
-  const wifiTenant = isApplicable(row, "wifiTenant") ? wifi : 0;
   const wifiOwner = isApplicable(row, "wifiOwner") ? wifi : 0;
   const maintenance = amount(row.entry?.maintenanceFee);
   return {
@@ -70,7 +68,6 @@ function payoutSummaryRow(row: GridRow, owner: OwnerDetail | null) {
     Rental: rental,
     Deposit: deposit,
     "Cleaning Owner": cleaningOwner,
-    "Cleaning Tenant": cleaningTenant,
     "TNB Owner": tnbOwner,
     "TNB Tenant": tnbTenant,
     "Previous Meter (kWh)": row.subRows.map((item) => item.previousKwh).filter((value) => value != null && value !== "").join(", "),
@@ -79,7 +76,6 @@ function payoutSummaryRow(row: GridRow, owner: OwnerDetail | null) {
     "Water Owner": waterOwner,
     "Water Tenant": waterTenant,
     "WiFi Owner": wifiOwner,
-    "WiFi Tenant": wifiTenant,
     "Maintenance Fee": maintenance,
     "Recurring Owner": amount(row.recurring?.owner.total),
     "Recurring Tenant": amount(row.recurring?.tenant.total),
@@ -87,7 +83,7 @@ function payoutSummaryRow(row: GridRow, owner: OwnerDetail | null) {
     "Tenant Expenses With SST": amount(row.expenses.tenant.withSstTotal),
     "Owner Expenses Non SST": nonSst(row.expenses.owner.total, row.expenses.owner.withSstTotal),
     "Owner Expenses With SST": amount(row.expenses.owner.withSstTotal),
-    "TA Fee With SST": amount(
+    "TA (WITH SST)": amount(
       String(Number(row.agreementFees?.new.amount ?? 0) + Number(row.agreementFees?.renewal.amount ?? 0)),
     ),
     "Management Fee With SST": amount(row.managementFee?.total),

@@ -24,7 +24,7 @@ import {
   PowerOff,
 } from "lucide-react";
 import { apiFetch, ApiError } from "@/lib/api-client";
-import { useAuth } from "@/lib/auth";
+import { usePermission } from "@/components/permission-gate";
 import { isPhase2FlagEnabled } from "@/lib/feature-flags";
 import { Card, CardContent } from "@/components/ui/card";
 import { GlowCard } from "@/components/ui/glow-card";
@@ -168,9 +168,8 @@ export default function UnitDetailPage() {
   const { id } = useParams<{ id: string }>();
   const queryClient = useQueryClient();
   const navigate = useNavigate();
-  const { user } = useAuth();
-  const canDelete = user?.role === "admin";
-  const canDeactivate = user?.role === "admin" || user?.role === "manager";
+  const canDelete = usePermission("portfolio.delete");
+  const canDeactivate = usePermission("portfolio.edit");
   const [deleteOpen, setDeleteOpen] = useState(false);
   const [deactivateOpen, setDeactivateOpen] = useState(false);
 

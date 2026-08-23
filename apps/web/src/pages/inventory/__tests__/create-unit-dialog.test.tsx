@@ -78,6 +78,7 @@ import {
 import { blankUnitFormState, unitFormToApiPayload } from "../unit-form-fields";
 import { blankRoom } from "../partition-room-strip";
 import type { ApartmentSummary } from "@/api/inventory-units-batch";
+import { AuthContext } from "@/lib/auth";
 
 function fixtureApartment(overrides: Partial<ApartmentSummary> = {}): ApartmentSummary {
   return {
@@ -115,6 +116,13 @@ function setupApi(
     apartments?: ApartmentSummary[];
     post?: PostOutcome;
     batchIds?: string[];
+    rentPreview?: {
+      month: string;
+      amount: number;
+      occupiedDays: number;
+      daysInMonth: number;
+      isProrated: boolean;
+    };
   } = {},
 ) {
   const apartments = opts.apartments ?? [];
@@ -184,6 +192,17 @@ function setupApi(
           ],
         });
       }
+      if (url.startsWith("/tenancy/tenancies/rent-preview")) {
+        return Promise.resolve({
+          data: opts.rentPreview ?? {
+            month: "2026-08",
+            amount: 3000,
+            occupiedDays: 31,
+            daysInMonth: 31,
+            isProrated: false,
+          },
+        });
+      }
       if (url === "/inventory/units" && init?.method === "POST") {
         if (post.ok) {
           return Promise.resolve(
@@ -201,9 +220,23 @@ function setupApi(
 function wrap(ui: React.ReactNode) {
   const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   return (
-    <QueryClientProvider client={qc}>
-      <MemoryRouter>{ui}</MemoryRouter>
-    </QueryClientProvider>
+    <AuthContext.Provider value={{
+      user: {
+        id: "operator-1",
+        fullName: "Test Operator",
+        email: "operator@example.test",
+        role: "admin",
+        orgId: "org-1",
+        permissions: ["party.create", "portfolio.create", "tenancy.create"],
+      },
+      setAuth: vi.fn(),
+      clearAuth: vi.fn(),
+      isAuthenticated: true,
+    }}>
+      <QueryClientProvider client={qc}>
+        <MemoryRouter>{ui}</MemoryRouter>
+      </QueryClientProvider>
+    </AuthContext.Provider>
   );
 }
 
@@ -213,16 +246,6 @@ function postedBodies(): Record<string, unknown>[] {
     .filter(
       ([url, init]) =>
         url === "/inventory/units" &&
-        (init as { method?: string } | undefined)?.method === "POST",
-    )
-    .map(([, init]) => JSON.parse((init as { body: string }).body));
-}
-
-function postedFeeConfigBodies(): Record<string, unknown>[] {
-  return apiFetchMock.mock.calls
-    .filter(
-      ([url, init]) =>
-        url === "/owner-billing/fee-configs" &&
         (init as { method?: string } | undefined)?.method === "POST",
     )
     .map(([, init]) => JSON.parse((init as { body: string }).body));
@@ -312,6 +335,26 @@ beforeEach(() => {
 afterEach(cleanup);
 
 describe("CreateUnitDialog — owner + billing model", () => {
+  it("orders the people workflow as Owner, Tenant, then Agent", async () => {
+    const user = userEvent.setup();
+    await openDialog(user);
+
+    const ownerSection = document.getElementById("unitsec-owner");
+    const tenantSection = document.getElementById("unitsec-listing");
+    const agentSection = document.getElementById("unitsec-assign");
+
+    expect(ownerSection).not.toBeNull();
+    expect(tenantSection).not.toBeNull();
+    expect(agentSection).not.toBeNull();
+
+    expect(
+      ownerSection!.compareDocumentPosition(tenantSection!) & Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+    expect(
+      tenantSection!.compareDocumentPosition(agentSection!) & Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+  });
+
   it("renders owner and billing model", async () => {
     const user = userEvent.setup();
     await openDialog(user);
@@ -353,7 +396,7 @@ describe("CreateUnitDialog — owner + billing model", () => {
     });
   });
 
-  it("creates the unit-scoped management fee config after the unit is created", async () => {
+  it("creates the unit and its management fee config atomically", async () => {
     const user = userEvent.setup();
     await openDialog(user);
     await fillRequired(user, "MF-01");
@@ -365,14 +408,64 @@ describe("CreateUnitDialog — owner + billing model", () => {
     await user.type(within(feeSection!).getByLabelText("Fee (%)"), "12.5");
     await submit(user);
 
-    await waitFor(() => expect(postedFeeConfigBodies()).toHaveLength(1));
-    expect(postedFeeConfigBodies()[0]).toMatchObject({
+    await waitFor(() => expect(postedBodies()).toHaveLength(1));
+    expect(postedBodies()[0]).toMatchObject({
       ownerPartyId: "owner-9",
-      propertyId: "p1",
-      apartmentId: "apt-created-1",
+      managementFeeConfig: {
       feeType: "percent",
       feeValue: "12.5",
       sstPercent: "8",
+      },
+    });
+    expect(
+      apiFetchMock.mock.calls.some(
+        ([url, init]) =>
+          url === "/owner-billing/fee-configs" &&
+          (init as { method?: string } | undefined)?.method === "POST",
+      ),
+    ).toBe(false);
+  });
+
+  it("auto-fills the first management fee from prorated move-in rent and persists it", async () => {
+    setupApi({
+      rentPreview: {
+        month: "2026-08",
+        amount: 1645.16,
+        occupiedDays: 17,
+        daysInMonth: 31,
+        isProrated: true,
+      },
+    });
+    const user = userEvent.setup();
+    await openDialog(user);
+    await fillRequired(user, "MF-PRORATE");
+    await pickOwner(user);
+    await user.selectOptions(combobox("Lifecycle status"), "occupied");
+    await pickTenant(user);
+    await user.type(screen.getByLabelText(/move-in date/i), "2026-08-15");
+    await user.type(screen.getByLabelText(/move-out date/i), "2027-08-14");
+    await user.type(screen.getByLabelText(/tenancy monthly rent/i), "3000");
+
+    const feeSection = screen.getByText("Management fee setup").closest("section");
+    expect(feeSection).not.toBeNull();
+    await waitFor(() =>
+      expect(
+        within(feeSection!).getByLabelText("First charge amount before SST"),
+      ).toHaveValue(164.52),
+    );
+    expect(
+      within(feeSection!).getByText(/auto-calculated from the prorated move-in rent/i),
+    ).toBeInTheDocument();
+
+    await submit(user);
+    await waitFor(() => expect(postedBodies()).toHaveLength(1));
+    expect(postedBodies()[0]).toMatchObject({
+      managementFeeConfig: {
+        feeType: "percent",
+        feeValue: "10",
+        firstChargeBaseAmount: "164.52",
+        sstPercent: "8",
+      },
     });
   });
 
@@ -497,11 +590,13 @@ describe("unitFormToApiPayload — the edit path is untouched by the create opt-
       ownerPartyId: "o1",
       ownerName: "Ahmad Bin Sulaiman",
       partitionBillingMode: "SUBSIDY",
+      tnbSubsidyCapMonthly: "200.00",
     };
     const payload = unitFormToApiPayload(state) as Record<string, unknown>;
     expect("ownerPartyId" in payload).toBe(false);
     expect("monthlyRent" in payload).toBe(false);
     expect("partitionBillingMode" in payload).toBe(false);
+    expect("tnbSubsidyCapMonthly" in payload).toBe(false);
   });
 
   it("emits the apartment-scoped fields only when the create dialog opts in", () => {
@@ -515,15 +610,25 @@ describe("unitFormToApiPayload — the edit path is untouched by the create opt-
       monthlyRent: "3200",
       ownerPartyId: "o1",
       partitionBillingMode: "SUBSIDY",
+      tnbSubsidyCapMonthly: "200.00",
     };
     const payload = unitFormToApiPayload(state, {
       includeOwner: true,
       includeBillingMode: true,
+      includeTnbSubsidyCap: true,
       includeRent: true,
     }) as Record<string, unknown>;
     expect(payload.ownerPartyId).toBe("o1");
     expect(payload.partitionBillingMode).toBe("SUBSIDY");
+    expect(payload.tnbSubsidyCapMonthly).toBe(200);
     expect(payload.monthlyRent).toBe(3200);
+  });
+
+  it("serializes a blank opted-in cap as null to retain the legacy per-pax policy", () => {
+    const payload = unitFormToApiPayload(blankUnitFormState(), {
+      includeTnbSubsidyCap: true,
+    }) as Record<string, unknown>;
+    expect(payload.tnbSubsidyCapMonthly).toBeNull();
   });
 });
 

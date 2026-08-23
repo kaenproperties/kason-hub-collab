@@ -9,10 +9,10 @@ type SummaryColumn = { label: string; ids: ColumnId[] };
 const SUMMARY_COLUMNS: SummaryColumn[] = [
   { label: "Rental", ids: ["rental"] },
   { label: "Deposit", ids: ["deposit"] },
-  { label: "Cleaning", ids: ["cleaningOwner", "cleaningTenant"] },
+  { label: "Cleaning", ids: ["cleaningOwner"] },
   { label: "TNB", ids: ["tnbOwner", "tnbTenant", "amount"] },
   { label: "Water", ids: ["airOwner", "airTenant"] },
-  { label: "WiFi", ids: ["wifiOwner", "wifiTenant"] },
+  { label: "WiFi", ids: ["wifiOwner"] },
   { label: "Maint Fee", ids: ["maintenanceFee"] },
   { label: "Recurring", ids: ["ownerRecurring", "tenantRecurring"] },
   { label: "Tenant Expenses", ids: ["tenantExpNonSst", "tenantExpWithSst"] },

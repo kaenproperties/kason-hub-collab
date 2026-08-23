@@ -164,6 +164,28 @@ const unitWritableFields = {
 const requiredDepositMonths = z.coerce.number().nonnegative().max(12);
 const requiredUtilitiesDepositMonths = z.coerce.number().nonnegative().max(12);
 
+// Apartment-level opt-in to the unit-cap TNB subsidy policy. A numeric value
+// takes priority over the legacy partition billing mode. `null` defers to that
+// mode: SUBSIDY uses organization per-pax; NO_SUBSIDY provides no subsidy.
+// Keep the Decimal(12,2) storage bound at the request edge as well.
+const tnbSubsidyCapMonthlySchema = z.preprocess(
+  // HTML form posts sometimes carry an empty string. It means "no apartment
+  // cap", never RM0; normalize it to the explicit legacy-mode sentinel.
+  (value) =>
+    typeof value === "string" && value.trim() === "" ? null : value,
+  z.coerce
+    .number()
+    .nonnegative()
+    .max(9_999_999_999.99)
+    .nullable()
+    .refine(
+      (value) =>
+        value === null ||
+        Math.abs(value * 100 - Math.round(value * 100)) < 1e-7,
+      "Monthly TNB subsidy cap must have no more than 2 decimal places",
+    ),
+);
+
 // Cross-field check: tenantPartyId/moveInDate/moveOutDate are required when
 // occupancyStatus is "occupied" and any trio field is present. tenantName is
 // retained for back-compat but is no longer required. moveOutDate must be
@@ -241,6 +263,21 @@ const parkingLengthRefiner = (
 // the portal variant can `.omit(...).strict()` BEFORE we attach the
 // .superRefine — `.omit` is a ZodObject-only API, and chaining
 // .superRefine returns a ZodEffects which has no .omit.
+const unitManagementFeeConfigSchema = z.object({
+  feeType: z.enum(["percent", "fixed", "cap"]),
+  feeValue: z.string().regex(/^\d+(\.\d{1,2})?$/),
+  capAmount: z.string().regex(/^\d+(\.\d{1,2})?$/).nullable().optional(),
+  sstPercent: z.literal("8"),
+  freePeriodStart: z.string().datetime().nullable().optional(),
+  freePeriodEnd: z.string().datetime().nullable().optional(),
+  firstChargeMonth: z.string().datetime().nullable().optional(),
+  firstChargeBaseAmount: z.string().regex(/^\d+(\.\d{1,2})?$/).nullable().optional(),
+  paxDeductionPerPerson: z.string().regex(/^\d+(\.\d{1,2})?$/).nullable().optional(),
+}).refine((value) => value.feeType !== "cap" || value.capAmount != null, {
+  message: "capAmount is required when feeType is 'cap'",
+  path: ["capAmount"],
+});
+
 const createUnitObjectSchema = z.object({
   propertyId: z.string().uuid(),
   // Required on create only.
@@ -281,6 +318,7 @@ const createUnitObjectSchema = z.object({
   // can CLEAR the owner): on create, "no owner" is expressed by omission.
   ownerPartyId: z.string().uuid().optional(),
   partitionBillingMode: z.enum(["SUBSIDY", "NO_SUBSIDY"]).optional(),
+  tnbSubsidyCapMonthly: tnbSubsidyCapMonthlySchema.optional(),
   // Explicit rent for a tenancy materialised at create time. Reuses the same
   // field definition as the update path (unitWritableFields.monthlyRent) so
   // both paths feed syncOccupancyTenancy an identically-shaped value: coerced,
@@ -295,6 +333,11 @@ const createUnitObjectSchema = z.object({
   // spread of unitWritableFields), so reuse the same field defs here.
   firstMonthIsCommission: unitWritableFields.firstMonthIsCommission,
   commissionSstBearer: unitWritableFields.commissionSstBearer,
+  // Commercial terms are part of the same business action as assigning the
+  // owner. Persisting them in the unit-create transaction prevents a managed
+  // unit from being created successfully while a second fee-config request
+  // fails and leaves the Billing grid permanently at RM0.00.
+  managementFeeConfig: unitManagementFeeConfigSchema.optional(),
 });
 
 const updateUnitObjectSchema = z.object({
@@ -340,7 +383,9 @@ export const createPortalUnitSchema = createUnitObjectSchema
     // turns any of these into a rejected unrecognized key.
     ownerPartyId: true,
     partitionBillingMode: true,
+    tnbSubsidyCapMonthly: true,
     monthlyRent: true,
+    managementFeeConfig: true,
     // Override below — portal accepts EITHER propertyId (existing approved
     // Property) OR propertySubmissionId (agent's own pending property) with
     // XOR refinement.
@@ -519,6 +564,8 @@ export const createUnitsBatchSchema = z
       // may never set an apartment's owner or its billing model.
       ownerPartyId: z.string().uuid().optional(),
       partitionBillingMode: z.enum(["SUBSIDY", "NO_SUBSIDY"]).optional(),
+      tnbSubsidyCapMonthly: tnbSubsidyCapMonthlySchema.optional(),
+      managementFeeConfig: unitManagementFeeConfigSchema.optional(),
     }),
     // Admin-only per-room shape — carries occupancy/tenant fields the portal
     // batch (`createPortalUnitsBatchSchema`, above) deliberately does not.
@@ -545,6 +592,7 @@ export const updateApartmentSharedSchema = z.object({
   publishedDescription: z.string().nullable().optional(),
   publishedTitle: z.string().nullable().optional(),
   partitionBillingMode: partitionBillingModeSchema.optional(),
+  tnbSubsidyCapMonthly: tnbSubsidyCapMonthlySchema.optional(),
   // Owner of the apartment — propagated to every non-archived sibling listing
   // so a partitioned apartment can never hold two owners. Mirrors the
   // ownerPartyId field at listing level (updateUnitSchema ~line 77).

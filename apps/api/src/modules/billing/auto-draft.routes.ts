@@ -4,7 +4,7 @@ import type { ZodError } from "zod";
 import type { SessionPayload } from "../../lib/auth";
 import type { AdminRole } from "../../lib/rbac";
 import { isPhase2FlagEnabled } from "../../lib/feature-flags";
-import { requireRole } from "../../middleware/require-role";
+import { requirePermission } from "../../middleware/require-permission";
 import { formatZodError } from "../../lib/zod-error-mapper";
 import {
   draftConfigCreateSchema,
@@ -68,17 +68,17 @@ function out<T>(
 
 // ── DraftConfig ──────────────────────────────────────────────────────────────
 
-autoDraftRoutes.get("/draft-config", requireRole("editor"), async (c) =>
+autoDraftRoutes.get("/draft-config", requirePermission("billing.view"), async (c) =>
   out(c, await getDraftConfigService(ctxOf(c))),
 );
 
-autoDraftRoutes.post("/draft-config", requireRole("admin"), async (c) => {
+autoDraftRoutes.post("/draft-config", requirePermission("billing.period_manage"), async (c) => {
   const p = draftConfigCreateSchema.safeParse(await c.req.json().catch(() => null));
   if (!p.success) return zerr(c, p.error);
   return out(c, await createDraftConfigService(ctxOf(c), p.data));
 });
 
-autoDraftRoutes.patch("/draft-config/:id", requireRole("admin"), async (c) => {
+autoDraftRoutes.patch("/draft-config/:id", requirePermission("billing.period_manage"), async (c) => {
   const p = draftConfigPatchSchema.safeParse(await c.req.json().catch(() => null));
   if (!p.success) return zerr(c, p.error);
   return out(c, await patchDraftConfigService(ctxOf(c), c.req.param("id"), p.data));
@@ -87,13 +87,13 @@ autoDraftRoutes.patch("/draft-config/:id", requireRole("admin"), async (c) => {
 // ── InvoiceDraftRun ──────────────────────────────────────────────────────────
 
 // POST /draft-runs = manager (manual trigger; same logic as the cron)
-autoDraftRoutes.post("/draft-runs", requireRole("manager"), async (c) => {
+autoDraftRoutes.post("/draft-runs", requirePermission("billing.period_manage"), async (c) => {
   const p = triggerRunSchema.safeParse(await c.req.json().catch(() => null));
   if (!p.success) return zerr(c, p.error);
   return out(c, await triggerRunService(ctxOf(c), p.data.periodMonth));
 });
 
-autoDraftRoutes.get("/draft-runs", requireRole("editor"), async (c) => {
+autoDraftRoutes.get("/draft-runs", requirePermission("billing.view"), async (c) => {
   const p = runListQuerySchema.safeParse(c.req.query());
   if (!p.success) return zerr(c, p.error);
   return out(c, await listDraftRunsService(ctxOf(c), p.data));
@@ -102,29 +102,29 @@ autoDraftRoutes.get("/draft-runs", requireRole("editor"), async (c) => {
 // GET /draft-runs/gaps — billing months that were never drafted.
 // MUST stay declared BEFORE /draft-runs/:id, or Hono matches "gaps" as :id and
 // this returns a 404 "Draft run not found" instead.
-autoDraftRoutes.get("/draft-runs/gaps", requireRole("editor"), async (c) => {
+autoDraftRoutes.get("/draft-runs/gaps", requirePermission("billing.view"), async (c) => {
   const p = billingGapsQuerySchema.safeParse(c.req.query());
   if (!p.success) return zerr(c, p.error);
   return out(c, await findBillingGapsService(ctxOf(c), { lookbackMonths: p.data.lookbackMonths }));
 });
 
-autoDraftRoutes.get("/draft-runs/:id", requireRole("editor"), async (c) =>
+autoDraftRoutes.get("/draft-runs/:id", requirePermission("billing.view"), async (c) =>
   out(c, await getDraftRunService(ctxOf(c), c.req.param("id"))),
 );
 
 // ── Invoice queue ────────────────────────────────────────────────────────────
 
-autoDraftRoutes.get("/invoices", requireRole("editor"), async (c) => {
+autoDraftRoutes.get("/invoices", requirePermission("billing.view"), async (c) => {
   const p = invoiceQueueQuerySchema.safeParse(c.req.query());
   if (!p.success) return zerr(c, p.error);
   return out(c, await listDraftInvoicesService(ctxOf(c), p.data));
 });
 
-autoDraftRoutes.get("/invoices/:id", requireRole("editor"), async (c) =>
+autoDraftRoutes.get("/invoices/:id", requirePermission("billing.view"), async (c) =>
   out(c, await getDraftInvoiceService(ctxOf(c), c.req.param("id"))),
 );
 
-autoDraftRoutes.patch("/invoices/:id", requireRole("editor"), async (c) => {
+autoDraftRoutes.patch("/invoices/:id", requirePermission("billing.charge.edit"), async (c) => {
   const p = editInvoiceDatesSchema.safeParse(await c.req.json().catch(() => null));
   if (!p.success) return zerr(c, p.error);
   // dueDate from the schema is string | null | undefined; the service expects string | undefined.
@@ -133,17 +133,17 @@ autoDraftRoutes.patch("/invoices/:id", requireRole("editor"), async (c) => {
   return out(c, await editInvoiceDatesService(ctxOf(c), c.req.param("id"), patch));
 });
 
-autoDraftRoutes.post("/invoices/:id/charges", requireRole("editor"), async (c) => {
+autoDraftRoutes.post("/invoices/:id/charges", requirePermission("billing.charge.edit"), async (c) => {
   const p = attachChargeSchema.safeParse(await c.req.json().catch(() => null));
   if (!p.success) return zerr(c, p.error);
   return out(c, await attachChargeService(ctxOf(c), c.req.param("id"), p.data.chargeId));
 });
 
-autoDraftRoutes.delete("/invoices/:id/charges/:chargeId", requireRole("editor"), async (c) =>
+autoDraftRoutes.delete("/invoices/:id/charges/:chargeId", requirePermission("billing.charge.edit"), async (c) =>
   out(c, await detachChargeService(ctxOf(c), c.req.param("id"), c.req.param("chargeId"))),
 );
 
-autoDraftRoutes.patch("/invoices/:id/charges/:chargeId/amount", requireRole("manager"), async (c) => {
+autoDraftRoutes.patch("/invoices/:id/charges/:chargeId/amount", requirePermission("billing.charge.edit"), async (c) => {
   const p = editDraftChargeAmountSchema.safeParse(await c.req.json().catch(() => null));
   if (!p.success) return zerr(c, p.error);
   return out(c, await editDraftChargeAmountService(
@@ -153,19 +153,19 @@ autoDraftRoutes.patch("/invoices/:id/charges/:chargeId/amount", requireRole("man
 
 // IMPORTANT: register /invoices/approve-bulk BEFORE /invoices/:id/approve
 // so "approve-bulk" is not captured as the :id param.
-autoDraftRoutes.post("/invoices/approve-bulk", requireRole("manager"), async (c) => {
+autoDraftRoutes.post("/invoices/approve-bulk", requirePermission("billing.bill"), async (c) => {
   const p = approveBulkSchema.safeParse(await c.req.json().catch(() => null));
   if (!p.success) return zerr(c, p.error);
   return out(c, await approveBulkService(ctxOf(c), p.data.ids));
 });
 
-autoDraftRoutes.post("/invoices/:id/approve", requireRole("manager"), async (c) => {
+autoDraftRoutes.post("/invoices/:id/approve", requirePermission("billing.bill"), async (c) => {
   const p = approveOneSchema.safeParse(await c.req.json().catch(() => null));
   if (!p.success) return zerr(c, p.error);
   return out(c, await approveInvoiceService(ctxOf(c), c.req.param("id"), p.data.expectedUpdatedAt));
 });
 
-autoDraftRoutes.post("/invoices/:id/void", requireRole("manager"), async (c) => {
+autoDraftRoutes.post("/invoices/:id/void", requirePermission("billing.rebill"), async (c) => {
   const p = voidInvoiceSchema.safeParse(await c.req.json().catch(() => null));
   if (!p.success) return zerr(c, p.error);
   return out(c, await voidInvoiceService(ctxOf(c), c.req.param("id"), p.data.expectedUpdatedAt, p.data.reason));

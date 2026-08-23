@@ -11,7 +11,7 @@ import { MemoryRouter, useLocation } from "react-router-dom";
 import { AuthContext, type User } from "@/lib/auth";
 import { ApiError } from "@/lib/api-client";
 import { GRID_QUERY_KEY_ROOT, type BearerConfigDto, type GridSubRow } from "@/api/bills-grid";
-import { SettingDrawer } from "../setting-drawer";
+import { SettingDrawer, type SettingDrawerProps } from "../setting-drawer";
 
 vi.mock("sonner", () => ({
   toast: { success: vi.fn(), error: vi.fn() },
@@ -53,10 +53,9 @@ vi.mock("@/api/meter", () => ({
   useCreateMeter: () => ({ mutate: mockCreateMutate, isPending: false }),
 }));
 
-// Flag-OFF (the default here) renders the LEGACY bearer-config form incl. the cleaning-amount
-// round-trip + the top Cleaning/WiFi bearer selectors. Flag-ON hides those (cleaning & WiFi are
-// owned by the RecurringSettings editor) — a controllable mock drives both. The recurring editor
-// has its own suite (recurring-settings.test.tsx).
+// Flag-OFF (the default here) renders the legacy cleaning-amount field. Cleaning/WiFi
+// are owner-only in both flag states; flag-ON adds their recurring controls. The recurring
+// editor has its own suite (recurring-settings.test.tsx).
 // The flag NAME is forwarded (2026-07-27) so a test can distinguish the drawer's two flags:
 // ENABLE_PHASE2_BILLING_DOCS (recurring editor) and ENABLE_CHARGE_NATURE_ROUTING (Profit/Expense
 // selectors). Existing `mockRecurringFlag.mockReturnValue(x)` calls are unaffected — a vi.fn()
@@ -100,12 +99,17 @@ function LocationProbe() {
 
 function renderDrawer(
   role: User["role"],
-  overrides: { open?: boolean; subRows?: GridSubRow[]; isWholeUnit?: boolean } = {},
+  overrides: Partial<Omit<SettingDrawerProps, "apartmentId" | "onClose">> = {},
 ) {
   const queryClient = new QueryClient({
     defaultOptions: { queries: { retry: false, gcTime: 0 }, mutations: { retry: false } },
   });
-  const user: User = { id: "u1", fullName: "Test", email: "t@t.com", role, orgId: "org-1" };
+  const permissions = role === "manager" || role === "admin"
+    ? ["billing.charge.edit", "tenancy.edit"]
+    : role === "editor"
+      ? ["tenancy.edit"]
+      : [];
+  const user: User = { id: "u1", fullName: "Test", email: "t@t.com", role, orgId: "org-1", permissions };
   const onClose = vi.fn();
   render(
     <QueryClientProvider client={queryClient}>
@@ -117,6 +121,9 @@ function renderDrawer(
             onClose={onClose}
             subRows={overrides.subRows}
             isWholeUnit={overrides.isWholeUnit}
+            managementFee={overrides.managementFee}
+            ownerAssigned={overrides.ownerAssigned}
+            onOpenManagementFee={overrides.onOpenManagementFee}
           />
           <LocationProbe />
         </MemoryRouter>
@@ -143,6 +150,29 @@ beforeEach(() => {
 });
 
 describe("SettingDrawer", () => {
+  it("exposes Management Fee configuration from the unit setting drawer", async () => {
+    mockGetBearerConfig.mockResolvedValue(defaultDto());
+    const onOpenManagementFee = vi.fn();
+
+    renderDrawer("manager", {
+      ownerAssigned: true,
+      managementFee: {
+        nonSst: "250.00",
+        sst: "20.00",
+        total: "270.00",
+        configured: true,
+        status: "chargeable",
+      },
+      onOpenManagementFee,
+    });
+
+    expect(await screen.findByText("Management Fee")).toBeVisible();
+    expect(screen.getByText("Configured")).toBeVisible();
+    expect(screen.getByText("RM 270.00")).toBeVisible();
+    await userEvent.click(screen.getByRole("button", { name: "Open Management Fee settings" }));
+    expect(onOpenManagementFee).toHaveBeenCalledTimes(1);
+  });
+
   it("seeds", async () => {
     mockGetBearerConfig.mockResolvedValue(defaultDto());
 
@@ -168,8 +198,10 @@ describe("SettingDrawer", () => {
       return checked?.textContent ?? null;
     }
 
-    expect(checkedOptionLabel("Cleaning bearer")).toBe("Owner");
-    expect(checkedOptionLabel("WiFi bearer")).toBe("Owner");
+    expect(screen.queryByRole("radiogroup", { name: "Cleaning bearer" })).toBeNull();
+    expect(screen.queryByRole("radiogroup", { name: "WiFi bearer" })).toBeNull();
+    expect(screen.getByText(/Cleaning is owner-borne/)).toBeInTheDocument();
+    expect(screen.getByText(/WiFi is owner-borne/)).toBeInTheDocument();
     // Maintenance has NO bearer control (2026-08-03) — it is always owner-borne, and the
     // Segmented that used to sit here was hardwired disabled with a no-op onChange.
     expect(screen.queryByRole("radiogroup", { name: "Maintenance bearer" })).toBeNull();
@@ -286,8 +318,7 @@ describe("SettingDrawer", () => {
 
     const tnbGroup = screen.getByRole("radiogroup", { name: "TNB pattern" });
     expect(tnbGroup).toHaveAttribute("aria-disabled", "true");
-    const cleaningGroup = screen.getByRole("radiogroup", { name: "Cleaning bearer" });
-    expect(cleaningGroup).toHaveAttribute("aria-disabled", "true");
+    expect(screen.queryByRole("radiogroup", { name: "Cleaning bearer" })).toBeNull();
     expect(screen.getByLabelText("Cleaning recurring amount (RM)")).toBeDisabled();
     expect(screen.getByRole("button", { name: "Save" })).toBeDisabled();
   });
@@ -699,10 +730,7 @@ describe("SettingDrawer — PAX per room (partition units)", () => {
     expect(mockPaxMutate).not.toHaveBeenCalled();
   });
 
-  // Rewire (dedupe "two cleaning / two WiFi"): flag-ON, cleaning & WiFi are owned end-to-end
-  // by the RecurringSettings editor (amount + Borne by + enabled), so the top bearer selectors
-  // are hidden. The values still round-trip unchanged on Save (schema stays satisfied; the
-  // recurring def's bearer is what drives allocation for a governed month — repository.ts).
+  // Flag-ON adds recurring amount controls while Cleaning/WiFi stay owner-only.
   //
   // ── charge-nature gate (2026-07-27): the FIRST assertion below is INVERTED, deliberately ─────
   // Hiding the selectors whenever the flag was on assumed the recurring editor always owns
@@ -713,16 +741,17 @@ describe("SettingDrawer — PAX per room (partition units)", () => {
   // to say otherwise. The controls now render whenever the kind is UNGOVERNED, and go read-only
   // (not absent) when it is governed — so there is still exactly ONE writable source of truth.
   describe("recurring flag ON — cleaning & WiFi move to the recurring editor", () => {
-    it("shows Cleaning & WiFi Borne-by + Nature when UNGOVERNED, hides the legacy cleaning-amount field, keeps TNB/AIR/Maintenance and the recurring editor", async () => {
+    it("shows owner-only Cleaning/WiFi with Nature when UNGOVERNED, hides the legacy cleaning-amount field, and keeps the recurring controls", async () => {
       mockRecurringFlag.mockReturnValue(true);
       mockGetBearerConfig.mockResolvedValue({ ...defaultDto(), cleaningGoverned: false, wifiGoverned: false });
 
       renderDrawer("manager");
 
       await screen.findByRole("radiogroup", { name: "TNB pattern" }); // form loaded
-      // Ungoverned ⇒ present AND editable: this is the control whose absence caused the bug.
-      expect(screen.getByRole("radiogroup", { name: "Cleaning bearer" })).not.toHaveAttribute("aria-disabled", "true");
-      expect(screen.getByRole("radiogroup", { name: "WiFi bearer" })).not.toHaveAttribute("aria-disabled", "true");
+      expect(screen.queryByRole("radiogroup", { name: "Cleaning bearer" })).toBeNull();
+      expect(screen.queryByRole("radiogroup", { name: "WiFi bearer" })).toBeNull();
+      expect(screen.getByText(/Cleaning is owner-borne/)).toBeInTheDocument();
+      expect(screen.getByText(/WiFi is owner-borne/)).toBeInTheDocument();
       expect(screen.getByRole("radiogroup", { name: "Cleaning nature" })).toBeInTheDocument();
       expect(screen.getByRole("radiogroup", { name: "WiFi nature" })).toBeInTheDocument();
       expect(screen.queryByLabelText("Cleaning recurring amount (RM)")).toBeNull();
@@ -734,11 +763,7 @@ describe("SettingDrawer — PAX per room (partition units)", () => {
       expect(screen.getByTestId("recurring-editor")).toBeInTheDocument();
     });
 
-    // Amount-only governance (2026-07-27): a recurring definition fixes the AMOUNT, so the
-    // nature it snapshots is read-only here — but the BEARER stays this drawer's to set.
-    // Previously both were locked, which made the drawer's Owner/Tenant toggle silently
-    // ineffective on any governed unit (two writers, one fact).
-    it("governed by a recurring definition: nature is read-only, bearer stays editable", async () => {
+    it("governed by a recurring definition: nature is read-only and bearer stays owner-only", async () => {
       mockRecurringFlag.mockReturnValue(true);
       mockGetBearerConfig.mockResolvedValue({ ...defaultDto(), cleaningGoverned: true, wifiGoverned: true });
 
@@ -747,15 +772,15 @@ describe("SettingDrawer — PAX per room (partition units)", () => {
       await screen.findByRole("radiogroup", { name: "TNB pattern" });
       expect(screen.getByRole("radiogroup", { name: "Cleaning nature" })).toHaveAttribute("aria-disabled", "true");
       expect(screen.getByRole("radiogroup", { name: "WiFi nature" })).toHaveAttribute("aria-disabled", "true");
-      expect(screen.getByRole("radiogroup", { name: "Cleaning bearer" })).not.toHaveAttribute("aria-disabled", "true");
-      expect(screen.getByRole("radiogroup", { name: "WiFi bearer" })).not.toHaveAttribute("aria-disabled", "true");
+      expect(screen.queryByRole("radiogroup", { name: "Cleaning bearer" })).toBeNull();
+      expect(screen.queryByRole("radiogroup", { name: "WiFi bearer" })).toBeNull();
     });
 
     // ── charge-nature routing OFF (2026-07-27) ────────────────────────────────────────────────
     // This drawer used to render the Profit/Expense selectors UNCONDITIONALLY — the only nature
     // surface that did. With routing off the Bill ignores nature entirely, so asking the admin to
     // pick one was a control whose answer went nowhere. Owner/Tenant is the whole decision now.
-    it("nature routing OFF: Cleaning/WiFi show ONLY the Owner/Tenant choice — no Profit/Expense selector", async () => {
+    it("nature routing OFF: Cleaning/WiFi show only the fixed Owner bearer", async () => {
       mockRecurringFlag.mockImplementation((flag: string) => flag !== "ENABLE_CHARGE_NATURE_ROUTING");
       mockGetBearerConfig.mockResolvedValue({ ...defaultDto(), cleaningGoverned: false, wifiGoverned: false });
 
@@ -764,15 +789,13 @@ describe("SettingDrawer — PAX per room (partition units)", () => {
       await screen.findByRole("radiogroup", { name: "TNB pattern" });
       expect(screen.queryByRole("radiogroup", { name: "Cleaning nature" })).toBeNull();
       expect(screen.queryByRole("radiogroup", { name: "WiFi nature" })).toBeNull();
-      // The bearer choice survives and stays writable — that IS the simplified control.
-      expect(screen.getByRole("radiogroup", { name: "Cleaning bearer" })).not.toHaveAttribute("aria-disabled", "true");
-      expect(screen.getByRole("radiogroup", { name: "WiFi bearer" })).not.toHaveAttribute("aria-disabled", "true");
+      expect(screen.queryByRole("radiogroup", { name: "Cleaning bearer" })).toBeNull();
+      expect(screen.queryByRole("radiogroup", { name: "WiFi bearer" })).toBeNull();
+      expect(screen.getByText(/Cleaning is owner-borne/)).toBeInTheDocument();
+      expect(screen.getByText(/WiFi is owner-borne/)).toBeInTheDocument();
     });
 
-    // With routing off there is no nature control at all, so a governed unit shows ONLY the
-    // bearer toggle — and it must still be editable. This is the end state the simplification
-    // aims at: one question per row, always answerable, whatever the recurring tick says.
-    it("nature routing OFF + governed: only the bearer toggle renders, and it stays editable", async () => {
+    it("nature routing OFF + governed: no nature or tenant-bearer controls render", async () => {
       mockRecurringFlag.mockImplementation((flag: string) => flag !== "ENABLE_CHARGE_NATURE_ROUTING");
       mockGetBearerConfig.mockResolvedValue({ ...defaultDto(), cleaningGoverned: true, wifiGoverned: true });
 
@@ -781,8 +804,8 @@ describe("SettingDrawer — PAX per room (partition units)", () => {
       await screen.findByRole("radiogroup", { name: "TNB pattern" });
       expect(screen.queryByRole("radiogroup", { name: "Cleaning nature" })).toBeNull();
       expect(screen.queryByRole("radiogroup", { name: "WiFi nature" })).toBeNull();
-      expect(screen.getByRole("radiogroup", { name: "Cleaning bearer" })).not.toHaveAttribute("aria-disabled", "true");
-      expect(screen.getByRole("radiogroup", { name: "WiFi bearer" })).not.toHaveAttribute("aria-disabled", "true");
+      expect(screen.queryByRole("radiogroup", { name: "Cleaning bearer" })).toBeNull();
+      expect(screen.queryByRole("radiogroup", { name: "WiFi bearer" })).toBeNull();
     });
 
     // ── Recurring tick + amount (2026-07-28) ────────────────────────────────────────────────
@@ -866,7 +889,7 @@ describe("SettingDrawer — PAX per room (partition units)", () => {
       const user = userEvent.setup();
       renderDrawer("manager");
       await screen.findByRole("radiogroup", { name: "TNB pattern" });
-      await user.click(within(screen.getByRole("radiogroup", { name: "WiFi nature" })).getByRole("radio", { name: "Not set" }));
+      await user.click(within(screen.getByRole("radiogroup", { name: "WiFi nature" })).getByText("Not set"));
       await user.click(screen.getByRole("button", { name: /^(Save|Unlock & save)$/ }));
 
       await waitFor(() => expect(mockSetBearerConfig).toHaveBeenCalledTimes(1));
@@ -874,7 +897,7 @@ describe("SettingDrawer — PAX per room (partition units)", () => {
       expect(mockSetBearerConfig.mock.calls[0][1].wifiNature).toBeNull();
     });
 
-    it("round-trips the hidden cleaningBearer/wifiBearer UNCHANGED on Save (no billing-math change)", async () => {
+    it("converts a legacy tenant Cleaning/WiFi config to the owner-only rule on Save", async () => {
       mockRecurringFlag.mockReturnValue(true);
       mockGetBearerConfig.mockResolvedValue({ ...defaultDto(), cleaningBearer: "tenant", wifiBearer: "tenant" });
       mockSetBearerConfig.mockResolvedValue({ id: "cfg-1", isLocked: true, updatedAt: "2026-07-01T00:00:00.000Z" });
@@ -886,7 +909,7 @@ describe("SettingDrawer — PAX per room (partition units)", () => {
       await user.click(screen.getByRole("button", { name: /^(Save|Unlock & save)$/ }));
 
       await waitFor(() => expect(mockSetBearerConfig).toHaveBeenCalledTimes(1));
-      expect(mockSetBearerConfig.mock.calls[0][1]).toMatchObject({ cleaningBearer: "tenant", wifiBearer: "tenant" });
+      expect(mockSetBearerConfig.mock.calls[0][1]).toMatchObject({ cleaningBearer: "owner", wifiBearer: "owner" });
     });
   });
 });

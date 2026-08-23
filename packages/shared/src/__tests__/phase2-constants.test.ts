@@ -36,7 +36,8 @@ describe("phase2 constants", () => {
     // ENABLE_AUTO_OFFSET_ON_RENT. A removal must trip this tripwire exactly as an
     // addition does — see the not.toContain guards below.
     // 31 after ADDING ENABLE_TENANCY_DEPOSIT_DOCS (move-in rental + utilities deposits).
-    const EXPECTED_FLAG_COUNT = 31;
+    // 32 after ADDING ENABLE_PROFORMA_INVOICES (pre-issue tenant documents).
+    const EXPECTED_FLAG_COUNT = 32;
     expect(PHASE2_FLAGS).toHaveLength(EXPECTED_FLAG_COUNT);
     for (const f of PHASE2_FLAGS) expect(f).toMatch(/^ENABLE_[A-Z0-9_]+$/);
     expect(new Set(PHASE2_FLAGS).size).toBe(EXPECTED_FLAG_COUNT);

@@ -47,11 +47,13 @@ describe("accounting nav section", () => {
     expect(items.map((i) => i.href).sort()).toEqual(["/accounting/invoices", "/accounting/receipts"]);
     for (const i of items) expect(i.workspace).toBe("accounting");
   });
-  it("accountant sees them; editor does not", async () => {
+  it("uses the resolved accounting permission instead of trusting the role label", async () => {
     const { navSections, canSeeNavItemFor } = await loadNav();
     for (const i of accountingItems(navSections)) {
-      expect(canSeeNavItemFor("accountant", i)).toBe(true);
-      expect(canSeeNavItemFor("editor", i)).toBe(false);
+      expect(canSeeNavItemFor("accountant", i, ["accounting.view"])).toBe(true);
+      expect(canSeeNavItemFor("accountant", i, [])).toBe(false);
+      expect(canSeeNavItemFor("editor", i, [])).toBe(false);
+      expect(canSeeNavItemFor("editor", i, ["accounting.view"])).toBe(true);
     }
   });
 });

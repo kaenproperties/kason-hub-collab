@@ -69,6 +69,35 @@ describe("renderToHtml", () => {
     expect(html).toContain("IP 1.2.3.4");
   });
 
+  it("renders the owner payout report with the full legal name and company details", () => {
+    const html = renderToHtml({
+      template: {
+        ...TEMPLATE,
+        docType: "owner_statement",
+        title: "Owner Payout Report",
+        orgName: "KAEN PROPERTIES MANAGEMENT SDN BHD",
+        orgAddressLines: [
+          "No. 27-3, Jalan Perdana 10/12",
+          "Pandan Perdana, 55300 Kuala Lumpur",
+          "Malaysia",
+        ],
+        orgContact: "011-3611 1763",
+        logoUrl: null,
+      },
+      referenceCode: "OWNER-202608-A0303",
+      issuedDate: new Date("2026-08-23T00:00:00Z"),
+      bodyHtml: "<section><h3>Owner &amp; Payout Details</h3></section>",
+    });
+
+    expect(html).toContain("<body class='doc-owner-statement'>");
+    expect(html).toContain("<h1>KAEN PROPERTIES MANAGEMENT SDN BHD</h1>");
+    expect(html).toContain("No. 27-3, Jalan Perdana 10/12");
+    expect(html).toContain("Pandan Perdana, 55300 Kuala Lumpur");
+    expect(html).toContain("Email: kaenproperties@gmail.com");
+    expect(html).toContain("Contact: 011-3611 1763");
+    expect(html).toContain("Owner Payout Report");
+  });
+
   // Visual regression: keeps the rendered HTML byte-stable so any future
   // unintended layout/style change shows up as a snapshot diff in PR review.
   // Update via `npx vitest -u` ONLY after eyeballing the new PDF.

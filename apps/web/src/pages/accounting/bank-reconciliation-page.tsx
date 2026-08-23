@@ -1,5 +1,6 @@
 import { useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useSearchParams } from "react-router-dom";
 import ExcelJS from "exceljs";
 import { Landmark, Upload, Download, Link2, AlertTriangle, CheckCircle2, Plus, Trash2 } from "lucide-react";
 import { toast } from "sonner";
@@ -7,7 +8,7 @@ import { PageHeader, Surface } from "@/components/ui";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { addBankAccount, categorizeBankTransaction, getBankMatchCandidates, getBankReconciliationSummary, importBankTransactions, previewBankTransactions, listBankAccounts, listBankTransactions, type BankAccount, type BankTransaction, type ImportLine, type ImportPreview, type NewUnitCostItem } from "@/api/bank-reconciliation";
-import { useAuth } from "@/lib/auth";
+import { usePermission } from "@/components/permission-gate";
 
 type Tab = "unmatched" | "matched" | "review";
 const KEY = ["bank-reconciliation"] as const;
@@ -160,10 +161,16 @@ async function exportBankTransactions(rows: BankTransaction[], tab: Tab) {
 function rm(value: string | number) { return `RM ${Number(value).toLocaleString("en-MY", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`; }
 
 export default function BankReconciliationPage() {
-  const { user } = useAuth();
-  const canImport = user?.permissions?.includes("bank.import") ?? (user?.role === "admin" || user?.role === "accountant");
-  const canManageAccounts = user?.permissions?.includes("bank.manage_accounts") ?? (user?.role === "admin" || user?.role === "accountant");
-  const canCreateCosts = user?.permissions?.includes("cost.create_from_bank") ?? (user?.role === "admin" || user?.role === "manager" || user?.role === "accountant");
+  const [searchParams] = useSearchParams();
+  const requestedClaimId = searchParams.get("claim");
+  const canImport = usePermission("bank.import");
+  const canManageAccounts = usePermission("bank.manage_accounts");
+  const canCreateCosts = usePermission("cost.create_from_bank");
+  const canExport = usePermission("bank.export");
+  const canCategorize = usePermission("bank.categorize");
+  const canAllocateCredit = usePermission("bank.allocate_credit");
+  const canAllocateDebit = usePermission("bank.allocate_debit");
+  const canInternalTransfer = usePermission("bank.internal_transfer");
   const queryClient = useQueryClient();
   const [tab, setTab] = useState<Tab>("unmatched");
   const [accountId, setAccountId] = useState("all");
@@ -179,6 +186,8 @@ export default function BankReconciliationPage() {
   const transactions = useQuery({ queryKey: [...KEY, "transactions", tab, q, accountId], queryFn: () => listBankTransactions(tab, q, accountId === "all" ? "" : accountId) });
   const candidates = useQuery({ queryKey: [...KEY, "candidates"], queryFn: getBankMatchCandidates });
   const rows = transactions.data ?? [];
+  const requestedClaim = candidates.data?.employeeClaims.find((claim) => claim.id === requestedClaimId);
+  const visibleRows = requestedClaimId ? [...rows].sort((a, b) => Number(b.debit) - Number(a.debit)) : rows;
 
   return (
     <div className="space-y-5">
@@ -188,11 +197,16 @@ export default function BankReconciliationPage() {
       {!canImport && !canCreateCosts && <div className="rounded-xl border border-[#C9A35C] bg-[#FFF8E8] px-4 py-3 text-sm text-[#082B4F]"><strong>Limited access:</strong> You can allocate collections and categorise transactions. Import and actual-cost functions require an additional permission.</div>}
 
       <div className="grid gap-3 md:grid-cols-4">
-        <SummaryCard label="Unmatched payments" value={summary.data?.unmatched} tone="neutral" />
+        <SummaryCard label="Unmatched transactions" value={summary.data?.unmatched} tone="neutral" />
         <SummaryCard label="Needs review" value={summary.data?.review} tone="warning" />
         <SummaryCard label="Costs awaiting charge" value={summary.data?.chargeRequired} tone="danger" />
         <SummaryCard label="Non-operational transfers" value={summary.data?.nonOperationalTransfers} tone="neutral" />
       </div>
+
+      {requestedClaimId && <div className="rounded-xl border-2 border-[var(--gold)] bg-[#FFF8E8] px-5 py-4 text-[var(--navy-text)] shadow-sm">
+        <div className="flex flex-wrap items-center justify-between gap-3"><div><strong className="text-lg">Match employee reimbursement{requestedClaim ? ` · ${requestedClaim.expenseNumber}` : ""}</strong><p className="mt-1 text-sm">{requestedClaim ? `${requestedClaim.claimantName ?? "Employee"} · ${requestedClaim.description ?? "Employee claim"} · Remaining ${rm(Math.max(0, Number(requestedClaim.totalAmount) - Number(requestedClaim.reimbursedAmount)))}` : "This claim is no longer awaiting reimbursement."}</p></div><span className="rounded-lg bg-white px-3 py-2 text-sm font-bold">1. Pay employee → 2. Import bank Debit → 3. Categorise that Debit</span></div>
+        {requestedClaim && !rows.some((row) => Number(row.debit) > 0) && <p className="mt-3 rounded-lg border border-amber-400 bg-white px-3 py-2 font-semibold text-amber-900">No unmatched bank Debit is available yet. Import the reimbursement payment from the bank first; this claim will then appear automatically under “Match existing costs”.</p>}
+      </div>}
 
       <Surface className="p-3">
         <div className="mb-2 text-sm font-bold uppercase tracking-wide text-[var(--navy-text)]">Bank accounts</div>
@@ -213,13 +227,13 @@ export default function BankReconciliationPage() {
           <div className="flex gap-2" role="tablist">
             {(["unmatched", "matched", "review"] as Tab[]).map((value) => <Button key={value} variant={tab === value ? "default" : "outline"} onClick={() => setTab(value)} className="capitalize">{value}</Button>)}
           </div>
-          <div className="flex items-center gap-2"><Button variant="outline" disabled={!rows.length} onClick={() => void exportBankTransactions(rows, tab)}><Download className="mr-2 h-4 w-4" />Export Excel</Button><input value={q} onChange={(e) => setQ(e.target.value)} placeholder="Search description" className="h-11 min-w-80 rounded-lg border border-[var(--input-border)] bg-white px-4 text-[16px] text-[var(--navy-text)]" /></div>
+          <div className="flex items-center gap-2">{canExport && <Button variant="outline" disabled={!rows.length} onClick={() => void exportBankTransactions(rows, tab)}><Download className="mr-2 h-4 w-4" />Export Excel</Button>}<input value={q} onChange={(e) => setQ(e.target.value)} placeholder="Search description" className="h-11 min-w-80 rounded-lg border border-[var(--input-border)] bg-white px-4 text-[16px] text-[var(--navy-text)]" /></div>
         </div>
         <div className="overflow-x-auto">
           <table className="w-full table-fixed border-collapse text-[13px] text-[var(--navy-text)]">
             <colgroup><col className="w-[7%]" /><col className="w-[10%]" /><col className="w-[20%]" /><col className="w-[8%]" /><col className="w-[8%]" /><col className="w-[9%]" /><col className="w-[11%]" /><col className="w-[10%]" /><col className="w-[8%]" /><col className="w-[9%]" /></colgroup>
             <thead className="bg-[var(--table-header)] text-[var(--navy-text)]"><tr>{["Date", "Bank", "Description", "Debit", "Credit", "Bank Balance", "Unit", "Classification", "Status", "Action"].map((label) => <th key={label} className="h-16 whitespace-nowrap border border-[var(--border)] px-3 py-3 text-center text-[17px] font-extrabold">{label}</th>)}</tr></thead>
-            <tbody>{rows.map((row, index) => <tr key={row.id} className={`${index % 2 ? "bg-[var(--page-bg)]/50" : "bg-white"} hover:bg-[var(--table-header)]/60`}>
+            <tbody>{visibleRows.map((row, index) => <tr key={row.id} className={`${index % 2 ? "bg-[var(--page-bg)]/50" : "bg-white"} hover:bg-[var(--table-header)]/60`}>
               <td className="h-20 whitespace-nowrap border border-[var(--border)] px-4 py-3 text-center font-semibold">{row.transactionDate.slice(0, 10)}</td>
               <td className="h-20 border border-[var(--border)] px-4 py-3 text-center"><div className="whitespace-nowrap font-bold">{row.account.bankName}</div>{row.account.nickname && row.account.nickname !== row.account.bankName && <div className="mt-1 truncate text-sm text-muted-foreground">{row.account.nickname}</div>}</td>
               <td className="h-20 border border-[var(--border)] px-5 py-3 text-left text-[17px] font-semibold leading-snug">{row.description}</td>
@@ -229,7 +243,11 @@ export default function BankReconciliationPage() {
               <td className="h-20 border border-[var(--border)] px-4 py-3 text-center font-semibold">{row.unitLabel || "—"}</td>
               <td className="h-20 border border-[var(--border)] px-4 py-3 text-center font-semibold"><span className="block">{transactionClassification(row) || "—"}</span>{row.transactionCategory === "non_operational_transfer" && <small className="mt-1 block font-normal text-muted-foreground">{transferPurposeLabel(row.transferPurpose)} → {row.destinationAccount}</small>}{row.transactionCategory === "internal_bank_transfer" && <small className="mt-1 block font-normal text-muted-foreground">Paired with {row.destinationAccount}</small>}</td>
               <td className="h-20 border border-[var(--border)] px-3 py-3 text-center"><Status row={row} /></td>
-              <td className="h-20 border border-[var(--border)] px-2 py-2 text-center"><div className="flex flex-col items-center gap-1"><Button className="whitespace-nowrap" variant="outline" onClick={() => row.transactionCategory === "internal_bank_transfer" ? setInternalTransferTarget(row) : row.costAllocations.length || row.collectionAllocations.length ? setAllocationTarget(row) : Number(row.debit) > 0 ? setCostTarget(row) : setTarget(row)}><Link2 className="mr-2 h-4 w-4" />{row.transactionCategory === "internal_bank_transfer" ? "View transfer" : row.costAllocations.length || row.collectionAllocations.length ? `View ${row.costAllocations.length + row.collectionAllocations.length} matches` : "Categorise"}</Button>{row.status !== "matched" && <button type="button" className="font-semibold text-blue-700 underline" onClick={() => setInternalTransferTarget(row)}>Internal transfer</button>}</div></td>
+              <td className="h-20 border border-[var(--border)] px-2 py-2 text-center"><div className="flex flex-col items-center gap-1">
+                {(row.transactionCategory === "internal_bank_transfer" || row.costAllocations.length > 0 || row.collectionAllocations.length > 0 || (Number(row.debit) > 0 ? (canAllocateDebit || canCategorize) : (canAllocateCredit || canCategorize))) && <Button className="whitespace-nowrap" variant="outline" onClick={() => row.transactionCategory === "internal_bank_transfer" ? setInternalTransferTarget(row) : row.costAllocations.length || row.collectionAllocations.length ? setAllocationTarget(row) : Number(row.debit) > 0 ? setCostTarget(row) : setTarget(row)}><Link2 className="mr-2 h-4 w-4" />{row.transactionCategory === "internal_bank_transfer" ? "View transfer" : row.costAllocations.length || row.collectionAllocations.length ? `View ${row.costAllocations.length + row.collectionAllocations.length} matches` : "Categorise"}</Button>}
+                {row.status !== "matched" && canInternalTransfer && <button type="button" className="font-semibold text-blue-700 underline" onClick={() => setInternalTransferTarget(row)}>Internal transfer</button>}
+                {row.status !== "matched" && !(Number(row.debit) > 0 ? (canAllocateDebit || canCategorize) : (canAllocateCredit || canCategorize)) && !canInternalTransfer && <span className="text-xs text-muted-foreground">View only</span>}
+              </div></td>
             </tr>)}</tbody>
           </table>
           {!transactions.isLoading && rows.length === 0 && <p className="p-10 text-center text-muted-foreground">No {tab} transactions.</p>}
@@ -239,7 +257,7 @@ export default function BankReconciliationPage() {
       <AccountDialog open={accountOpen} onClose={() => setAccountOpen(false)} onSaved={(account) => { setAccountId(account.id); queryClient.invalidateQueries({ queryKey: [...KEY, "accounts"] }); }} />
       <ImportDialog key={`${importOpen}-${accountId}`} open={importOpen} accounts={accounts.data ?? []} initialAccountId={accountId === "all" ? "" : accountId} onClose={() => setImportOpen(false)} onImported={() => { queryClient.invalidateQueries({ queryKey: KEY }); setImportOpen(false); }} />
       <CategoriseDialog key={target?.id ?? "closed"} target={target} candidates={candidates.data} onClose={() => setTarget(null)} onSaved={() => { queryClient.invalidateQueries({ queryKey: KEY }); setTarget(null); }} />
-      <CostAllocationDialog key={costTarget?.id ?? "cost-closed"} target={costTarget} candidates={candidates.data} canCreateCosts={canCreateCosts} onClose={() => setCostTarget(null)} onSaved={() => { queryClient.invalidateQueries({ queryKey: KEY }); setCostTarget(null); }} />
+      <CostAllocationDialog key={costTarget?.id ?? "cost-closed"} target={costTarget} candidates={candidates.data} preferredTargetId={requestedClaimId} canCreateCosts={canCreateCosts} onClose={() => setCostTarget(null)} onSaved={() => { queryClient.invalidateQueries({ queryKey: KEY }); setCostTarget(null); }} />
       <AllocationDetailsDialog target={allocationTarget} onClose={() => setAllocationTarget(null)} />
       <InternalTransferDialog target={internalTransferTarget} candidates={candidates.data?.bankTransfers ?? []} onClose={() => setInternalTransferTarget(null)} onSaved={() => { queryClient.invalidateQueries({ queryKey: KEY }); setInternalTransferTarget(null); }} />
     </div>
@@ -292,22 +310,26 @@ function VerificationMetric({ label, value, tone }: { label: string; value: numb
   return <div className={`rounded-lg border bg-white p-3 ${tone === "bad" ? "border-red-400" : tone === "good" ? "border-emerald-300" : "border-[var(--border)]"}`}><div className="text-sm text-muted-foreground">{label}</div><div className={`text-2xl font-extrabold ${tone === "bad" ? "text-red-700" : "text-[var(--navy-text)]"}`}>{value}</div></div>;
 }
 
-function CostAllocationDialog({ target, candidates, canCreateCosts, onClose, onSaved }: { target: BankTransaction | null; candidates?: Awaited<ReturnType<typeof getBankMatchCandidates>>; canCreateCosts: boolean; onClose: () => void; onSaved: () => void }) {
+function CostAllocationDialog({ target, candidates, preferredTargetId, canCreateCosts, onClose, onSaved }: { target: BankTransaction | null; candidates?: Awaited<ReturnType<typeof getBankMatchCandidates>>; preferredTargetId?: string | null; canCreateCosts: boolean; onClose: () => void; onSaved: () => void }) {
   type DraftUnitCost = NewUnitCostItem & { key: string };
   const currentMonth = new Date().toISOString().slice(0, 7);
   const blankItem = (): DraftUnitCost => ({ key: crypto.randomUUID(), apartmentId: "", billingMonth: currentMonth, bearer: "owner", costType: "tnb", description: "Utility bulk payment", amount: "", withSST: false });
+  const targets = useMemo(() => [
+    ...(candidates?.expenses ?? []).map((item) => ({ key: `grid_expense:${item.id}`, targetType: "grid_expense" as const, targetId: item.id, label: `${item.periodMonth} · ${item.description}`, detail: `Unit cost · ${rm(item.actualCost ?? item.amount)} · Paid ${rm(item.paidCost)}`, remaining: Math.max(0, Number(item.actualCost ?? item.amount) - Number(item.paidCost)) })),
+    ...(candidates?.employeeClaims ?? []).map((item) => ({ key: `employee_claim:${item.id}`, targetType: "employee_claim" as const, targetId: item.id, label: `${item.expenseNumber} · ${item.claimantName ?? "Employee"}`, detail: item.description ?? "Employee claim reimbursement", remaining: Math.max(0, Number(item.totalAmount) - Number(item.reimbursedAmount)) })),
+  ].filter((item) => item.remaining > 0.009), [candidates]);
   const [mode, setMode] = useState<"existing" | "new" | "non_operational" | "internal_transfer">(target?.transactionCategory === "internal_bank_transfer" ? "internal_transfer" : target?.transactionCategory === "non_operational_transfer" ? "non_operational" : "existing");
-  const [amounts, setAmounts] = useState<Record<string, string>>({});
+  const [amounts, setAmounts] = useState<Record<string, string>>(() => {
+    const preferred = targets.find((item) => item.targetType === "employee_claim" && item.targetId === preferredTargetId);
+    if (!preferred || Number(target?.debit ?? 0) <= 0) return {};
+    return { [preferred.key]: Math.min(preferred.remaining, Number(target?.debit ?? 0)).toFixed(2) };
+  });
   const [unitItems, setUnitItems] = useState<DraftUnitCost[]>([blankItem()]);
   const [notes, setNotes] = useState("");
   const [destinationAccount, setDestinationAccount] = useState(target?.destinationAccount ?? "");
   const [transferPurpose, setTransferPurpose] = useState<NonNullable<BankTransaction["transferPurpose"]>>(target?.transferPurpose ?? "payroll_funding");
   const [counterpartTransactionId, setCounterpartTransactionId] = useState("");
   const transferCandidates = (candidates?.bankTransfers ?? []).filter((row) => row.id !== target?.id && row.accountId !== target?.accountId && Number(row.credit) > 0 && Math.abs(Number(row.credit) - Number(target?.debit ?? 0)) < 0.009);
-  const targets = useMemo(() => [
-    ...(candidates?.expenses ?? []).map((item) => ({ key: `grid_expense:${item.id}`, targetType: "grid_expense" as const, targetId: item.id, label: `${item.periodMonth} · ${item.description}`, detail: `Unit cost · ${rm(item.actualCost ?? item.amount)} · Paid ${rm(item.paidCost)}`, remaining: Math.max(0, Number(item.actualCost ?? item.amount) - Number(item.paidCost)) })),
-    ...(candidates?.employeeClaims ?? []).map((item) => ({ key: `employee_claim:${item.id}`, targetType: "employee_claim" as const, targetId: item.id, label: `${item.expenseNumber} · ${item.claimantName ?? "Employee"}`, detail: item.description ?? "Employee claim reimbursement", remaining: Math.max(0, Number(item.totalAmount) - Number(item.reimbursedAmount)) })),
-  ].filter((item) => item.remaining > 0.009), [candidates]);
   const allocations = targets.flatMap((item) => { const value = Number(amounts[item.key] ?? 0); return value > 0 ? [{ targetType: item.targetType, targetId: item.targetId, allocatedAmount: value.toFixed(2) }] : []; });
   const validUnitItems = unitItems.filter((item) => item.apartmentId && item.description.trim() && Number(item.amount) > 0).map(({ key: _key, ...item }) => ({ ...item, amount: Number(item.amount).toFixed(2) }));
   const total = mode === "existing" ? allocations.reduce((sum, item) => sum + Number(item.allocatedAmount), 0) : mode === "new" ? validUnitItems.reduce((sum, item) => sum + Number(item.amount), 0) : Number(target?.debit ?? 0);

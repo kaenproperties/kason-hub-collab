@@ -4,6 +4,7 @@ import { recordAudit } from "../../lib/audit";
 import { createSignedDownloadUrl } from "../../lib/storage";
 import type { CreateUserInput, UpdateUserInput, ResetPasswordInput } from "./users.validation";
 import type { SessionPayload } from "../../lib/auth";
+import { canManageRole, permissionCanBeGrantedToRole, type PermissionOverrides } from "../../lib/permissions";
 
 export async function listUsersService(
   session: SessionPayload,
@@ -51,18 +52,20 @@ export async function createUserService(session: SessionPayload, input: CreateUs
   const db = getDb();
   const email = input.email.trim().toLowerCase();
 
-  // A Manager may administer day-to-day staff, but cannot manufacture the
-  // one capability deliberately withheld from that role.
-  if (
-    !["admin", "director"].includes(session.role) &&
-    (input.role === "director" || input.permissionOverrides?.["owner_report.final_approve"] === true)
-  ) {
-    return { ok: false as const, status: 403 as const, error: "cannot grant final owner-report approval" };
-  }
-
-  // Reject admin role (belt-and-suspenders — zod schema already blocks it)
+  // Reject admin role before the hierarchy lookup. The public schema already
+  // blocks this, but keeping the service guard first makes the rule explicit
+  // for internal callers as well.
   if ((input.role as string) === "admin") {
     return { ok: false as const, status: 400 as const, error: 'Role "admin" is not allowed' };
+  }
+
+  const actor = await fetchActorInOrg(db, session.orgId, session.userId);
+  if (!actor || !canManageRole(actor.role, input.role)) {
+    return { ok: false as const, status: 403 as const, error: "You can only create users below your role level" };
+  }
+  const invalidGrant = firstInvalidRoleGrant(input.role, input.permissionOverrides);
+  if (invalidGrant) {
+    return { ok: false as const, status: 403 as const, error: `Permission ${invalidGrant} cannot be granted to this role` };
   }
 
   // Check email uniqueness within the org
@@ -165,6 +168,35 @@ async function fetchTargetInOrg(db: ReturnType<typeof getDb>, orgId: string, tar
   });
 }
 
+async function fetchActorInOrg(db: ReturnType<typeof getDb>, orgId: string, actorId: string) {
+  return db.user.findFirst({
+    where: { id: actorId, organizationId: orgId, userType: "operator", status: "active" },
+    select: { id: true, role: true },
+  });
+}
+
+function firstInvalidRoleGrant(role: string, overrides?: PermissionOverrides | null) {
+  return Object.entries(overrides ?? {}).find(
+    ([permission, enabled]) => enabled === true && !permissionCanBeGrantedToRole(role, permission as Parameters<typeof permissionCanBeGrantedToRole>[1]),
+  )?.[0];
+}
+
+async function hierarchyCheck(
+  db: ReturnType<typeof getDb>,
+  session: SessionPayload,
+  target: { id: string; role: string },
+  nextRole?: string,
+) {
+  if (session.userId === target.id) {
+    return { ok: false as const, status: 403 as const, error: "You cannot administer your own account" };
+  }
+  const actor = await fetchActorInOrg(db, session.orgId, session.userId);
+  if (!actor || !canManageRole(actor.role, target.role) || (nextRole && !canManageRole(actor.role, nextRole))) {
+    return { ok: false as const, status: 403 as const, error: "You can only administer users below your role level" };
+  }
+  return null;
+}
+
 function rejectAdminTier(target: { role: string }) {
   if (target.role === "admin") {
     return {
@@ -193,11 +225,12 @@ export async function updateUserService(
   const adminCheck = rejectAdminTier(target);
   if (adminCheck) return adminCheck;
 
-  if (
-    !["admin", "director"].includes(session.role) &&
-    (target.role === "director" || input.role === "director" || input.permissionOverrides?.["owner_report.final_approve"] === true)
-  ) {
-    return { ok: false as const, status: 403 as const, error: "cannot grant or modify final owner-report approval" };
+  const hierarchy = await hierarchyCheck(db, session, target, input.role);
+  if (hierarchy) return hierarchy;
+
+  const invalidGrant = firstInvalidRoleGrant(input.role ?? target.role, input.permissionOverrides);
+  if (invalidGrant) {
+    return { ok: false as const, status: 403 as const, error: `Permission ${invalidGrant} cannot be granted to this role` };
   }
 
   await db.$transaction(async (tx) => {
@@ -246,6 +279,9 @@ export async function deactivateUserService(session: SessionPayload, targetId: s
   const adminCheck = rejectAdminTier(target);
   if (adminCheck) return adminCheck;
 
+  const hierarchy = await hierarchyCheck(db, session, target);
+  if (hierarchy) return hierarchy;
+
   await db.$transaction(async (tx) => {
     await tx.user.update({
       where: { id: targetId },
@@ -277,6 +313,9 @@ export async function activateUserService(session: SessionPayload, targetId: str
 
   const adminCheck = rejectAdminTier(target);
   if (adminCheck) return adminCheck;
+
+  const hierarchy = await hierarchyCheck(db, session, target);
+  if (hierarchy) return hierarchy;
 
   await db.$transaction(async (tx) => {
     await tx.user.update({
@@ -313,6 +352,9 @@ export async function resetPasswordService(
 
   const adminCheck = rejectAdminTier(target);
   if (adminCheck) return adminCheck;
+
+  const hierarchy = await hierarchyCheck(db, session, target);
+  if (hierarchy) return hierarchy;
 
   const passwordHash = await hashPassword(input.password);
 

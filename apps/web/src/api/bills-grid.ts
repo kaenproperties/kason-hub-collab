@@ -26,7 +26,7 @@ import {
   updateExpenseSchema,
   saveReadingsSchema,
 } from "@kason/shared";
-import type { GridRecurringDto, AllocationLine, GridSettlementDto } from "@kason/shared";
+import type { GridRecurringDto, AllocationLine, GridSettlementDto, GridBillUtilityPlanDto } from "@kason/shared";
 import type { z } from "zod";
 
 /** The React-Query root key for the batched grid read (GET /bills-grid). Prefix
@@ -35,11 +35,9 @@ import type { z } from "zod";
 export const GRID_QUERY_KEY_ROOT = ["bills-grid", "grid"] as const;
 
 // The @kason/shared bills-grid module (packages/shared/src/schemas/bills-grid.ts)
-// exports only the eight Zod schema VALUES (gridQuerySchema, saveEntrySchema,
-// lineSettingsSchema, billSchema, bearerConfigSchema, createExpensesSchema,
-// updateExpenseSchema, saveReadingsSchema) — unlike schemas/meter.ts it ships no
-// `z.infer`/`z.input` type aliases, so the request-body shapes below are
-// DERIVED from the schema VALUES via `z.input<typeof ...>` (single-source: a
+// exports its response DTO interfaces plus the request Zod schema VALUES. It
+// intentionally ships no `z.infer`/`z.input` request aliases, so the request-body
+// shapes below are DERIVED from the schema VALUES via `z.input<typeof ...>` (single-source: a
 // schema field change fails the client's typecheck instead of silently
 // drifting). `z.input` — not `z.infer` — because these are REQUEST bodies:
 // fields with `.optional()` must stay optional and fields with only
@@ -206,14 +204,36 @@ export interface GridBearerConfigDto {
 }
 
 export interface GridExpensesDto {
-  tenant: { total: string; withSstTotal: string; count: number; nonSstCount?: number; withSstCount?: number; nonSstActionRequiredCount?: number; withSstActionRequiredCount?: number; nonSstGrossMargin?: string; withSstGrossMargin?: string };
-  owner: { total: string; withSstTotal: string; count: number; nonSstCount?: number; withSstCount?: number; nonSstActionRequiredCount?: number; withSstActionRequiredCount?: number; nonSstGrossMargin?: string; withSstGrossMargin?: string };
+  tenant: { total: string; withSstTotal: string; sstTotal?: string; count: number; items?: GridExpenseSummaryItemDto[]; nonSstCount?: number; withSstCount?: number; nonSstActionRequiredCount?: number; withSstActionRequiredCount?: number; nonSstGrossMargin?: string; withSstGrossMargin?: string };
+  owner: { total: string; withSstTotal: string; sstTotal?: string; count: number; items?: GridExpenseSummaryItemDto[]; nonSstCount?: number; withSstCount?: number; nonSstActionRequiredCount?: number; withSstActionRequiredCount?: number; nonSstGrossMargin?: string; withSstGrossMargin?: string };
+}
+
+export interface GridExpenseSummaryItemDto {
+  id: string;
+  description: string;
+  amount: string;
+  sst: string;
+  total: string;
+  withSST: boolean;
 }
 
 export interface GridManagementFeeDto {
   nonSst: string;
   sst: string;
   total: string;
+  /** False means no active per-unit/owner fee rule resolved for this month.
+   * This is distinct from a configured rule whose legitimate result is RM0. */
+  configured?: boolean;
+  status?:
+    | "not_configured"
+    | "before_first_charge"
+    | "free_period"
+    | "commission_month"
+    | "no_rental_income"
+    | "awaiting_rent"
+    | "chargeable"
+    | "posted";
+  reason?: string | null;
 }
 
 export interface GridAgreementFeeLineDto {
@@ -225,6 +245,19 @@ export interface GridAgreementFeeLineDto {
 export interface GridAgreementFeesDto {
   new: GridAgreementFeeLineDto;
   renewal: GridAgreementFeeLineDto;
+}
+
+export interface PendingTenancyChargeDto {
+  id: string;
+  description: string;
+  kind: "rental" | "deposit" | "agreement_fee" | "renewal_fee" | "carpark" | "other";
+  /** Optional only for a rolling cached payload; current servers always provide it. */
+  payer?: "tenant" | "owner";
+  baseAmount: string;
+  sst: string;
+  total: string;
+  /** Legacy wire name; current servers return the actual billed party name. */
+  tenantName: string | null;
 }
 
 export interface GridAttachmentBrief {
@@ -247,6 +280,10 @@ export interface GridRow {
   propertyId: string;
   /** Fix (final review): the property's display name — Categorize shows this, not the raw propertyId UUID. */
   propertyName: string;
+  /** The property's business-facing short form (stored as Property.propertyCode).
+   * Used with the unit number in the compact Unit identity line. Optional only
+   * for compatibility with an older cached payload during a rolling update. */
+  propertyCode?: string;
   /** Unit owner's display name (display + search). Optional so existing fixtures compile
    * unchanged (server always sends it, null when no owner party resolved). Owner phone is
    * intentionally NOT surfaced on this page. */
@@ -261,6 +298,9 @@ export interface GridRow {
   preview: GridPreview | null;
   /** Structured, never an HTTP status. `null` when the preview succeeded. */
   previewError: { code: string; detail?: unknown } | null;
+  /** Server-computed first-issuance utility plan. Optional only for an older
+   * cached response during a rolling update; absence is not an exact preview. */
+  billUtilityPlan?: GridBillUtilityPlanDto;
   /** NON-fatal row-level anomalies. An empty array is the healthy case. */
   warnings: GridRowWarning[];
   /** Nested tenant/room sub-rows, keyed on listingId. */
@@ -302,6 +342,9 @@ export interface GridRow {
   managementFee?: GridManagementFeeDto;
   /** Tenant-facing agreement charges created by the tenancy workflow. */
   agreementFees?: GridAgreementFeesDto;
+  /** Exact draft tenancy invoice lines this row's Bill action will approve.
+   * Optional only for compatibility with an older cached payload. */
+  pendingTenancyCharges?: PendingTenancyChargeDto[];
   /** Authoritative cash-basis owner money. Never negative. */
   ownerPayout?: string;
   ownerTopUpRequired?: string;
@@ -333,6 +376,13 @@ export interface GridResponse {
   period: string;
   periods: string[];
   rows: GridRow[];
+  /** Server-effective Bill flags. Optional only for rolling compatibility. */
+  billingCapabilities?: GridBillingCapabilities;
+}
+
+export interface GridBillingCapabilities {
+  billingDocuments: boolean;
+  expensesAsCharges: boolean;
 }
 
 export interface BillingFundsSummary {

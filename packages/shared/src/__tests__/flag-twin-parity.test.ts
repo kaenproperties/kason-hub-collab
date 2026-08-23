@@ -25,6 +25,7 @@ import { fileURLToPath } from "node:url";
 import { PHASE2_FLAGS } from "../constants/phase2-flags";
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../../../..");
+const hasUatDeploymentConfig = existsSync(resolve(repoRoot, ".github/workflows/cd-uat-deploy.yml"));
 
 /** `ENABLE_X: "true"|"false"` lines from a deploy-workflow container env block. */
 function workflowFlags(relPath: string): Map<string, boolean> | null {
@@ -48,7 +49,7 @@ function viteFlags(relPath: string): Map<string, boolean> | null {
   return map;
 }
 
-describe("UAT flag twins (cd-uat-deploy.yml ⇄ apps/web/.env.uat)", () => {
+(hasUatDeploymentConfig ? describe : describe.skip)("UAT flag twins (cd-uat-deploy.yml ⇄ apps/web/.env.uat)", () => {
   const api = workflowFlags(".github/workflows/cd-uat-deploy.yml");
   const web = viteFlags("apps/web/.env.uat");
 

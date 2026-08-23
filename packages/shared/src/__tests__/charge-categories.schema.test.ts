@@ -13,7 +13,7 @@ describe("charge-categories value sets", () => {
   it("locks the contract unions", () => {
     expect(CATEGORY_FAMILIES).toEqual(["tenant_income", "owner_income", "pay_back_landlord"]);
     expect(BILLING_DOC_TYPES).toEqual([
-      "invoice", "debit_note", "credit_note", "refund_note", "receipt", "owner_expense_advice",
+      "invoice", "debit_note", "credit_note", "refund_note", "receipt", "owner_expense_advice", "proforma",
     ]);
   });
 });

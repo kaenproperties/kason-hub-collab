@@ -1420,6 +1420,32 @@ describe("Task 8 — under-management toggle", () => {
     expect(body).toMatchObject({ partitionBillingMode: "SUBSIDY" });
   });
 
+  it("saves the monthly TNB owner subsidy cap through the apartment PATCH", async () => {
+    const user = userEvent.setup();
+    renderEdit(
+      makeDetail({ occupancyStatus: "vacant", activeTenancy: null }),
+      fixtureApartment({
+        partitionBillingMode: "SUBSIDY",
+        tnbSubsidyCapMonthly: null,
+      }),
+    );
+
+    const capInput = within(
+      screen.getByRole("group", {
+        name: /monthly tnb owner subsidy cap/i,
+      }),
+    ).getByRole("spinbutton");
+    await user.type(capInput, "200.00");
+    await user.click(screen.getByRole("button", { name: /update unit/i }));
+
+    await waitFor(() => expect(callIndices().patchCount).toBe(1));
+    const patchCall = vi.mocked(apiFetch).mock.calls.find(([u, i]) =>
+      isSharedPatch(u, i),
+    );
+    const body = JSON.parse((patchCall![1] as { body: string }).body);
+    expect(body).toEqual({ tnbSubsidyCapMonthly: 200 });
+  });
+
   it("create-omission: UnitFormBody without showUnderManagement does not render the toggle", () => {
     render(
       wrap(

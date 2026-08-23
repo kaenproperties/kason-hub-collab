@@ -11,6 +11,16 @@
 import type { OwnerLedgerCategory } from "../schemas/owner-ledger";
 import type { CategoryDocType, CategoryFamily } from "../schemas/charge-categories";
 
+// TA amounts are entered as the final SST-inclusive amount. Creation splits that
+// gross value into a base Charge plus its linked SST Charge; the base/document
+// line therefore carries the real statutory rate without increasing the total.
+export const TENANCY_AGREEMENT_SST_RATE = "8";
+
+// Cleaning is entered in the grid as the pre-SST service amount: RM100 becomes
+// RM100 + RM8 SST on the invoice. This differs from WiFi, whose grid value is the
+// supplier's already-gross pass-through amount and therefore remains zero-rated here.
+export const CLEANING_SST_RATE = "8";
+
 export type SeedDocumentSeries = { code: "IVTEN" | "IVOWN" | "RB" | "DEP" | "DEPO" | "CN" | "DN" | "RN" | "RCPT" | "EXP" | "EB" | "OST" | "REM" | "OEA" | "PI"; prefix: string };
 
 export const SEED_DOCUMENT_SERIES: readonly SeedDocumentSeries[] = [
@@ -92,14 +102,13 @@ export type SeedChargeCategory = {
 export const SEED_CHARGE_CATEGORIES: readonly SeedChargeCategory[] = [
   // ── tenant_income → Invoice / IVTEN ─────────────────────────────────────────
   { code: "booking_fee", name: "Booking fee", family: "tenant_income", docType: "invoice", seriesCode: "IVTEN", sortOrder: 10 },
-  { code: "tenancy_agreement_fee", name: "Tenancy agreement fee", family: "tenant_income", docType: "invoice", seriesCode: "IVTEN", sortOrder: 20 },
-  { code: "renewal_fee", name: "Renewal fee", family: "tenant_income", docType: "invoice", seriesCode: "IVTEN", sortOrder: 30 },
+  { code: "tenancy_agreement_fee", name: "Tenancy agreement fee", family: "tenant_income", docType: "invoice", seriesCode: "IVTEN", defaultSstRate: TENANCY_AGREEMENT_SST_RATE, sortOrder: 20 },
+  { code: "renewal_fee", name: "Renewal fee", family: "tenant_income", docType: "invoice", seriesCode: "IVTEN", defaultSstRate: TENANCY_AGREEMENT_SST_RATE, sortOrder: 30 },
   { code: "access_card_replacement", name: "Access card replacement", family: "tenant_income", docType: "invoice", seriesCode: "IVTEN", sortOrder: 40 },
   { code: "late_payment_interest", name: "Late payment interest (10%)", family: "tenant_income", docType: "invoice", seriesCode: "IVTEN", sortOrder: 50 },
-  { code: "cleaning_tenant", name: "Cleaning (tenant)", family: "tenant_income", docType: "invoice", seriesCode: "IVTEN", sortOrder: 60 },
-  // Maintenance (2026-07-28) — a bills-grid scalar like cleaning/wifi. Same field shape as
-  // cleaning_tenant (defaultSstRate omitted → falls back to "0"): a service-style line, not a
-  // pass-through utility. REQUIRED by resolveGridInvoiceCategories — a missing row makes it
+  { code: "cleaning_tenant", name: "Cleaning (tenant)", family: "tenant_income", docType: "invoice", seriesCode: "IVTEN", defaultSstRate: CLEANING_SST_RATE, sortOrder: 60 },
+  // Maintenance (2026-07-28) — a bills-grid scalar like cleaning/wifi. REQUIRED by
+  // resolveGridInvoiceCategories — a missing row makes it
   // return null and every grid Bill fail closed, so this must be seeded in EVERY environment.
   { code: "maintenance_tenant", name: "Maintenance (tenant)", family: "tenant_income", docType: "invoice", seriesCode: "IVTEN", sortOrder: 69 },
   // ── grid-utility itemization (Task 3 spec §R3) → Invoice / IVTEN, tenant side.
@@ -107,19 +116,17 @@ export const SEED_CHARGE_CATEGORIES: readonly SeedChargeCategory[] = [
   { code: "electricity_tenant", name: "Electricity (tenant)", family: "tenant_income", docType: "invoice", seriesCode: "IVTEN", defaultSstRate: "0", sortOrder: 61 },
   { code: "water_tenant", name: "Water (tenant)", family: "tenant_income", docType: "invoice", seriesCode: "IVTEN", defaultSstRate: "0", sortOrder: 62 },
   { code: "sewerage_tenant", name: "Sewerage (tenant)", family: "tenant_income", docType: "invoice", seriesCode: "IVTEN", defaultSstRate: "0", sortOrder: 63 },
-  // WiFi is a SERVICE, not a pure pass-through (classify-utility.ts's SERVICE
-  // bucket, alongside cleaning) — defaultSstRate deliberately OMITTED here,
-  // mirroring cleaning_tenant's own field shape above (both fall back to "0"
-  // via seed.ts's `c.defaultSstRate ?? "0"` for now; a real configured
-  // service-tax rate is Phase 2, spec Non-goals).
-  { code: "wifi_tenant", name: "WiFi (tenant)", family: "tenant_income", docType: "invoice", seriesCode: "IVTEN", sortOrder: 64 },
+  // WiFi is the supplier's already-SST-inclusive pass-through amount. Do not add
+  // another 8% when billing/recovering it through the grid.
+  { code: "wifi_tenant", name: "WiFi (tenant)", family: "tenant_income", docType: "invoice", seriesCode: "IVTEN", defaultSstRate: "0", sortOrder: 64 },
   // Subsidy is TENANT-SIDE ONLY — an owner-funded offset shown as a negative
   // line on the tenant invoice (spec R2/R5); there is deliberately NO
   // subsidy_owner counterpart code.
   { code: "subsidy_tenant", name: "Subsidy (tenant)", family: "tenant_income", docType: "invoice", seriesCode: "IVTEN", defaultSstRate: "0", sortOrder: 65 },
   // Custom recurring charges (recurring-charges feature) — the SINGLE seeded tenant-side
   // category all admin-defined tenant-borne recurring lines route through (IVTEN). No generic
-  // picker in v1. defaultSstRate 0 (service-style, mirrors cleaning/wifi_tenant).
+  // picker in v1. Custom fees remain zero-rated by default; the admin can choose
+  // an explicitly taxable expense category when a particular fee needs SST.
   { code: "recurring_other_tenant", name: "Recurring charge (tenant)", family: "tenant_income", docType: "invoice", seriesCode: "IVTEN", defaultSstRate: "0", sortOrder: 66 },
   { code: "other_expense_tenant", name: "Other expense (tenant)", family: "tenant_income", docType: "invoice", seriesCode: "IVTEN", defaultSstRate: "0", sortOrder: 67 },
   // Letting commission (Phase 2 — first-full-month rent is KAEN's commission). The commission
@@ -130,7 +137,7 @@ export const SEED_CHARGE_CATEGORIES: readonly SeedChargeCategory[] = [
   { code: "letting_commission", name: "Letting commission (first month)", family: "tenant_income", docType: "invoice", seriesCode: "IVTEN", defaultSstRate: "0", isSystem: true, sortOrder: 68 },
   // ── owner_income → Invoice / IVOWN (statement auto-post consumes these) ─────
   { code: "management_fee", name: "Management fee", family: "owner_income", docType: "invoice", seriesCode: "IVOWN", defaultSstRate: "8", ledgerCategory: "management_fee", isSystem: true, sortOrder: 100 },
-  { code: "cleaning_owner", name: "Cleaning (owner)", family: "owner_income", docType: "invoice", seriesCode: "IVOWN", ledgerCategory: "cleaning", isSystem: true, sortOrder: 110 },
+  { code: "cleaning_owner", name: "Cleaning (owner)", family: "owner_income", docType: "invoice", seriesCode: "IVOWN", defaultSstRate: CLEANING_SST_RATE, ledgerCategory: "cleaning", isSystem: true, sortOrder: 110 },
   // Owner side of the maintenance scalar — mirrors cleaning_owner exactly (isSystem, IVOWN,
   // the EXISTING "maintenance_fee" ledger category so the owner statement buckets it
   // separately from cleaning — no new ledger vocabulary needed).
@@ -143,7 +150,7 @@ export const SEED_CHARGE_CATEGORIES: readonly SeedChargeCategory[] = [
   { code: "electricity_owner", name: "Electricity (owner)", family: "owner_income", docType: "invoice", seriesCode: "IVOWN", ledgerCategory: "utilities_tnb", isSystem: true, sortOrder: 111 },
   { code: "water_owner", name: "Water (owner)", family: "owner_income", docType: "invoice", seriesCode: "IVOWN", ledgerCategory: "water", isSystem: true, sortOrder: 112 },
   { code: "sewerage_owner", name: "Sewerage (owner)", family: "owner_income", docType: "invoice", seriesCode: "IVOWN", ledgerCategory: "indah_water", isSystem: true, sortOrder: 113 },
-  { code: "wifi_owner", name: "WiFi (owner)", family: "owner_income", docType: "invoice", seriesCode: "IVOWN", ledgerCategory: "wifi", isSystem: true, sortOrder: 114 },
+  { code: "wifi_owner", name: "WiFi (owner)", family: "owner_income", docType: "invoice", seriesCode: "IVOWN", defaultSstRate: "0", ledgerCategory: "wifi", isSystem: true, sortOrder: 114 },
   // Custom recurring charges (recurring-charges feature) — the SINGLE seeded owner-side
   // category all admin-defined owner-borne recurring lines route through (IVOWN). No generic
   // picker in v1. ledgerCategory "cleaning" reuse: a generic owner recurring maps to the

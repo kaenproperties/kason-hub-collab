@@ -192,7 +192,7 @@ export default function PortalPropertyEditPage() {
                 disabled={!isEditable}
               />
             </Field>
-            <Field label="Property code">
+            <Field label="Property Short Form">
               <Input
                 value={form.propertyCode}
                 onChange={(e) => onChange("propertyCode", e.target.value)}

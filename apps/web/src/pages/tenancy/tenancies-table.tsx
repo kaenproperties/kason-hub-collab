@@ -6,7 +6,7 @@ import { formatDate, formatMoney, getStatusTone } from "@/components/format";
 import { TenancyAgreementButton } from "./tenancy-agreement-workspace";
 import { daysUntilTenancyEnd, RenewalWorkflowDialog } from "./renewal-workflow-dialog";
 import { CancelRenewalDialog } from "./cancel-renewal-dialog";
-import { useAuth } from "@/lib/auth";
+import { usePermission } from "@/components/permission-gate";
 
 export type TenancyListItem = {
   id: string;
@@ -30,11 +30,12 @@ export type TenancyListItem = {
 };
 
 export function TenancyTable({ tenancies, initialRenewalTenancyId }: { tenancies: TenancyListItem[]; initialRenewalTenancyId?: string | null }) {
-  const { user } = useAuth();
   const [renewalTenancy, setRenewalTenancy] = useState<TenancyListItem | null>(null);
   const [cancelTenancy, setCancelTenancy] = useState<TenancyListItem | null>(null);
-  const canCancelRenewal = user?.permissions?.includes("tenancy.cancel_renewal") ?? ["admin", "director", "manager"].includes(user?.role ?? "");
+  const canCancelRenewal = usePermission("tenancy.cancel_renewal");
   useEffect(() => {
+    // This prop is an imperative deep-link request; mirror it into the dialog state.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     if (initialRenewalTenancyId) setRenewalTenancy(tenancies.find((row) => row.id === initialRenewalTenancyId) ?? null);
   }, [initialRenewalTenancyId, tenancies]);
   const columns = [

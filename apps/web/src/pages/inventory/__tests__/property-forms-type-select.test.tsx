@@ -108,7 +108,7 @@ describe("admin create-property dialog uses PropertyTypeSelect", () => {
     await user.click(screen.getByText("Open create"));
 
     await user.type(screen.getByLabelText("Property name"), "Test Tower");
-    await user.type(screen.getByLabelText("Property code"), "PR-1024");
+    await user.type(screen.getByLabelText("Property Short Form"), "PR-1024");
     await user.selectOptions(screen.getByLabelText("Property type"), "Zzz-Admin-Landed");
     await user.type(screen.getByLabelText("Address line 1"), "Jalan Ampang 18");
     await user.type(screen.getByLabelText("City"), "Kuala Lumpur");
@@ -242,7 +242,7 @@ describe("portal create-property dialog uses PropertyTypeSelect", () => {
     );
 
     await user.type(screen.getByLabelText(/property name/i), "New Tower");
-    await user.type(screen.getByLabelText(/property code/i), "PT-1");
+    await user.type(screen.getByLabelText(/property short form/i), "PT-1");
     await user.selectOptions(screen.getByLabelText(/property type/i), "Zzz-Portal-Landed");
     await user.type(screen.getByLabelText(/address line 1/i), "Jalan Y");
     await user.type(screen.getByLabelText(/^city/i), "Kuala Lumpur");

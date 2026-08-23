@@ -71,6 +71,7 @@ export async function resolveBillingReadiness(
   const probeUnit: OwnerUnitForMonth = {
     unitId: "", apartmentId: "", unitCode: "", propertyId: resolved.propertyId, occupied: false,
     rentBase: "0", rentBaseForMonth: "0",
+    managementFeeRentComponents: [],
   };
   const config = resolveConfigForUnit(configs, probeUnit, asOf);
   return { ownerAssigned: true, hasActiveConfig: config !== null, ownerPartyId };

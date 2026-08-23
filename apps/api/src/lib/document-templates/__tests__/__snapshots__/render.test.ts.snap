@@ -38,6 +38,17 @@ exports[`renderToHtml > matches the locked-in layout snapshot 1`] = `
   main p{font-size:10.5pt;margin:1mm 0;color:#1f2937}
   main p strong{display:inline-block;min-width:44mm;font-weight:600;color:#374151}
 
+  /* Agreement cover sheets are intentionally isolated from the clauses.
+     This mirrors the supplied KAEN agreement and prevents clause 1 from
+     being squeezed onto the bottom of the title page. */
+  .agreement-cover{
+    min-height:235mm;display:flex;flex-direction:column;align-items:center;
+    justify-content:center;text-align:center;page-break-after:always
+  }
+  .agreement-cover h1{margin-top:24mm;font-size:20pt;letter-spacing:.5pt}
+  .agreement-cover h3{margin-top:10mm;border:0;font-size:11pt}
+  .agreement-cover p{font-size:11pt;line-height:1.6}
+
   /* Fee tables */
   main .fee-table{width:100%;border-collapse:collapse;margin-top:1mm}
   main .fee-table td{padding:1.2mm 0;font-size:10.5pt;border-bottom:1px dotted #e5e7eb}
@@ -82,5 +93,31 @@ exports[`renderToHtml > matches the locked-in layout snapshot 1`] = `
   .sig-fields td:last-child{color:#111827}
   .audit-footer{margin-top:10mm;padding-top:3mm;border-top:1px solid #e5e7eb;
     font-size:8pt;color:#6b7280;text-align:center;letter-spacing:0.2pt}
-</style></head><body><div class='page'><header class="doc-header"><div class="zone-left"></div><div class="zone-center"><h1>KAEN Properties</h1><p>Reg No: 1610050-V</p><p>Service Tax ID: W10-2506-32000179</p><p>NO. 27-3, Jalan Perdana 10/12</p><p>Pandan Perdana, 55300 Kuala Lumpur</p><p>Email: kaenproperties@gmail.com</p><p>Contact: +601136111763</p></div><div class="zone-right"><h2>Unit Reservation Form</h2><p class="ref-label">Reference Number:</p><p class="ref-value"><strong>KAEN RES-99999</strong></p><p>Date: 13/5/2026</p><p>Due Date: 20/5/2026</p></div></header><main><section><h3>Body</h3><p>Hello</p></section></main><footer class="signature-section"><div class="sig-grid"><div class="sig-col"><h4>Signed by the Applicant</h4><div class="sig-img-wrap"><img src="data:image/png;base64,SIGSTUB" alt="signature"/></div><div class="sig-line"></div><table class="sig-fields"><tbody><tr><td>Name</td><td>Snapshot Signer</td></tr><tr><td>Date</td><td>14 May 2026</td></tr></tbody></table></div></div><p class="audit-footer">Signed digitally — Signed by: Snapshot Signer · 14 May 2026 · IP 9.9.9.9</p></footer></div></body></html>"
+
+  /* Owner payout reports carry more financial detail than the other document
+     types. Give the legal entity the full centre width, keep its registered
+     name on one line, and use a denser print rhythm so a short expense table is
+     not stranded by itself on page two. */
+  .doc-owner-statement .doc-header{
+    grid-template-columns:18mm minmax(0,1fr) 42mm;gap:4mm;align-items:center;
+    margin-bottom:4mm;padding-bottom:3mm;border-bottom:1.5px solid #082f55
+  }
+  .doc-owner-statement .doc-header.no-logo{grid-template-columns:minmax(0,1fr) 42mm}
+  .doc-owner-statement .doc-header.no-logo .zone-left{display:none}
+  .doc-owner-statement .zone-left img{max-width:17mm;max-height:17mm}
+  .doc-owner-statement .zone-center{text-align:left;min-width:0}
+  .doc-owner-statement .zone-center h1{
+    color:#082f55;font-size:12pt;line-height:1.2;letter-spacing:.12pt;
+    margin-bottom:1mm;white-space:nowrap
+  }
+  .doc-owner-statement .zone-center p{display:inline;color:#4b5563;font-size:7.5pt;line-height:1.35}
+  .doc-owner-statement .zone-center p:not(:last-child)::after{content:"  ·  ";color:#c9a35c}
+  .doc-owner-statement .zone-right h2{color:#082f55;font-size:10.5pt;line-height:1.2;margin-bottom:1.5mm}
+  .doc-owner-statement .zone-right p{font-size:7.8pt;line-height:1.35}
+  .doc-owner-statement .zone-right .ref-label{font-size:7pt;margin-top:0}
+  .doc-owner-statement .zone-right .ref-value{font-size:8.5pt;margin-bottom:.7mm}
+  .doc-owner-statement main{margin-top:0}
+  .doc-owner-statement main section{margin-top:2.3mm;margin-bottom:2.3mm}
+  .doc-owner-statement main section:first-child{margin-top:0}
+</style></head><body class='doc-reservation-form'><div class='page'><header class="doc-header no-logo"><div class="zone-left"></div><div class="zone-center"><h1>KAEN Properties</h1><p>Reg No: 1610050-V</p><p>Service Tax ID: W10-2506-32000179</p><p>NO. 27-3, Jalan Perdana 10/12</p><p>Pandan Perdana, 55300 Kuala Lumpur</p><p>Email: kaenproperties@gmail.com</p><p>Contact: +601136111763</p></div><div class="zone-right"><h2>Unit Reservation Form</h2><p class="ref-label">Reference Number:</p><p class="ref-value"><strong>KAEN RES-99999</strong></p><p>Date: 13/5/2026</p><p>Due Date: 20/5/2026</p></div></header><main><section><h3>Body</h3><p>Hello</p></section></main><footer class="signature-section"><div class="sig-grid"><div class="sig-col"><h4>Signed by the Applicant</h4><div class="sig-img-wrap"><img src="data:image/png;base64,SIGSTUB" alt="signature"/></div><div class="sig-line"></div><table class="sig-fields"><tbody><tr><td>Name</td><td>Snapshot Signer</td></tr><tr><td>Date</td><td>14 May 2026</td></tr></tbody></table></div></div><p class="audit-footer">Signed digitally — Signed by: Snapshot Signer · 14 May 2026 · IP 9.9.9.9</p></footer></div></body></html>"
 `;

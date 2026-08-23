@@ -1,5 +1,11 @@
 import { describe, it, expect } from "vitest";
-import { computeManagementFee, isInFreePeriod, shouldChargeMgmtFee } from "./owner-billing-fee";
+import {
+  computeManagementFee,
+  computeManagementFeeRentBase,
+  effectiveWindowOverlapsBillingMonth,
+  isInFreePeriod,
+  shouldChargeMgmtFee,
+} from "./owner-billing-fee";
 
 const cfg = (o: Partial<Parameters<typeof computeManagementFee>[0]>) =>
   ({ feeType: "percent", feeValue: "10", capAmount: null, sstPercent: "8", ...o }) as Parameters<
@@ -92,6 +98,99 @@ describe("isInFreePeriod", () => {
     expect(isInFreePeriod("2026-03", { freePeriodStart: null, freePeriodEnd: "2026-06-30T00:00:00Z" })).toBe(false);
     expect(isInFreePeriod("2026-03", { freePeriodStart: "2026-01-01T00:00:00Z", freePeriodEnd: null })).toBe(false);
     expect(isInFreePeriod("2026-03", { freePeriodStart: null, freePeriodEnd: null })).toBe(false);
+  });
+});
+
+describe("computeManagementFeeRentBase", () => {
+  it("uses the billed rent unchanged when no per-pax deduction is configured", () => {
+    expect(computeManagementFeeRentBase([
+      {
+        billedRent: "1500.00",
+        fullMonthRent: "3000.00",
+        numberOfPax: 2,
+        isCommissionMonth: false,
+        fullyCollected: true,
+      },
+    ], null)).toEqual({ eligibleRentBase: "1500.00", fullyCollected: true, reason: null });
+  });
+
+  it("applies an optional per-pax deduction using the same rent proration ratio", () => {
+    expect(computeManagementFeeRentBase([
+      {
+        billedRent: "500.00",
+        fullMonthRent: "1000.00",
+        numberOfPax: 2,
+        isCommissionMonth: false,
+        fullyCollected: true,
+      },
+    ], "50")).toEqual({ eligibleRentBase: "450.00", fullyCollected: true, reason: null });
+  });
+
+  it("excludes commission-month rent because it is not owner rental income", () => {
+    expect(computeManagementFeeRentBase([
+      {
+        billedRent: "3000.00",
+        fullMonthRent: "3000.00",
+        numberOfPax: 1,
+        isCommissionMonth: true,
+        fullyCollected: true,
+      },
+    ], "0")).toEqual({
+      eligibleRentBase: "0.00",
+      fullyCollected: false,
+      reason: "commission_month",
+    });
+  });
+
+  it("keeps the forecast base but blocks collection until all included rent is collected", () => {
+    expect(computeManagementFeeRentBase([
+      {
+        billedRent: "2000.00",
+        fullMonthRent: "2000.00",
+        numberOfPax: 1,
+        isCommissionMonth: false,
+        fullyCollected: false,
+      },
+    ], null)).toEqual({
+      eligibleRentBase: "2000.00",
+      fullyCollected: false,
+      reason: "rent_not_collected",
+    });
+  });
+});
+
+describe("effectiveWindowOverlapsBillingMonth", () => {
+  it("includes a config that starts part-way through the prorated first month", () => {
+    expect(
+      effectiveWindowOverlapsBillingMonth("2026-08", {
+        effectiveFrom: "2026-08-25T00:00:00.000Z",
+        effectiveTo: null,
+      }),
+    ).toBe(true);
+  });
+
+  it("includes a config that ends part-way through the final month", () => {
+    expect(
+      effectiveWindowOverlapsBillingMonth(new Date("2026-08-01T00:00:00.000Z"), {
+        effectiveFrom: null,
+        effectiveTo: new Date("2026-08-24T23:59:59.999Z"),
+      }),
+    ).toBe(true);
+  });
+
+  it("excludes configs wholly before or after the billing month", () => {
+    expect(
+      effectiveWindowOverlapsBillingMonth("2026-08", {
+        effectiveFrom: "2026-09-01T00:00:00.000Z",
+        effectiveTo: null,
+      }),
+    ).toBe(false);
+    expect(
+      effectiveWindowOverlapsBillingMonth("2026-08", {
+        effectiveFrom: null,
+        effectiveTo: "2026-07-31T23:59:59.999Z",
+      }),
+    ).toBe(false);
   });
 });
 

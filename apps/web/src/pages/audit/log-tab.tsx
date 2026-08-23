@@ -1,7 +1,7 @@
 import { useMemo, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { apiFetch } from "@/lib/api-client";
-import { useAuth } from "@/lib/auth";
+import { usePermission } from "@/components/permission-gate";
 import {
   PageHeader,
   Surface,
@@ -17,11 +17,6 @@ import {
 import { Button } from "@/components/ui/button";
 import { formatDateTimeMY } from "@/components/format";
 import { filterControlClass } from "@/components/list-filter-bar";
-
-// Role gate — Manager+ only. Mirrors apps/api/src/lib/rbac.ts (editor < manager < admin).
-function isManagerPlus(role: string | undefined): boolean {
-  return role === "manager" || role === "admin";
-}
 
 export type AuditLogRow = {
   id: string;
@@ -70,8 +65,7 @@ function toIsoTo(date: string): string | undefined {
 }
 
 export default function AuditLogPage() {
-  const { user } = useAuth();
-  const role = user?.role;
+  const canViewAudit = usePermission("audit.view");
 
   const [filters, setFilters] = useState<Filters>({
     entityType: "",
@@ -100,13 +94,13 @@ export default function AuditLogPage() {
   const audit = useQuery<AuditLogResponse>({
     queryKey: ["audit-log", queryString],
     queryFn: () => apiFetch<AuditLogResponse>(`/audit-log?${queryString}`),
-    enabled: isManagerPlus(role),
+    enabled: canViewAudit,
     placeholderData: (prev) => prev,
     staleTime: 10_000,
   });
 
   // Manager+ gate — inline check. A project-wide RoleGate will replace this later (T2.3).
-  if (!isManagerPlus(role)) {
+  if (!canViewAudit) {
     return (
       <div className="space-y-6">
         <PageHeader title="Audit log" description="Rolling 10-day history of admin actions." />
@@ -114,7 +108,7 @@ export default function AuditLogPage() {
           <div className="py-10 text-center">
             <p className="text-sm font-semibold text-[var(--text-primary)]">Forbidden</p>
             <p className="mt-1 text-sm text-[var(--text-secondary)]">
-              The audit log is restricted to Manager and Admin roles.
+              You do not have permission to view the audit log.
             </p>
           </div>
         </Surface>

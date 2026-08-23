@@ -83,8 +83,32 @@ const managerSession: SessionPayload = {
   userType: "operator",
 };
 
+const directorSession: SessionPayload = {
+  userId: "user-director",
+  orgId: "org-123",
+  role: "director",
+  userType: "operator",
+};
+
+const financeSession: SessionPayload = {
+  userId: "user-finance",
+  orgId: "org-123",
+  role: "accountant",
+  userType: "operator",
+};
+
 beforeEach(() => {
   vi.clearAllMocks();
+  mockDb.user.findFirst.mockImplementation(async (args: { where?: { id?: string; role?: string } }) => {
+    if (args.where?.id === "user-admin") return { id: "user-admin", role: "admin" };
+    if (args.where?.id === "user-manager") return { id: "user-manager", role: "manager" };
+    if (args.where?.id === "user-director") return { id: "user-director", role: "director" };
+    if (args.where?.id === "user-finance") return { id: "user-finance", role: "accountant" };
+    if (args.where?.id === "user-operations") return { id: "user-operations", role: "editor" };
+    // findSuperAdminPartyId query in createUserService.
+    if (args.where?.role === "admin") return null;
+    return null;
+  });
   // Default $transaction implementation — runs the callback with the mockDb as tx
   mockDb.$transaction.mockImplementation((fn: (tx: typeof mockDb) => Promise<unknown>) =>
     fn(mockDb),
@@ -402,7 +426,7 @@ describe("updateUserService", () => {
     expect(result.status).toBe(404);
   });
 
-  it("allows self-edit", async () => {
+  it("rejects self-edit", async () => {
     mockDb.user.findUnique.mockResolvedValueOnce({
       id: "user-manager",
       role: "manager",
@@ -414,10 +438,12 @@ describe("updateUserService", () => {
       fullName: "Self Updated",
     });
 
-    expect(result.ok).toBe(true);
+    expect(result.ok).toBe(false);
+    if (result.ok) throw new Error("unreachable");
+    expect(result.status).toBe(403);
   });
 
-  it("records previous+new role when the role changes", async () => {
+  it("records previous+new role when assigning another lower role", async () => {
     mockDb.user.findUnique.mockResolvedValueOnce({
       id: "u1",
       role: "editor",
@@ -425,12 +451,57 @@ describe("updateUserService", () => {
     });
     mockDb.user.update.mockResolvedValueOnce({ id: "u1" });
 
-    const result = await updateUserService(managerSession, "u1", { role: "accountant" });
+    const result = await updateUserService(managerSession, "u1", { role: "viewer" });
 
     expect(result.ok).toBe(true);
     const diff = (recordAudit as unknown as ReturnType<typeof vi.fn>).mock.calls[0][1].diff;
     expect(diff.previousRole).toBe("editor");
-    expect(diff.newRole).toBe("accountant");
+    expect(diff.newRole).toBe("viewer");
+  });
+
+  it("does not let Manager promote Operations Admin to same-tier Finance", async () => {
+    mockDb.user.findUnique.mockResolvedValueOnce({ id: "u1", role: "editor", organizationId: "org-123" });
+    const result = await updateUserService(managerSession, "u1", { role: "accountant" });
+    expect(result.ok).toBe(false);
+    if (result.ok) throw new Error("unreachable");
+    expect(result.status).toBe(403);
+    expect(mockDb.user.update).not.toHaveBeenCalled();
+  });
+
+  it("does not let Manager edit another Manager at the same tier", async () => {
+    mockDb.user.findUnique.mockResolvedValueOnce({ id: "manager-2", role: "manager", organizationId: "org-123" });
+
+    const result = await updateUserService(managerSession, "manager-2", { fullName: "Changed" });
+
+    expect(result.ok).toBe(false);
+    if (result.ok) throw new Error("unreachable");
+    expect(result.status).toBe(403);
+    expect(mockDb.user.update).not.toHaveBeenCalled();
+  });
+
+  it("lets Director edit Manager and Finance users below the Director tier", async () => {
+    for (const target of [
+      { id: "manager-2", role: "manager" },
+      { id: "finance-2", role: "accountant" },
+    ]) {
+      mockDb.user.findUnique.mockResolvedValueOnce({ ...target, organizationId: "org-123" });
+      mockDb.user.update.mockResolvedValueOnce({ id: target.id });
+
+      const result = await updateUserService(directorSession, target.id, { fullName: `Updated ${target.role}` });
+      expect(result.ok).toBe(true);
+    }
+  });
+
+  it("lets Finance edit Operations Admin but not Manager", async () => {
+    mockDb.user.findUnique.mockResolvedValueOnce({ id: "operations-2", role: "editor", organizationId: "org-123" });
+    mockDb.user.update.mockResolvedValueOnce({ id: "operations-2" });
+    expect((await updateUserService(financeSession, "operations-2", { fullName: "Updated Ops" })).ok).toBe(true);
+
+    mockDb.user.findUnique.mockResolvedValueOnce({ id: "manager-2", role: "manager", organizationId: "org-123" });
+    const denied = await updateUserService(financeSession, "manager-2", { fullName: "Not Allowed" });
+    expect(denied.ok).toBe(false);
+    if (denied.ok) throw new Error("unreachable");
+    expect(denied.status).toBe(403);
   });
 
   it("omits previousRole/newRole when only fullName changes", async () => {
@@ -602,7 +673,7 @@ describe("resetPasswordService", () => {
     );
   });
 
-  it("allows self-reset", async () => {
+  it("rejects self-reset from the staff-administration endpoint", async () => {
     mockDb.user.findUnique.mockResolvedValueOnce({
       id: "user-manager",
       role: "manager",
@@ -614,7 +685,9 @@ describe("resetPasswordService", () => {
       password: "self-reset-password-123",
     });
 
-    expect(result.ok).toBe(true);
+    expect(result.ok).toBe(false);
+    if (result.ok) throw new Error("unreachable");
+    expect(result.status).toBe(403);
   });
 
   it("rejects admin-tier target with 403", async () => {

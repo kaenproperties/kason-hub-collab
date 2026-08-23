@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import { Building2, Search } from "lucide-react";
-import { allNavItems, canSeeNavItem, hasMinRole } from "./navigation";
+import { allNavItems, canSeeNavItemFor, hasMinRole } from "./navigation";
 import { useAuth } from "@/lib/auth";
 import { apiFetch } from "@/lib/api-client";
 import { isPhase2FlagEnabled } from "@/lib/feature-flags";
@@ -109,7 +109,7 @@ export function SearchCommand() {
   }, [open]);
 
   const filtered = allNavItems
-    .filter((item) => canSeeNavItem(role, item))
+    .filter((item) => canSeeNavItemFor(role, item, user?.permissions))
     .filter((item) => item.title.toLowerCase().includes(query.toLowerCase()));
 
   function handleNavigate(href: string) {

@@ -15,7 +15,7 @@ import { Badge } from "@/components/ui/badge";
 import { Callout } from "@/components/ui/callout";
 import { Field, TextInput } from "@/components/form-ui";
 import { Segmented, type SegmentedOption } from "@/components/ui/segmented";
-import { useAuth } from "@/lib/auth";
+import { usePermission } from "@/components/permission-gate";
 import { isPhase2FlagEnabled } from "@/lib/feature-flags";
 import { formatMoney } from "@/components/format";
 import { GRID_QUERY_KEY_ROOT } from "@/api/bills-grid";
@@ -81,8 +81,7 @@ function emptyDraft(): Draft {
 }
 
 export function RecurringSettings({ apartmentId }: { apartmentId: string }) {
-  const { user } = useAuth();
-  const isManager = user?.role === "manager" || user?.role === "admin";
+  const canEditCharges = usePermission("billing.charge.edit");
   const queryClient = useQueryClient();
   // Presentation-only gate (Task 9): flag OFF renders no Nature control and the apply body
   // omits `nature` entirely — byte-identical to pre-feature behavior.
@@ -181,7 +180,7 @@ export function RecurringSettings({ apartmentId }: { apartmentId: string }) {
           <p className="text-sm font-semibold text-foreground">Recurring charges</p>
           <p className="text-xs text-muted-foreground">Custom fixed monthly fees — generated read-only each period (like rental). Cleaning, WiFi and Maintenance are set entirely on their own rows above, so they are not listed here.</p>
         </div>
-        {isManager && !draft && (
+        {canEditCharges && !draft && (
           <Button type="button" variant="outline" size="sm" className="gap-1.5" onClick={() => setDraft(emptyDraft())}>
             <Plus className="h-4 w-4" /> Add
           </Button>
@@ -201,8 +200,8 @@ export function RecurringSettings({ apartmentId }: { apartmentId: string }) {
               <button
                 key={d.id}
                 type="button"
-                disabled={!isManager}
-                onClick={() => isManager && rev && setDraft({ definitionId: d.id, kind: d.kind, name: d.name, amount: rev.amount, bearer: rev.bearer, nature: rev.nature ?? defaultNatureForKind(d.kind), effectiveFromMonth: thisMonth(), enabled: rev.enabled })}
+                disabled={!canEditCharges}
+                onClick={() => canEditCharges && rev && setDraft({ definitionId: d.id, kind: d.kind, name: d.name, amount: rev.amount, bearer: rev.bearer, nature: rev.nature ?? defaultNatureForKind(d.kind), effectiveFromMonth: thisMonth(), enabled: rev.enabled })}
                 className="flex w-full items-center justify-between rounded-lg border border-border/50 bg-background/40 px-3 py-2 text-left transition-colors enabled:hover:bg-background/60"
               >
                 <div className="min-w-0">

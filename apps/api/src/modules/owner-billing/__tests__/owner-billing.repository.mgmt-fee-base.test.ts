@@ -21,6 +21,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 const dbMock = {
   listing: { findMany: vi.fn() },
   recurringCharge: { findMany: vi.fn() },
+  charge: { findMany: vi.fn() },
 };
 
 vi.mock("@kason/db", () => ({ getDb: () => dbMock, Prisma: {} }));
@@ -84,6 +85,8 @@ beforeEach(() => {
   dbMock.listing.findMany.mockReset();
   dbMock.recurringCharge.findMany.mockReset();
   dbMock.recurringCharge.findMany.mockResolvedValue([]);
+  dbMock.charge.findMany.mockReset();
+  dbMock.charge.findMany.mockResolvedValue([]);
 });
 
 describe("resolveOwnerUnitsForMonth — rentBaseForMonth (management-fee base)", () => {

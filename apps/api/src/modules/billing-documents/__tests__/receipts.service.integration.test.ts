@@ -28,6 +28,9 @@ const PAYMENT = "a6000000-0000-4000-8000-000000000020";
 
 async function cleanup() {
   const db = getDb();
+  await db.paymentAllocationReversal.deleteMany({ where: { organizationId: ORG } });
+  await db.paymentAllocation.deleteMany({ where: { organizationId: ORG } });
+  await db.payment.deleteMany({ where: { organizationId: ORG } });
   await db.billingDocumentLine.deleteMany({ where: { document: { organizationId: ORG } } });
   await db.billingDocument.deleteMany({ where: { organizationId: ORG } });
   await db.charge.deleteMany({ where: { organizationId: ORG } });
@@ -63,6 +66,32 @@ async function seed() {
       actorUserId: USER,
     }),
   );
+  // A receipt acknowledges the amount actually allocated by this payment, not
+  // the invoice face value. Keep this integration fixture aligned with the
+  // production payment flow by seeding the payment and its two allocations.
+  await db.payment.create({
+    data: {
+      id: PAYMENT,
+      organizationId: ORG,
+      paymentNumber: "PAY-RCPT-1",
+      partyId: PARTY,
+      paymentType: "receipt",
+      paymentMethod: "bank_transfer",
+      status: "posted",
+      amount: "200.00",
+      currency: "MYR",
+      receivedAt: new Date("2026-07-01T00:00:00.000Z"),
+    },
+  });
+  await db.paymentAllocation.createMany({
+    data: [CHARGE_1, CHARGE_2].map((chargeId) => ({
+      organizationId: ORG,
+      paymentId: PAYMENT,
+      chargeId,
+      allocatedAmount: "100.00",
+      allocatedAt: new Date("2026-07-01T00:00:00.000Z"),
+    })),
+  });
 }
 
 dn("issueReceiptDocumentTx (R8)", () => {

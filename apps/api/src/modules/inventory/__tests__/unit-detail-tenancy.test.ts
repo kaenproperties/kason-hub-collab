@@ -1,16 +1,22 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const findUnique = vi.fn();
+const findTenancyHistory = vi.fn();
 vi.mock("@kason/db", () => ({
   getDb: () => ({
     listing: { findUnique },
+    tenancy: { findMany: findTenancyHistory },
     party: { findMany: vi.fn().mockResolvedValue([]) },
     listingVisibilityGrant: { findMany: vi.fn().mockResolvedValue([]) },
     amenity: { findMany: vi.fn().mockResolvedValue([]) },
   }),
 }));
 
-beforeEach(() => findUnique.mockReset());
+beforeEach(() => {
+  findUnique.mockReset();
+  findTenancyHistory.mockReset();
+  findTenancyHistory.mockResolvedValue([]);
+});
 
 describe("findUnitDetail — activeTenancy", () => {
   it("surfaces the active tenancy when one exists", async () => {

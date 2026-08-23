@@ -8,6 +8,7 @@
   ],
   "scripts": {
     "build": "turbo run build",
+    "predev": "npm run build --workspace @kason/shared && npm run build --workspace @kason/db",
     "dev": "turbo run dev --parallel",
     "dev:lan": "bash scripts/dev-lan.sh",
     "lint": "turbo run lint",

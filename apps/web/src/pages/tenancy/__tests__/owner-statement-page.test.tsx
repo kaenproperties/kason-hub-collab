@@ -322,6 +322,14 @@ describe("OwnerStatementPage — 5-section render", () => {
     expect(screen.getAllByText(/RM 2,500\.00/)[0]).toBeTruthy();
   });
 
+  it("separates payout additions from red, explicitly signed deductions", () => {
+    renderPage("owner-1", "2026-06");
+    expect(screen.getByText("Additions (+)")).toBeInTheDocument();
+    expect(screen.getByText("Deductions (−)")).toBeInTheDocument();
+    const deduction = screen.getByText("− RM 300.00");
+    expect(deduction).toHaveClass("text-red-700");
+  });
+
   it("shows the owner name in the header section", () => {
     renderPage("owner-1", "2026-06");
     expect(screen.getByText("Tan Sri Lim")).toBeTruthy();

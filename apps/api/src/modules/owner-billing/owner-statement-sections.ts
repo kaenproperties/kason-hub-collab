@@ -17,7 +17,14 @@
 import { getDb, Prisma } from "@kason/db";
 import { isPhase2FlagEnabled } from "../../lib/feature-flags";
 import type { OwnerLedgerLine } from "@kason/shared";
-import { toCents, centsToString, summarizeOwnerPeriod, computeManagementFee, isPassThroughIncomeLine } from "@kason/shared";
+import {
+  toCents,
+  centsToString,
+  summarizeOwnerPeriod,
+  computeManagementFee,
+  effectiveWindowOverlapsBillingMonth,
+  isPassThroughIncomeLine,
+} from "@kason/shared";
 import { findDepositsCollectedInMonth, findDepositsHeldForUnits, depositWindowEndOfMonth } from "./owner-billing.repository";
 import { adjustmentSumsByChargeId } from "../billing-documents/adjustment-sums";
 import { adjustmentSplitByChargeId } from "../owner-ledger/net-adjustments-by-charge";
@@ -25,7 +32,8 @@ import type { OwnerBillingActorCtx } from "./owner-billing.types";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
-// "Letting Commission" labels an INFORMATIONAL row (direction "informational"), never
+// "Admin Fee (First Month Rental)" labels an INFORMATIONAL row (direction
+// "informational"), never
 // a real income row — see the isInformational field on IncomeBreakdownRow. Mirrored in
 // apps/web/src/api/owner-ledger.ts; both copies must agree.
 export type IncomeType =
@@ -34,12 +42,12 @@ export type IncomeType =
   | "Aircond Fee"
   | "Carpark"
   | "Shared Utility"
-  | "Letting Commission"
+  | "Admin Fee (First Month Rental)"
   // Historical persisted/test discriminator. New statements intentionally do not
   // expose tenant-paid expenses to owners.
   | "Tenant-paid Expense"
-  // DERIVED memo, never a ledger row — the partition aircond spread. Like "Letting
-  // Commission" it rides isInformational:true and is excluded from every total; unlike
+  // DERIVED memo, never a ledger row — the partition aircond spread. Like "Admin Fee
+  // (First Month Rental)" it rides isInformational:true and is excluded from every total; unlike
   // it, the money HAS already reached the payout (as Aircond Fee minus the master TNB
   // bill), so its footnote must say "already included", never "retained by KAEN".
   | "Extra Electricity";
@@ -528,6 +536,7 @@ function categoryToExpenseLabel(category: string): string {
     sewerage: "Sewerage / Indah Water",
     cukai_petak: "Cukai Petak",
     access_card: "Access Card",
+    letting_commission: "Admin Fee (First Month Rental)",
     other: "Other",
     other_expense: "Other",
   };
@@ -730,8 +739,9 @@ export function isSuppressedFromSection5(category: string, includeInPayout: bool
 // management fee. BOTH assembleYannieStatement (the statement/PDF) AND
 // getOwnerMonthsService (the /months card) call this, so the card's net payout can
 // NEVER diverge from the statement's Total Payout — including for PRE-STATEMENT
-// months that carry no owner_statement Invoice (the per-line fee is COMPUTED here,
-// never read from ledger rows).
+// months that carry no owner_statement Invoice. Before billing, the fee is
+// computed from the active config; after billing, the sourced management-fee
+// ledger row wins so historical custom amounts cannot drift.
 //
 //   Total Payout = (collected income) + (deposit collected)
 //                  − (deductible non-fee expenses + Σ per-line computed mgmt fee)
@@ -749,6 +759,10 @@ export type PayoutLedgerRow = {
   taxCategory: string;
   propertyId: string | null;
   apartmentId?: string | null;
+  /** Present on statement-generated rows. A sourced management-fee row is the
+   * exact fee already produced by the billing engine (including custom unit
+   * overrides such as pax deduction and first-charge amount). */
+  sourceChargeId?: string | null;
 };
 
 /** Minimal ManagementFeeConfig shape (per-property fee resolution). */
@@ -801,8 +815,7 @@ export function computeOwnerPayout(args: {
   const statementMonth = args.statementMonth;
   const feeConfigRows = args.feeConfigRows.filter((config) => {
     if (!statementMonth) return true;
-    if (config.effectiveFrom && statementMonth < config.effectiveFrom) return false;
-    if (config.effectiveTo && statementMonth > config.effectiveTo) return false;
+    if (!effectiveWindowOverlapsBillingMonth(statementMonth, config)) return false;
     if (
       config.freePeriodStart &&
       config.freePeriodEnd &&
@@ -855,7 +868,41 @@ export function computeOwnerPayout(args: {
     const row = unitSpecific ?? specific ?? allProperties;
     return row ? toFeeCfg(row) : null;
   };
+  // Once billing has generated a management-fee charge, that sourced ledger row
+  // is the accounting truth. Prefer it over recomputing from today's settings:
+  // this preserves unit-specific pax deductions, one-off first-charge amounts,
+  // and historical settings after an operator edits the config later. Unsourced
+  // legacy/manual rows deliberately stay on the old calculation path.
+  const exactFeesByScope = new Map<string, { baseC: number; sstC: number }>();
+  const scopeKey = (row: Pick<PayoutLedgerRow, "apartmentId" | "propertyId">) =>
+    row.apartmentId ? `apartment:${row.apartmentId}` : `property:${row.propertyId ?? "all"}`;
+  for (const row of expenseRows) {
+    if (row.category !== "management_fee" || !row.sourceChargeId) continue;
+    const key = scopeKey(row);
+    const current = exactFeesByScope.get(key) ?? { baseC: 0, sstC: 0 };
+    current.baseC += toCents(row.amount.toString(), "computeOwnerPayout");
+    current.sstC += row.sstAmount == null
+      ? 0
+      : toCents(row.sstAmount.toString(), "computeOwnerPayout");
+    exactFeesByScope.set(key, current);
+  }
+  const consumedExactFeeScopes = new Set<string>();
+
   const lineFees = incomeRows.map((e) => {
+    const key = scopeKey(e);
+    const exact = exactFeesByScope.get(key);
+    if (exact && !consumedExactFeeScopes.has(key) && FEE_INCOME_CATEGORIES.has(e.category)) {
+      consumedExactFeeScopes.add(key);
+      return {
+        base: centsToString(exact.baseC),
+        sst: centsToString(exact.sstC),
+        baseC: exact.baseC,
+        sstC: exact.sstC,
+      };
+    }
+    if (exact && consumedExactFeeScopes.has(key)) {
+      return { base: "0.00", sst: "0.00", baseC: 0, sstC: 0 };
+    }
     const feeCfg = FEE_INCOME_CATEGORIES.has(e.category)
       ? resolveFeeCfgForUnit(e.apartmentId ?? null, e.propertyId ?? null)
       : null;
@@ -1455,7 +1502,7 @@ export async function assembleYannieStatementForMonth(
   // INFORMATIONAL rows (direction "informational"). owner-ledger.sync.ts books the
   // first month's rent here — KAEN keeps it as letting commission, so the owner earns
   // nothing that month. The ledger row was already written to explain exactly that
-  // ("First month rent retained by KAEN as letting commission"), but §4 previously
+  // ("First month rental retained by KAEN as Admin Fee"), but §4 previously
   // filtered to direction "income"/"expense" only, so it never reached any surface:
   // the owner saw RM 0.00 income plus an unexplained owner-borne SST deduction — the
   // precise confusion the row exists to prevent.
@@ -1472,7 +1519,7 @@ export async function assembleYannieStatementForMonth(
     .map((e) => ({
       unitCode: e.listingId ? (unitCodeByListingId.get(e.listingId) ?? "—") : "—",
       tenantName: e.listingId ? (tenantNameByListingId.get(e.listingId) ?? null) : null,
-      incomeType: "Letting Commission" as const,
+      incomeType: "Admin Fee (First Month Rental)" as const,
       billingPeriod: monthLabel(e.statementMonth),
       amount: money2dp(e.amount),
       chargedAmount: money2dp(e.amount),
@@ -1609,7 +1656,7 @@ export async function assembleYannieStatementForMonth(
     expenseRows.push({
       category: categoryToExpenseLabel("management_fee"),
       categoryKey: "management_fee",
-      description: "KAEN management fee (per income line)",
+      description: "Property Management Fee (Per Income Line)",
       // COMPUTED from the fee config against collected income — it has no charge of
       // its own, so no credit/debit note can move it.
       adjustmentNote: null,

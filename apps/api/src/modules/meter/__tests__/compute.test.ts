@@ -1,5 +1,13 @@
 import { describe, it, expect } from "vitest";
-import { computeAllocation, ComputeError, DEFAULT_BEARERS, round2, type PoolComponents, type RoomInput } from "../compute";
+import {
+  computeAllocation,
+  ComputeError,
+  DEFAULT_BEARERS,
+  normalizeSubsidyPolicy,
+  round2,
+  type PoolComponents,
+  type RoomInput,
+} from "../compute";
 
 const pool = (p: Partial<PoolComponents> = {}): PoolComponents => ({
   tnbTotal: 0, airSelangor: 0, indahWater: 0, wifi: 0, cleaning: 0, maintenance: 0, ...p,
@@ -8,6 +16,19 @@ const room = (id: string, pax: number, aircon = 0, occupied = true): RoomInput =
   unitId: id, tenancyId: occupied ? `t-${id}` : null, partyId: occupied ? `p-${id}` : null,
   pax: occupied ? pax : 0, airconCharge: aircon,
 });
+const unitCap = (cap: number) => ({ kind: "unit_tnb_cap_equal_tenancy" as const, cap });
+
+function allocationMoneyByUnit(result: ReturnType<typeof computeAllocation>) {
+  return Object.fromEntries(
+    result.allocations
+      .map((a) => [a.unitId, {
+        tnbShare: a.tnbShare,
+        subsidyDeduction: a.subsidyDeduction,
+        computedAmount: a.computedAmount,
+      }] as const)
+      .sort(([left], [right]) => left < right ? -1 : left > right ? 1 : 0),
+  );
+}
 
 describe("computeAllocation", () => {
   it("SUBSIDY worked example → master 43.33 / medium 16.67, owner covers 150", () => {
@@ -133,6 +154,116 @@ describe("computeAllocation", () => {
     const rooms = [room("a", 1, 354)];
     expect(() => computeAllocation("whole", 0, pool({ tnbTotal: 300 }), rooms, DEFAULT_BEARERS, false)).toThrow(ComputeError);
     expect(() => computeAllocation("no_subsidy", 0, pool({ tnbTotal: 300 }), rooms, DEFAULT_BEARERS, true)).not.toThrow();
+  });
+});
+
+describe("unit-level TNB subsidy cap", () => {
+  it("keeps a bare numeric subsidy input on the legacy per-pax policy", () => {
+    expect(normalizeSubsidyPolicy(50)).toEqual({ kind: "legacy_per_pax", amountPerPax: 50 });
+
+    const numeric = computeAllocation("subsidy", 50, pool({ airSelangor: 90 }), [room("a", 2), room("b", 1)]);
+    const explicit = computeAllocation(
+      "subsidy",
+      { kind: "legacy_per_pax", amountPerPax: 50 },
+      pool({ airSelangor: 90 }),
+      [room("a", 2), room("b", 1)],
+    );
+    expect(explicit).toEqual(numeric);
+  });
+
+  it("user example: RM300 - RM96 private = RM204 shared; cap RM200; RM4 splits 1.34/1.33/1.33", () => {
+    const result = computeAllocation(
+      "subsidy",
+      unitCap(200),
+      pool({ tnbTotal: 300 }),
+      [room("A", 1, 18), room("B", 1, 30), room("C", 1, 48)],
+      DEFAULT_BEARERS,
+      true,
+    );
+
+    expect(result.totalAircond).toBe(96);
+    expect(result.leftoverTnb).toBe(204);
+    expect(result.subsidyCovered).toBe(200);
+
+    const [A, B, C] = ["A", "B", "C"].map((id) => result.allocations.find((a) => a.unitId === id)!);
+    expect([A.tnbShare, B.tnbShare, C.tnbShare]).toEqual([68, 68, 68]);
+    expect([A.computedAmount, B.computedAmount, C.computedAmount]).toEqual([1.34, 1.33, 1.33]);
+    expect([A.subsidyDeduction, B.subsidyDeduction, C.subsidyDeduction]).toEqual([66.66, 66.67, 66.67]);
+    expect(round2(A.computedAmount + B.computedAmount + C.computedAmount)).toBe(4);
+  });
+
+  it("assigns remainder sen by canonical identity, independent of room input order", () => {
+    const inputs = [room("A", 1, 18), room("B", 1, 30), room("C", 1, 48)];
+    const first = computeAllocation("subsidy", unitCap(200), pool({ tnbTotal: 300 }), inputs, DEFAULT_BEARERS, true);
+    const permuted = computeAllocation(
+      "subsidy",
+      unitCap(200),
+      pool({ tnbTotal: 300 }),
+      [inputs[2], inputs[0], inputs[1]],
+      DEFAULT_BEARERS,
+      true,
+    );
+
+    expect(allocationMoneyByUnit(permuted)).toEqual(allocationMoneyByUnit(first));
+    expect(allocationMoneyByUnit(first).A.computedAmount).toBe(1.34);
+  });
+
+  it("splits TNB excess equally per tenancy even with unequal pax, while water and WiFi remain per-pax", () => {
+    const result = computeAllocation(
+      "subsidy",
+      unitCap(200),
+      pool({ tnbTotal: 300, airSelangor: 60, wifi: 60 }),
+      [room("A", 1, 24), room("B", 2, 32), room("C", 3, 40)],
+      { ...DEFAULT_BEARERS, wifi: "tenant" },
+      true,
+    );
+    const [A, B, C] = ["A", "B", "C"].map((id) => result.allocations.find((a) => a.unitId === id)!);
+
+    expect(result.totalPax).toBe(6);
+    expect([A.tnbShare, B.tnbShare, C.tnbShare]).toEqual([68, 68, 68]);
+    expect([
+      round2(A.tnbShare - A.subsidyDeduction),
+      round2(B.tnbShare - B.subsidyDeduction),
+      round2(C.tnbShare - C.subsidyDeduction),
+    ]).toEqual([1.34, 1.33, 1.33]);
+    expect([A.airSelangorShare, B.airSelangorShare, C.airSelangorShare]).toEqual([10, 20, 30]);
+    expect([A.wifiShare, B.wifiShare, C.wifiShare]).toEqual([10, 20, 30]);
+    expect([A.computedAmount, B.computedAmount, C.computedAmount]).toEqual([21.34, 41.33, 61.33]);
+  });
+
+  it("includes an active tenancy with pax not yet filled in the equal-room TNB split", () => {
+    const result = computeAllocation(
+      "subsidy",
+      unitCap(200),
+      pool({ tnbTotal: 300, airSelangor: 60 }),
+      [room("A", 0, 24), room("B", 1, 32), room("C", 1, 40)],
+      DEFAULT_BEARERS,
+      true,
+    );
+    const [A, B, C] = ["A", "B", "C"].map((id) => result.allocations.find((a) => a.unitId === id)!);
+
+    expect(result.allocations).toHaveLength(3);
+    expect([A.computedAmount, B.computedAmount, C.computedAmount]).toEqual([1.34, 31.33, 31.33]);
+    expect([A.airSelangorShare, B.airSelangorShare, C.airSelangorShare]).toEqual([0, 30, 30]);
+  });
+
+  it("handles cap boundaries: zero charges the residual; equal/above residual cover all", () => {
+    const rooms = [room("A", 1), room("B", 1)];
+    const zeroCap = computeAllocation("subsidy", unitCap(0), pool({ tnbTotal: 10 }), rooms, DEFAULT_BEARERS, true);
+    expect(zeroCap.subsidyCovered).toBe(0);
+    expect(zeroCap.allocations.map((a) => a.computedAmount)).toEqual([5, 5]);
+
+    const exactCap = computeAllocation("subsidy", unitCap(10), pool({ tnbTotal: 10 }), rooms, DEFAULT_BEARERS, true);
+    expect(exactCap.subsidyCovered).toBe(10);
+    expect(exactCap.allocations.map((a) => a.computedAmount)).toEqual([0, 0]);
+
+    const overCap = computeAllocation("subsidy", unitCap(12), pool({ tnbTotal: 10 }), rooms, DEFAULT_BEARERS, true);
+    expect(overCap.subsidyCovered).toBe(10);
+    expect(overCap.allocations.map((a) => a.computedAmount)).toEqual([0, 0]);
+    expect(overCap.allocations.every((a) => a.subsidyDeduction <= a.tnbShare)).toBe(true);
+
+    expect(() => computeAllocation("subsidy", unitCap(-0.01), pool({ tnbTotal: 10 }), rooms, DEFAULT_BEARERS, true))
+      .toThrow(expect.objectContaining({ code: "INVALID_SUBSIDY_CAP" }));
   });
 });
 

@@ -2,6 +2,7 @@ import { generateTenancyCodeTx } from "../tenancy/tenancy-code-generator";
 import { releaseAssignmentsForTenancyTx } from "../carpark/carpark-assignment.service";
 import { createInvoiceTx, recomputeInvoiceTotalTx } from "../billing/auto-draft.repository";
 import { isPhase2FlagEnabled } from "../../lib/feature-flags";
+import { splitInclusiveSst, TENANCY_AGREEMENT_SST_RATE } from "@kason/shared";
 
 export type SyncOccupancyTenancyParams = {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -251,17 +252,33 @@ export async function syncOccupancyTenancy(params: SyncOccupancyTenancyParams) {
       periodMonth,
       idempotencyKey,
     });
-    await tx.charge.create({
+    const split = splitInclusiveSst(agreementFee.toFixed(2), TENANCY_AGREEMENT_SST_RATE);
+    const baseCharge = await tx.charge.create({
       data: {
         organizationId: orgId, chargeNumber: `TAF-${created.id}`, tenancyId: created.id,
         unitId: unit.id, partyId, categoryId: category?.id ?? null,
-        chargeType: "tenancy_agreement_fee", status: "draft", description: "Tenancy agreement fee",
-        dueDate, amount: agreementFee.toFixed(2), outstandingAmount: agreementFee.toFixed(2),
+        chargeType: "tenancy_agreement_fee", status: "draft", description: "TA (WITH SST)",
+        dueDate, amount: split.base, outstandingAmount: split.base,
+        sstRate: split.sst === "0.00" ? "0" : TENANCY_AGREEMENT_SST_RATE,
         currency: "MYR", billingMonth: periodMonth, attachmentKeys: [], invoiceId: invoice.id,
         nature: "profit", revenueRecognition: "manager_revenue", settlementRecipient: "manager",
-        commercialPurpose: "SERVICE",
+        commercialPurpose: "SERVICE", taxTreatment: "taxable_service", taxRate: TENANCY_AGREEMENT_SST_RATE,
       },
+      select: { id: true },
     });
+    if (split.sst !== "0.00") {
+      await tx.charge.create({
+        data: {
+          organizationId: orgId, chargeNumber: `TAF-${created.id}-SST`, tenancyId: created.id,
+          unitId: unit.id, partyId, categoryId: category?.id ?? null,
+          chargeType: "tenancy_agreement_fee", status: "draft", description: `TA (WITH SST) — SST ${TENANCY_AGREEMENT_SST_RATE}%`,
+          dueDate, amount: split.sst, outstandingAmount: split.sst, sstRate: "0",
+          currency: "MYR", billingMonth: periodMonth, attachmentKeys: [], invoiceId: invoice.id,
+          parentChargeId: baseCharge.id, nature: "profit", revenueRecognition: "manager_revenue", settlementRecipient: "manager",
+          commercialPurpose: "SERVICE", taxTreatment: "taxable_service", taxRate: TENANCY_AGREEMENT_SST_RATE,
+        },
+      });
+    }
     await recomputeInvoiceTotalTx(tx, orgId, invoice.id);
   }
 }

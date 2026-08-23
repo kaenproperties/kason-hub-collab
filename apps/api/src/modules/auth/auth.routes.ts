@@ -81,6 +81,7 @@ authRoutes.get("/me", async (c) => {
   if (!session || session.userType?.toLowerCase() === "tenant") return c.json({ error: "Unauthorized" }, 401);
 
   const result = await meService(session);
+  if (!result.ok) return c.json({ error: "Unauthorized" }, 401);
   return c.json(result.data);
 });
 

@@ -23,7 +23,11 @@
  * catch it until a downstream Σ-invariant throws, far from the cause.
  */
 export type ShareComponents = {
-  /** gross per-pax share of leftover TNB */
+  /**
+   * Gross share of leftover TNB. Legacy/no-subsidy policies allocate it per pax;
+   * the unit-cap policy allocates it equally per occupied tenancy/room so its
+   * separately-computed tenant excess can be split deterministically to the sen.
+   */
   tnbShare: number;
   airSelangorShare: number;
   indahShare: number;
@@ -39,7 +43,7 @@ export type AllocationLine = ShareComponents & {
   pax: number;
   /** Σ of ShareComponents — computed, never hand-listed. */
   grossShareTotal: number;
-  /** Owner subsidy applied to this room (0 unless SUBSIDY). */
+  /** Owner subsidy applied to this room (legacy per-pax or unit-level TNB cap). */
   subsidyDeduction: number;
   /** Net utility charge = grossShareTotal − subsidyDeduction. */
   computedAmount: number;

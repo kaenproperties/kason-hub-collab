@@ -8,8 +8,10 @@ import { TenantTable } from "./tenants-table";
 import { CreateTenantDialog } from "./tenants-action-dialogs";
 import { PartiesAreaTabs } from "./parties-area-tabs";
 import type { TenantListItem } from "./tenants-table";
+import { usePermission } from "@/components/permission-gate";
 
 export default function TenantsPage() {
+  const canCreateParty = usePermission("party.create");
   const [searchParams] = useSearchParams();
   const focusedPartyId = searchParams.get("partyId");
   const tenants = useQuery({
@@ -98,13 +100,13 @@ export default function TenantsPage() {
               </div>
             ))}
           </div>
-          <CreateTenantDialog
+          {canCreateParty && <CreateTenantDialog
             trigger={
               <Button variant="gold">
                 <Plus className="size-4" /> New Tenant
               </Button>
             }
-          />
+          />}
         </div>
       </div>
 

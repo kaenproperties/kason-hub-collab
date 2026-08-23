@@ -56,6 +56,7 @@ type ApartmentFormState = {
   highlights: string[];
   description: string;
   partitionBillingMode: PartitionBillingMode | null;
+  tnbSubsidyCapMonthly: string;
   // Owner — apartment-scoped, fans out to every room server-side
   ownerPartyId: string | null;
   ownerName: string;
@@ -73,6 +74,8 @@ function apartmentToForm(apt: ApartmentSummary): ApartmentFormState {
     highlights: apt.highlights,
     description: apt.description ?? "",
     partitionBillingMode: apt.partitionBillingMode ?? null,
+    tnbSubsidyCapMonthly:
+      apt.tnbSubsidyCapMonthly == null ? "" : String(apt.tnbSubsidyCapMonthly),
     ownerPartyId: apt.ownerPartyId,
     ownerName: apt.ownerName ?? "",
     ownerPhone: apt.ownerPhone,
@@ -115,6 +118,9 @@ export function apartmentFormChangedFields(
   }
   if (initial.partitionBillingMode !== current.partitionBillingMode) {
     changed.push("partitionBillingMode");
+  }
+  if (initial.tnbSubsidyCapMonthly !== current.tnbSubsidyCapMonthly) {
+    changed.push("tnbSubsidyCapMonthly");
   }
   if (initial.ownerPartyId !== current.ownerPartyId) {
     changed.push("ownerPartyId");
@@ -211,6 +217,7 @@ const FIELD_LABELS: Record<string, string> = {
   highlights: "Highlights",
   description: "Description",
   partitionBillingMode: "Billing model",
+  tnbSubsidyCapMonthly: "Monthly TNB owner subsidy cap",
   ownerPartyId: "Owner",
 };
 
@@ -265,6 +272,12 @@ function EditApartmentForm({
       if (changedFields.includes("partitionBillingMode") && form.partitionBillingMode) {
         apartmentPatch.partitionBillingMode = form.partitionBillingMode;
       }
+      if (changedFields.includes("tnbSubsidyCapMonthly")) {
+        apartmentPatch.tnbSubsidyCapMonthly =
+          form.tnbSubsidyCapMonthly.trim() === ""
+            ? null
+            : Number(form.tnbSubsidyCapMonthly);
+      }
       if (changedFields.includes("ownerPartyId")) {
         apartmentPatch.ownerPartyId = form.ownerPartyId;
       }
@@ -289,6 +302,14 @@ function EditApartmentForm({
 
   function onSubmit(e: React.FormEvent<HTMLFormElement>) {
     e.preventDefault();
+    if (
+      form.tnbSubsidyCapMonthly.trim() !== "" &&
+      (!/^\d+(\.\d{1,2})?$/.test(form.tnbSubsidyCapMonthly.trim()) ||
+        Number(form.tnbSubsidyCapMonthly) > 9_999_999_999.99)
+    ) {
+      toast.error("Enter a nonnegative monthly TNB subsidy cap with no more than 2 decimal places.");
+      return;
+    }
     if (changedFields.length === 0) {
       toast.info("No changes to save.");
       return;
@@ -501,9 +522,33 @@ function EditApartmentForm({
               />
             </div>
             <Callout variant="info">
-              SUBSIDY: the configured owner subsidy is deducted per pax from each tenant&apos;s
-              shared-utility share. NO_SUBSIDY: tenants pay their full shared-utility share.
+              A monthly TNB cap below takes priority for the unit&apos;s shared TNB
+              remainder, even when the legacy billing model is NO_SUBSIDY. If the cap
+              is blank, SUBSIDY uses the legacy organization-level per-pax policy;
+              NO_SUBSIDY provides no owner subsidy.
             </Callout>
+            <label className="block">
+              <span className="text-xs text-muted-foreground">
+                Monthly TNB owner subsidy cap (RM)
+              </span>
+              <Input
+                type="number"
+                min={0}
+                step="0.01"
+                inputMode="decimal"
+                value={form.tnbSubsidyCapMonthly}
+                onChange={(event) =>
+                  set({ tnbSubsidyCapMonthly: event.target.value })
+                }
+                placeholder="e.g. 200.00"
+              />
+              <p className="mt-1 text-[11px] text-muted-foreground/80">
+                Optional, per unit and per month. A value overrides the legacy billing
+                mode for the shared TNB remainder. Blank follows that mode: SUBSIDY uses
+                per-pax, while NO_SUBSIDY provides no subsidy. Applies after private-meter
+                TNB charges are removed.
+              </p>
+            </label>
           </div>
         )}
 

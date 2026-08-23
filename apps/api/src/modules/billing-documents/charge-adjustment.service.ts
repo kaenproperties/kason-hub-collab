@@ -40,6 +40,7 @@ import { syncOwnerLedgerForCharges } from "../owner-ledger/owner-ledger.sync-hoo
 import { offsetCreditNoteAgainstOpenCharges } from "./credit-apply.service";
 import { assertPeriodOpen } from "../owner-ledger/assert-period-open";
 import { ensureChargeCategorySeeds } from "../charge-categories/seed";
+import { isExactTaTaxPairCharge } from "./ta-tax-pair.guard";
 
 export type ChargeAdjustmentSession = { orgId: string; userId: string; role: string };
 
@@ -231,6 +232,16 @@ export async function createChargeAdjustmentService(
   if (amountCents <= 0) return { ok: false, status: 400, error: "AMOUNT_INVALID" };
 
   const db = getDb();
+  // This endpoint adjusts one logical charge.  Gross-inclusive TA / renewal fees
+  // are represented by an exact base + SST pair, so the existing generic sibling
+  // mirror is not a safe correction mechanism for them.  Guard before the lazy
+  // category seed (which may write) and repeat inside the financial transaction.
+  const pairedTa = await db.$transaction((tx) =>
+    isExactTaTaxPairCharge(tx, session.orgId, input.chargeId),
+  );
+  if (pairedTa) {
+    return { ok: false, status: 409, error: "TAX_PAIR_CORRECTION_UNSUPPORTED" };
+  }
   // Kind-namespaced idempotency key: the prefix is ALWAYS applied (even over a
   // caller-supplied token), mirroring credit-notes.service.ts's `dn:adjust:`
   // idiom — this is deliberate, not a literal "use the caller's key verbatim"
@@ -273,6 +284,13 @@ export async function createChargeAdjustmentService(
         },
       });
       if (!charge) return { ok: false as const, status: 400, error: "CHARGE_NOT_ADJUSTABLE" };
+      if (await isExactTaTaxPairCharge(tx, session.orgId, charge.id)) {
+        return {
+          ok: false as const,
+          status: 409,
+          error: "TAX_PAIR_CORRECTION_UNSUPPORTED",
+        };
+      }
       if (!["posted", "partially_paid", "paid"].includes(charge.status)) {
         return { ok: false as const, status: 400, error: "CHARGE_NOT_ADJUSTABLE" };
       }

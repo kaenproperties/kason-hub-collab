@@ -6,6 +6,7 @@ const ensureChargeCategorySeeds = vi.fn();
 const recordAudit = vi.fn();
 const documentSeriesFindFirst = vi.fn();
 const supplierExpenseCreate = vi.fn();
+const supplierExpenseFindMany = vi.fn();
 const chargeCategoryFindMany = vi.fn();
 const kaenOperatingExpenseCreateMany = vi.fn();
 
@@ -18,6 +19,7 @@ vi.mock("../../charge-categories/seed", () => ({
 vi.mock("../../../lib/audit", () => ({ recordAudit: (...a: unknown[]) => recordAudit(...a) }));
 vi.mock("@kason/db", () => ({
   getDb: () => ({
+    supplierExpense: { findMany: (...a: unknown[]) => supplierExpenseFindMany(...a) },
     $transaction: async (fn: (tx: unknown) => unknown) =>
       fn({
         documentSeries: { findFirst: (...a: unknown[]) => documentSeriesFindFirst(...a) },
@@ -29,7 +31,7 @@ vi.mock("@kason/db", () => ({
   }),
 }));
 
-import { createSupplierExpenseService, ExpenseError } from "../expenses.service";
+import { createSupplierExpenseService, ExpenseError, listSupplierExpensesService } from "../expenses.service";
 
 const CTX = { orgId: "org-1", actorUserId: "user-1", actorRole: "editor" };
 const goodInput = {
@@ -41,6 +43,37 @@ const goodInput = {
     { borneBy: "owner" as const, amount: "280.00" },
   ],
 };
+
+describe("listSupplierExpensesService permission scoping", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    supplierExpenseFindMany.mockResolvedValue([]);
+  });
+
+  it("limits a claim creator to claims they created", async () => {
+    await listSupplierExpensesService(CTX, { ownOnly: true });
+
+    expect(supplierExpenseFindMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: {
+          organizationId: "org-1",
+          status: "recorded",
+          createdById: "user-1",
+        },
+      }),
+    );
+  });
+
+  it("does not apply creator filtering to users allowed to view all claims or costs", async () => {
+    await listSupplierExpensesService(CTX, { ownOnly: false });
+
+    expect(supplierExpenseFindMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: { organizationId: "org-1", status: "recorded" },
+      }),
+    );
+  });
+});
 
 describe("createSupplierExpenseService (P3)", () => {
   beforeEach(() => {

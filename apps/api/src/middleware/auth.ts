@@ -2,20 +2,6 @@ import { createMiddleware } from "hono/factory";
 import { getCookie } from "hono/cookie";
 import { getDb } from "@kason/db";
 import { verifySessionToken, type SessionPayload } from "../lib/auth";
-import { authStatusCache } from "../lib/auth-status-cache";
-
-async function isUserActive(userId: string): Promise<boolean> {
-  const cached = authStatusCache.get(userId);
-  if (cached) return cached.status === "active";
-  const db = getDb();
-  const user = await db.user.findUnique({
-    where: { id: userId },
-    select: { status: true },
-  });
-  const status = user?.status ?? "unknown";
-  authStatusCache.set(userId, status);
-  return status === "active";
-}
 
 export const authMiddleware = createMiddleware<{ Variables: { session: SessionPayload } }>(async (c, next) => {
   // 1. Read token: cookie first, then Bearer header
@@ -40,11 +26,34 @@ export const authMiddleware = createMiddleware<{ Variables: { session: SessionPa
     return c.json({ error: "Unauthorized" }, 401);
   }
 
-  // 2. DB status recheck (cached 60 s)
-  if (!(await isUserActive(session.userId))) {
+  // 2. Reload the authoritative operator on every request. Role changes,
+  // explicit false overrides and deactivation must take effect immediately;
+  // relying on the JWT (or the old 60-second status cache) left a window where
+  // a revoked permission could still be exercised.
+  const operator = await getDb().user.findFirst({
+    where: {
+      id: session.userId,
+      organizationId: session.orgId,
+      userType: "operator",
+      status: "active",
+    },
+    select: {
+      role: true,
+      partyId: true,
+      permissionOverrides: true,
+    },
+  });
+
+  if (!operator) {
     return c.json({ error: "Account deactivated" }, 401);
   }
 
-  c.set("session", session);
+  c.set("session", {
+    ...session,
+    role: operator.role,
+    partyId: operator.partyId ?? undefined,
+    permissionOverrides: (operator.permissionOverrides ?? {}) as Record<string, boolean>,
+    permissionsResolved: true,
+  });
   await next();
 });

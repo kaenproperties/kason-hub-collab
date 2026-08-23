@@ -8,7 +8,7 @@
 
 import type { DocumentSeries, Prisma } from "@kason/db";
 import { getDb } from "@kason/db";
-import { centsToString, toCents, resolveDocumentClassification, resolveOwnerReferences, DEFAULT_SERIES_FOR_CLASSIFICATION, CLASSIFICATION_FOR_DEFAULT_SERIES } from "@kason/shared";
+import { centsToString, toCents, splitInclusiveSst, resolveDocumentClassification, resolveOwnerReferences, DEFAULT_SERIES_FOR_CLASSIFICATION, CLASSIFICATION_FOR_DEFAULT_SERIES } from "@kason/shared";
 import type { CommercialPurpose, FundedBy, RevenueRecognition, SettlementRecipient } from "@kason/shared";
 import { recordAudit } from "../../lib/audit";
 import { isPhase2FlagEnabled } from "../../lib/feature-flags";
@@ -26,6 +26,13 @@ export type IssueLineInput = {
   amount: string;
   /** Percent, e.g. "8" or "0". */
   sstRate: string;
+  /**
+   * Optional exact SST amount for an SST-inclusive source total. When absent,
+   * SST is derived from amount × rate using the normal per-line rounding rule.
+   * This lets a gross RM500.00 agreement fee remain exactly RM500.00 while its
+   * tax fields state RM462.96 base + RM37.04 SST.
+   */
+  sstAmount?: string;
   /**
    * TAX line. Its `amount` IS the SST that a SIBLING base line already contributed via
    * that line's `sstRate` — it exists only so the tax has a Charge a payment can settle
@@ -136,7 +143,10 @@ export async function issueDocumentTx(
   let sstCents = 0;
   const lineRows = input.lines.map((l) => {
     const amountCents = toCents(l.amount, "issueDocumentTx.amount");
-    const sst = lineSstCents(l.amount, l.sstRate);
+    const sst = l.sstAmount === undefined
+      ? lineSstCents(l.amount, l.sstRate)
+      : toCents(l.sstAmount, "issueDocumentTx.sstAmount");
+    if (sst < 0) throw new Error("DOCUMENT_LINE_SST_MUST_NOT_BE_NEGATIVE");
     // A TAX line carries, as its amount, the SST its sibling base line already added
     // to `sstCents` via that line's rate. Counting it into subtotal too would put the
     // same money into `total` twice. Its own rate is "0", so `sstCents += sst` is a
@@ -253,6 +263,8 @@ export const CHARGE_TYPE_TO_CATEGORY_CODE: Record<string, string> = {
   cleaning: "cleaning_tenant",
   management_fee: "management_fee",
   access_card: "access_card_replacement",
+  tenancy_agreement_fee: "tenancy_agreement_fee",
+  renewal_fee: "renewal_fee",
 };
 
 type ChargeForMint = {
@@ -260,10 +272,15 @@ type ChargeForMint = {
   organizationId: string;
   chargeNumber: string;
   chargeType: string;
+  status: string;
   categoryId: string | null;
   description: string | null;
   amount: { toString(): string };
   sstRate: { toString(): string } | null;
+  parentChargeId: string | null;
+  invoiceId: string | null;
+  currency: string;
+  dueDate: Date;
   billingMonth: Date | null;
   partyId: string;
   tenancyId: string | null;
@@ -371,12 +388,17 @@ function buildLinesForCharge(
   breakdown: ChargeLineBreakdown[] | undefined,
 ): IssueLineInput[] {
   const sstRate = charge.sstRate != null ? charge.sstRate.toString() : category.defaultSstRate.toString();
+  const description = charge.chargeType === "tenancy_agreement_fee"
+    ? "Admin and Agreement Fee"
+    : charge.chargeType === "renewal_fee"
+      ? "Admin and Agreement Fee (Renewal)"
+      : charge.description ?? category.name;
   if (!breakdown || breakdown.length === 0) {
     return [
       {
         chargeId: charge.id,
         categoryId: category.id,
-        description: charge.description ?? category.name,
+        description,
         amount: charge.amount.toString(),
         sstRate,
       },
@@ -424,31 +446,161 @@ export async function issueDocumentsForChargesTx(
 ): Promise<void> {
   if (!isPhase2FlagEnabled("ENABLE_PHASE2_BILLING_DOCS")) return;
   if (!chargeIds || chargeIds.length === 0) return;
-  const charges: ChargeForMint[] = await tx.charge.findMany({
-    where: { id: { in: chargeIds }, status: { in: ["posted", "partially_paid", "paid"] } },
+  const requestedIds = [...new Set(chargeIds)];
+  const requestedCharges: ChargeForMint[] = await tx.charge.findMany({
+    // Read the requested rows before filtering by status. Agreement-fee pairs
+    // are a strong invariant: silently ignoring a draft/void leg here can let a
+    // caller issue only its live sibling.
+    where: { id: { in: requestedIds } },
     select: {
-      id: true, organizationId: true, chargeNumber: true, chargeType: true, categoryId: true,
-      description: true, amount: true, sstRate: true, billingMonth: true, partyId: true, tenancyId: true,
+      id: true, organizationId: true, chargeNumber: true, chargeType: true, status: true, categoryId: true,
+      description: true, amount: true, sstRate: true, parentChargeId: true, invoiceId: true, currency: true, dueDate: true,
+      billingMonth: true, partyId: true, tenancyId: true,
       unitId: true,
       unit: { select: { apartmentId: true, apartment: { select: { propertyId: true } } } },
       commercialPurpose: true, fundedBy: true, revenueRecognition: true, settlementRecipient: true, nonBillable: true,
     },
   });
-  if (charges.length === 0) return;
-  const orgId = charges[0].organizationId;
+  if (requestedCharges.length === 0) return;
+  const orgIds = new Set(requestedCharges.map((charge) => charge.organizationId));
+  if (orgIds.size !== 1) throw new Error("DOCUMENT_CHARGES_MUST_SHARE_ORGANIZATION");
+  const orgId = requestedCharges[0]!.organizationId;
+
+  // TA and renewal amounts use a base + exact payable SST sibling. Posting and
+  // healing callers do not all pass both ids, so close the requested set over
+  // the pair before issuing. This is read-only closure: if one leg is still
+  // draft, validation below aborts the caller's posting transaction rather than
+  // silently promoting money the caller did not authorize.
+  const isAgreementFee = (charge: Pick<ChargeForMint, "chargeType">) =>
+    charge.chargeType === "tenancy_agreement_fee" || charge.chargeType === "renewal_fee";
+  const liveStatuses = new Set(["posted", "partially_paid", "paid"]);
+  for (const charge of requestedCharges) {
+    if (isAgreementFee(charge) && !liveStatuses.has(charge.status)) {
+      throw new Error(`TA_TAX_PAIR_NOT_POSTED: ${charge.chargeNumber}`);
+    }
+  }
+  const requestedLiveCharges = requestedCharges.filter((charge) => liveStatuses.has(charge.status));
+  if (requestedLiveCharges.length === 0) return;
+  const pairRootIds = [...new Set(requestedCharges.flatMap((charge) => {
+    if (!isAgreementFee(charge)) return [];
+    return [charge.parentChargeId && charge.chargeNumber.endsWith("-SST") ? charge.parentChargeId : charge.id];
+  }))];
+  let charges = requestedLiveCharges;
+  if (pairRootIds.length > 0) {
+    const pairMembers: ChargeForMint[] = await tx.charge.findMany({
+      where: {
+        organizationId: orgId,
+        OR: [{ id: { in: pairRootIds } }, { parentChargeId: { in: pairRootIds } }],
+      },
+      select: {
+        id: true, organizationId: true, chargeNumber: true, chargeType: true, status: true, categoryId: true,
+        description: true, amount: true, sstRate: true, parentChargeId: true, invoiceId: true, currency: true, dueDate: true,
+        billingMonth: true, partyId: true, tenancyId: true,
+        unitId: true,
+        unit: { select: { apartmentId: true, apartment: { select: { propertyId: true } } } },
+        commercialPurpose: true, fundedBy: true, revenueRecognition: true, settlementRecipient: true, nonBillable: true,
+      },
+    });
+    const byId = new Map(requestedLiveCharges.map((charge) => [charge.id, charge]));
+    for (const member of pairMembers) byId.set(member.id, member);
+    charges = [...byId.values()];
+  }
   // Idempotent per-org seed — §4.6: series unconfigured → auto-seed defaults,
   // never a production-path failure. ensureChargeCategorySeeds opens its OWN
   // connection (create-only upserts, harmless if they outlive a rollback); the
   // tx reads below run at READ COMMITTED and see the freshly committed rows.
   await ensureChargeCategorySeeds(orgId);
 
+  // A linked `-SST` Charge is the payable tax sibling of its base Charge. Keep
+  // both receivables on ONE document: the base line declares the exact SST and
+  // the sibling line is marked isTax so it remains payable without being counted
+  // into subtotal a second time. Generic parentChargeId links are deliberately
+  // ignored; the exact charge-number convention is the tax identity guard.
+  const chargeById = new Map(charges.map((charge) => [charge.id, charge]));
+  const taxChildByParentId = new Map<string, ChargeForMint>();
+  const taxChildIds = new Set<string>();
+  const sameDate = (left: Date | null, right: Date | null) => left?.getTime() === right?.getTime();
+  for (const rootId of pairRootIds) {
+    const parent = chargeById.get(rootId);
+    if (!parent || !isAgreementFee(parent) || parent.parentChargeId !== null) {
+      throw new Error(`TA_TAX_PAIR_PARENT_INVALID: ${rootId}`);
+    }
+    const children = charges.filter((charge) =>
+      charge.parentChargeId === parent.id && charge.chargeNumber === `${parent.chargeNumber}-SST`,
+    );
+    const explicitRate = Number(parent.sstRate?.toString() ?? "NaN");
+    if (children.length === 0) {
+      // Explicit zero is the migration-stamped legacy gross row. Null is not
+      // accepted here because the category fallback is now 8% and would revive
+      // the historical double-SST bug during a heal.
+      if (explicitRate === 0) continue;
+      throw new Error(`TA_TAX_SIBLING_REQUIRED: ${parent.chargeNumber}`);
+    }
+    if (children.length !== 1) throw new Error(`MULTIPLE_TAX_SIBLINGS: ${parent.chargeNumber}`);
+    const child = children[0]!;
+    if (!liveStatuses.has(parent.status) || !liveStatuses.has(child.status)) {
+      throw new Error(`TA_TAX_PAIR_NOT_POSTED: ${parent.chargeNumber}`);
+    }
+    if (explicitRate !== 8 || Number(child.sstRate?.toString() ?? "NaN") !== 0) {
+      throw new Error(`TA_TAX_PAIR_RATE_INVALID: ${parent.chargeNumber}`);
+    }
+    if (toCents(child.amount.toString(), "issueDocumentsForChargesTx.taxChild") <= 0) {
+      throw new Error(`TA_TAX_PAIR_AMOUNT_INVALID: ${parent.chargeNumber}`);
+    }
+    const pairFieldsMatch =
+      child.organizationId === parent.organizationId
+      && parent.invoiceId !== null
+      && child.invoiceId === parent.invoiceId
+      && child.partyId === parent.partyId
+      && child.tenancyId === parent.tenancyId
+      && child.unitId === parent.unitId
+      && child.categoryId === parent.categoryId
+      && child.currency === parent.currency
+      && child.chargeType === parent.chargeType
+      && sameDate(child.billingMonth, parent.billingMonth)
+      && child.dueDate.getTime() === parent.dueDate.getTime()
+      && child.commercialPurpose === parent.commercialPurpose
+      && child.fundedBy === parent.fundedBy
+      && child.revenueRecognition === parent.revenueRecognition
+      && child.settlementRecipient === parent.settlementRecipient
+      && child.nonBillable === parent.nonBillable;
+    if (!pairFieldsMatch) throw new Error(`TA_TAX_PAIR_SCOPE_MISMATCH: ${parent.chargeNumber}`);
+
+    // The two receivables must be the exact inclusive split, not merely two
+    // arbitrary amounts that happen to share a link. This also protects small
+    // values where recomputing SST from the rounded base would lose a sen.
+    const pairGrossCents =
+      toCents(parent.amount.toString(), "issueDocumentsForChargesTx.taxBase")
+      + toCents(child.amount.toString(), "issueDocumentsForChargesTx.taxChild");
+    const expected = splitInclusiveSst(centsToString(pairGrossCents), "8");
+    if (
+      toCents(parent.amount.toString(), "issueDocumentsForChargesTx.taxBase") !== toCents(expected.base)
+      || toCents(child.amount.toString(), "issueDocumentsForChargesTx.taxChild") !== toCents(expected.sst)
+    ) {
+      throw new Error(`TA_TAX_PAIR_AMOUNT_INVALID: ${parent.chargeNumber}`);
+    }
+    taxChildByParentId.set(parent.id, child);
+    taxChildIds.add(child.id);
+  }
+
   for (const charge of charges) {
-    // Replay guard: already documented (any docType) → skip.
-    const existingLine = await tx.billingDocumentLine.findFirst({
-      where: { chargeId: charge.id },
-      select: { id: true },
+    if (taxChildIds.has(charge.id)) continue;
+    const taxChild = taxChildByParentId.get(charge.id);
+    const groupChargeIds = taxChild ? [charge.id, taxChild.id] : [charge.id];
+
+    // Replay guard: the complete pair is already documented → skip. A partial
+    // pair is an invariant violation; issuing only the missing half would create
+    // a second tax document for the same service.
+    const existingLines = await tx.billingDocumentLine.findMany({
+      where: { chargeId: { in: groupChargeIds } },
+      select: { chargeId: true, documentId: true },
     });
-    if (existingLine) continue;
+    if (existingLines.length > 0) {
+      const documentedIds = new Set(existingLines.map((line) => line.chargeId));
+      const documentIds = new Set(existingLines.map((line) => line.documentId));
+      if (groupChargeIds.every((id) => documentedIds.has(id)) && documentIds.size === 1) continue;
+      throw new Error(`PARTIAL_TAX_DOCUMENT: ${charge.chargeNumber}`);
+    }
 
     // Spec 1 (Phase 1) rent-reclassification: flag-gated routing via commercialPurpose ×
     // economic treatment (NEVER the category name). Legacy category.docType path runs when
@@ -488,6 +640,23 @@ export async function issueDocumentsForChargesTx(
       // bill the TENANT; OWNER_SERVICE bills the owner; TENANT_SERVICE bills the tenant.
       const counterpartyType: "tenant" | "owner" =
         routed.commercialDocumentType === "OWNER_SERVICE_INVOICE" ? "owner" : "tenant";
+      const lines = buildLinesForCharge(charge, catForLines, lineBreakdowns?.get(charge.id));
+      if (taxChild) {
+        if (lines.length !== 1 || lineBreakdowns?.has(charge.id)) {
+          throw new Error(`TAX_SIBLING_BREAKDOWN_UNSUPPORTED: ${charge.chargeNumber}`);
+        }
+        const rate = lines[0]!.sstRate;
+        if (!(Number(rate) > 0)) throw new Error(`TAX_SIBLING_BASE_RATE_REQUIRED: ${charge.chargeNumber}`);
+        lines[0] = { ...lines[0]!, sstAmount: taxChild.amount.toString() };
+        lines.push({
+          chargeId: taxChild.id,
+          categoryId: taxChild.categoryId ?? catForLines.id,
+          description: `${lines[0]!.description} — SST ${rate}%`,
+          amount: taxChild.amount.toString(),
+          sstRate: "0",
+          isTax: true,
+        });
+      }
       await issueDocumentTx(tx, {
         organizationId: charge.organizationId,
         docType: "invoice",
@@ -504,7 +673,7 @@ export async function issueDocumentsForChargesTx(
         principalOwnerId: owner.principalOwnerId ?? undefined,
         collectedOnBehalfOfOwnerId: owner.collectedOnBehalfOfOwnerId ?? undefined,
         idempotencyKey: `doc:${charge.chargeNumber}`,
-        lines: buildLinesForCharge(charge, catForLines, lineBreakdowns?.get(charge.id)),
+        lines,
         actorUserId,
       });
       continue;
@@ -513,6 +682,23 @@ export async function issueDocumentsForChargesTx(
     const category = await resolveCategoryForChargeTx(tx, charge);
     if (!category) throw new DocumentCategoryUnresolvedError(charge.id, charge.chargeType);
 
+    const lines = buildLinesForCharge(charge, category, lineBreakdowns?.get(charge.id));
+    if (taxChild) {
+      if (lines.length !== 1 || lineBreakdowns?.has(charge.id)) {
+        throw new Error(`TAX_SIBLING_BREAKDOWN_UNSUPPORTED: ${charge.chargeNumber}`);
+      }
+      const rate = lines[0]!.sstRate;
+      if (!(Number(rate) > 0)) throw new Error(`TAX_SIBLING_BASE_RATE_REQUIRED: ${charge.chargeNumber}`);
+      lines[0] = { ...lines[0]!, sstAmount: taxChild.amount.toString() };
+      lines.push({
+        chargeId: taxChild.id,
+        categoryId: taxChild.categoryId ?? category.id,
+        description: `${lines[0]!.description} — SST ${rate}%`,
+        amount: taxChild.amount.toString(),
+        sstRate: "0",
+        isTax: true,
+      });
+    }
     await issueDocumentTx(tx, {
       organizationId: charge.organizationId,
       docType: category.docType as "invoice" | "debit_note",
@@ -524,7 +710,7 @@ export async function issueDocumentsForChargesTx(
       listingId: charge.unitId ?? undefined,
       billingMonth: charge.billingMonth ? charge.billingMonth.toISOString().slice(0, 10) : undefined,
       idempotencyKey: `doc:${charge.chargeNumber}`,
-      lines: buildLinesForCharge(charge, category, lineBreakdowns?.get(charge.id)),
+      lines,
       actorUserId,
     });
   }
@@ -604,7 +790,9 @@ export async function healBillingDocumentsForCharges(chargeIds: string[], actorU
  * sstPercent — not just the seeded 8% default. (ChargeCategory.defaultSstRate
  * is NOT used for management_fee here; it stays the fallback for the generic
  * per-charge auto-post path in issueDocumentsForChargesTx, which has no
- * statement to mirror.) Cleaning has no SST (seeded 0) so its line is unaffected.
+ * statement to mirror.) Legacy statement-attached cleaning Charges remain a
+ * flat explicit line here; new bills-grid Cleaning invoices use the category's
+ * configured 8% rate in the grid issuer.
  * Plan 3 note: after a statement void→CN, the CN flow releases this key
  * (nulls idempotencyKey on the offset document) so a regenerate mints fresh.
  */
@@ -624,7 +812,10 @@ export async function issueStatementIvownDocumentTx(
       periodMonth: true,
       idempotencyKey: true,
       charges: {
-        where: { status: { not: "void" }, chargeType: { in: ["management_fee", "cleaning", "letting_commission_sst"] } },
+        where: {
+          status: { not: "void" },
+          chargeType: { in: ["management_fee", "cleaning", "letting_commission", "letting_commission_sst"] },
+        },
         select: { id: true, chargeType: true, description: true, amount: true, unitId: true },
       },
     },
@@ -637,11 +828,14 @@ export async function issueStatementIvownDocumentTx(
   await ensureChargeCategorySeeds(orgId);
   const mgmtCat = await tx.chargeCategory.findFirst({ where: { organizationId: orgId, code: "management_fee" } });
   const cleanCat = await tx.chargeCategory.findFirst({ where: { organizationId: orgId, code: "cleaning_owner" } });
+  const commissionCat = await tx.chargeCategory.findFirst({ where: { organizationId: orgId, code: "letting_commission" } });
   const sstCat = await tx.chargeCategory.findFirst({ where: { organizationId: orgId, code: "letting_commission_sst" } });
-  if (!mgmtCat || !cleanCat || !sstCat) {
+  if (!mgmtCat || !cleanCat || !commissionCat || !sstCat) {
     // Unreachable after the seed — but if it happens, the generate MUST abort
     // rather than commit a statement without its IVOWN document (§4.6).
-    throw new Error("IVOWN_CATEGORY_MISSING: management_fee/cleaning_owner/letting_commission_sst not found after seeding");
+    throw new Error(
+      "IVOWN_CATEGORY_MISSING: management_fee/cleaning_owner/letting_commission/letting_commission_sst not found after seeding",
+    );
   }
 
   const propertyId = inv.apartmentId
@@ -692,7 +886,19 @@ export async function issueStatementIvownDocumentTx(
       return {
         chargeId: c.id,
         categoryId: sstCat.id,
-        description: c.description ?? "Letting commission SST (owner-borne)",
+        description: "SST on Admin Fee (First Month Rental)",
+        amount: c.amount.toString(),
+        sstRate: "0",
+      };
+    }
+    if (c.chargeType === "letting_commission") {
+      // The first month's rent remains the tenant's Rental document. This is the
+      // matching owner-facing service invoice line explaining the amount KAEN
+      // retains as its fee. The SST is its own exact flat Charge immediately above.
+      return {
+        chargeId: c.id,
+        categoryId: commissionCat.id,
+        description: "Admin Fee (First Month Rental)",
         amount: c.amount.toString(),
         sstRate: "0",
       };

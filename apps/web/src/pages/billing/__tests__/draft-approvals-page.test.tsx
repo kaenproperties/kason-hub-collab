@@ -93,7 +93,7 @@ describe("Draft Approvals — document-type tabs", () => {
     await mount();
     await waitFor(() => screen.getByText("OS-1"));
     expect(screen.getByRole("button", { name: /^All\s*3$/ })).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: /Rental Invoices\s*2/ })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /Rental Payment Requests\s*2/ })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: /Owner Statements\s*1/ })).toBeInTheDocument();
   });
 
@@ -413,7 +413,7 @@ describe("Draft Approvals — issuing", () => {
     // not silently approve the owner statement sitting in the All tab.
     await mount();
     await waitFor(() => screen.getByText("OS-1"));
-    fireEvent.click(screen.getByRole("button", { name: /Rental Invoices\s*2/ }));
+    fireEvent.click(screen.getByRole("button", { name: /Rental Payment Requests\s*2/ }));
 
     await waitFor(() => screen.getByRole("button", { name: /Issue all 2 draft\(s\)/i }));
     fireEvent.click(screen.getByRole("button", { name: /Issue all 2 draft\(s\)/i }));
@@ -452,7 +452,7 @@ describe("Draft Approvals — issuing", () => {
     mockApi({ list: { items: LIST.items, total: 640 } });
     await mount();
     await waitFor(() => screen.getByText("OS-1"));
-    fireEvent.click(screen.getByRole("button", { name: /Rental Invoices\s*2/ }));
+    fireEvent.click(screen.getByRole("button", { name: /Rental Payment Requests\s*2/ }));
     await waitFor(() => screen.getByRole("button", { name: /Issue all 2 draft\(s\)/i }));
     fireEvent.click(screen.getByRole("button", { name: /Issue all 2 draft\(s\)/i }));
 

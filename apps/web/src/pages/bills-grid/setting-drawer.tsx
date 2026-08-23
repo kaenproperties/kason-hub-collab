@@ -22,7 +22,7 @@ import { Segmented, type SegmentedOption } from "@/components/ui/segmented";
 import { Button } from "@/components/ui/button";
 import { Callout } from "@/components/ui/callout";
 import { Field, TextInput } from "@/components/form-ui";
-import { useAuth } from "@/lib/auth";
+import { usePermission } from "@/components/permission-gate";
 import { ApiError } from "@/lib/api-client";
 import { isPhase2FlagEnabled } from "@/lib/feature-flags";
 import {
@@ -31,6 +31,7 @@ import {
   GRID_QUERY_KEY_ROOT,
   type BearerConfigDto,
   type BearerConfigInput,
+  type GridManagementFeeDto,
   type GridSubRow,
 } from "@/api/bills-grid";
 import { useSetTenancyPax, useUnitMeter, useUpdateMeter, useCreateMeter } from "@/api/meter";
@@ -47,6 +48,9 @@ export type SettingDrawerProps = {
    * non-empty — exclusively for partition units (a whole unit's single tenant bears all). */
   subRows?: GridSubRow[];
   isWholeUnit?: boolean;
+  managementFee?: GridManagementFeeDto;
+  ownerAssigned?: boolean;
+  onOpenManagementFee?: () => void;
 };
 
 type Bearer = "owner" | "tenant";
@@ -75,11 +79,6 @@ type FormState = {
   cleaningNature: NatureValue;
   wifiNature: NatureValue;
 };
-
-const BEARER_OPTIONS: SegmentedOption<Bearer>[] = [
-  { value: "owner", label: "Owner" },
-  { value: "tenant", label: "Tenant" },
-];
 
 // Same vocabulary as the Recurring-charges editor's NATURE_OPTIONS (recurring-settings.tsx) so
 // the two surfaces read identically. "Not set" is deliberately OFFERED rather than hidden: an
@@ -194,8 +193,11 @@ function formFromDto(dto: BearerConfigDto): FormState {
   return {
     tnbPattern: dto.tnbPattern as UtilityPatternValue,
     airPattern: dto.airPattern as UtilityPatternValue,
-    cleaningBearer: dto.cleaningBearer as Bearer,
-    wifiBearer: dto.wifiBearer as Bearer,
+    // Cleaning and WiFi are owner-only grid costs. Historical tenant-side
+    // documents remain immutable; exceptional new tenant recoveries are entered
+    // through Tenant Expenses instead of reviving a permanent tenant column.
+    cleaningBearer: "owner",
+    wifiBearer: "owner",
     maintenanceFeeBearer: dto.maintenanceFeeBearer as Bearer,
     cleaningRecurringAmount: dto.cleaningRecurringAmount,
     cleaningNature: natureFromDto(dto.cleaningNature),
@@ -238,12 +240,20 @@ function isValidMoney(raw: string): boolean {
   return /^\d+(\.\d{1,2})?$/.test(trimmed);
 }
 
-export function SettingDrawer({ apartmentId, open, onClose, subRows, isWholeUnit }: SettingDrawerProps) {
-  const { user } = useAuth();
-  const isManager = user?.role === "manager" || user?.role === "admin";
+export function SettingDrawer({
+  apartmentId,
+  open,
+  onClose,
+  subRows,
+  isWholeUnit,
+  managementFee,
+  ownerAssigned = false,
+  onOpenManagementFee,
+}: SettingDrawerProps) {
+  const canEditBillingSettings = usePermission("billing.charge.edit");
   // PAX per room is EDITOR-editable (PATCH /meter/tenancies/:id/pax is requireRole("editor")),
   // INDEPENDENT of the manager-only bearer-config save/lock below. Only for partition units.
-  const canEditPax = user?.role === "editor" || user?.role === "manager" || user?.role === "admin";
+  const canEditPax = usePermission("tenancy.edit");
   const showPaxSection = isWholeUnit === false && (subRows?.length ?? 0) > 0;
   // Electricity rate per room (RM/kWh): edit the room's AircondMeter.ratePerKwh HERE
   // instead of the tenant tracker. Manager-only (PATCH/POST /meter are requireRole
@@ -327,7 +337,7 @@ export function SettingDrawer({ apartmentId, open, onClose, subRows, isWholeUnit
               // The definition still carries a bearer to satisfy the schema, but it is NOT
               // authoritative: writeSnapshot stopped writing it, so the drawer's Owner/Tenant
               // toggle above owns that fact (one writer per fact).
-              bearer: kind === "CLEANING" ? form!.cleaningBearer : kind === "WIFI" ? form!.wifiBearer : form!.maintenanceFeeBearer,
+              bearer: kind === "CLEANING" || kind === "WIFI" ? "owner" : form!.maintenanceFeeBearer,
               // Nature rides along only when this drawer OWNS it (ungoverned CLEANING/WIFI
               // with a decided value). Otherwise omitted: the API carries the prior
               // revision's decided nature forward on edits, and an undecided create stays
@@ -409,12 +419,12 @@ export function SettingDrawer({ apartmentId, open, onClose, subRows, isWholeUnit
     // <form onSubmit> fires this on Enter-to-submit too, independent of the
     // button's disabled attribute — never let an editor or an invalid
     // (visible) cleaning amount reach the API through that path.
-    if (!form || !isManager || cleaningGateBlocks || recurringGateBlocks) return;
+    if (!form || !canEditBillingSettings || cleaningGateBlocks || recurringGateBlocks) return;
     const body: BearerConfigInput = {
       tnbPattern: form.tnbPattern,
       airPattern: form.airPattern,
-      cleaningBearer: form.cleaningBearer,
-      wifiBearer: form.wifiBearer,
+      cleaningBearer: "owner",
+      wifiBearer: "owner",
       maintenanceFeeBearer: form.maintenanceFeeBearer,
       cleaningRecurringAmount: normalizeAmount(form.cleaningRecurringAmount),
       unlock,
@@ -432,14 +442,14 @@ export function SettingDrawer({ apartmentId, open, onClose, subRows, isWholeUnit
   // Fields: editors are read-only no matter what (setBearerConfig is
   // manager-only, R26) — managers are ALWAYS editable, never field-disabled
   // by lock state (a manager unlocks by saving, not by a separate step).
-  const fieldsDisabled = !isManager;
+  const fieldsDisabled = !canEditBillingSettings;
   // Merge the two locked signals: an already-locked config at last GET
   // (dto.isLocked — the steady state after any successful save) OR a 409
   // race that started from an as-fetched-unlocked config. Either flips a
   // manager's Save into an explicit, audited "Unlock & save".
-  const showUnlock = isManager && (Boolean(dto?.isLocked) || raceLocked);
+  const showUnlock = canEditBillingSettings && (Boolean(dto?.isLocked) || raceLocked);
 
-  const warning = !isManager
+  const warning = !canEditBillingSettings
     ? dto?.isLocked
       ? { variant: "warning" as const, body: "Locked — a manager must unlock to change" }
       : { variant: "warning" as const, body: "Only a manager can change these billing settings." }
@@ -469,7 +479,7 @@ export function SettingDrawer({ apartmentId, open, onClose, subRows, isWholeUnit
         pendingLabel: "Saving…",
         variant: "gold",
         pending: saveMutation.isPending,
-        disabled: !isManager || !form || cleaningGateBlocks || recurringGateBlocks,
+        disabled: !canEditBillingSettings || !form || cleaningGateBlocks || recurringGateBlocks,
       }}
     >
       {configQuery.isError ? (
@@ -485,33 +495,26 @@ export function SettingDrawer({ apartmentId, open, onClose, subRows, isWholeUnit
         <p className="text-sm text-muted-foreground">Loading…</p>
       ) : (
         <div className="grid gap-4">
-          {/* Cleaning BORNE-BY + NATURE.
+          {/* Cleaning owner-only + NATURE.
               charge-nature gate (2026-07-27) — these were previously hidden whenever the
               recurring flag was on, on the theory that the RecurringSettings editor below owned
               cleaning/WiFi end-to-end. It only owns them when a definition GOVERNS the month.
-              A unit with NO recurring definition (the common case) had its scalar fall back to
-              the schema defaults — bearer "owner", nature null ⇒ profit — with no surface
-              anywhere to say otherwise, silently invoicing the OWNER for their own WiFi.
-              So: render them whenever the kind is UNGOVERNED, and read-only (pointing at the
-              editor) when it is governed — never a second writable source of truth. */}
+              The amount/nature controls remain here, but the bearer is fixed to Owner.
+              Exceptional tenant cleaning is entered through Tenant Expenses. */}
           <Field
             label="Cleaning"
             hint={
               governedCleaning
-                ? "Amount is fixed by the Cleaning recurring charge below. Who bears it is still set here."
+                ? "Amount is fixed by the Cleaning recurring charge below. Cleaning is owner-borne."
                 : natureRoutingOn
-                  ? "Nature decides the destination: Profit → owner invoice (IVOWN) / tenant invoice (IVTEN); Expense → owner payout deduction / tenant Expense Bill (EB). Leave “Not set” and the Bill is blocked rather than guessing."
-                  : "Who bears this cost — the owner or the tenant."
+                  ? "Cleaning is owner-borne. Profit → owner invoice (IVOWN); Expense → owner payout deduction. Use Tenant Expenses for an exceptional tenant cleaning charge."
+                  : "Cleaning is owner-borne. Use Tenant Expenses for an exceptional tenant cleaning charge."
             }
           >
             <div className="grid gap-2">
-              <Segmented<Bearer>
-                ariaLabel="Cleaning bearer"
-                value={form.cleaningBearer}
-                onChange={(v) => set("cleaningBearer", v)}
-                options={BEARER_OPTIONS}
-                disabled={fieldsDisabled}
-              />
+              <div className="rounded-md border border-border/60 bg-muted/30 px-3 py-2 text-sm font-medium">
+                Owner
+              </div>
               {natureRoutingOn && (
                 <Segmented<NatureValue>
                   ariaLabel="Cleaning nature"
@@ -572,27 +575,22 @@ export function SettingDrawer({ apartmentId, open, onClose, subRows, isWholeUnit
             </div>
           </Field>
 
-          {/* WiFi BORNE-BY + NATURE — see the Cleaning field above for why these are no longer
-              hidden behind the recurring flag. This is the exact control whose absence made an
-              unconfigured WiFi scalar bill the OWNER as profit on IVOWN. */}
+          {/* WiFi is an owner-only pass-through. Exceptional tenant recovery goes through
+              Tenant Expenses rather than a permanent WiFi Tenant column. */}
           <Field
             label="WiFi"
             hint={
               governedWifi
-                ? "Amount is fixed by the WiFi recurring charge below. Who bears it is still set here."
+                ? "Amount is fixed by the WiFi recurring charge below. WiFi is owner-borne."
                 : natureRoutingOn
-                  ? "Nature decides the destination: Profit → owner invoice (IVOWN) / tenant invoice (IVTEN); Expense → owner payout deduction / tenant Expense Bill (EB). Leave “Not set” and the Bill is blocked rather than guessing."
-                  : "Who bears this cost — the owner or the tenant."
+                  ? "WiFi is owner-borne. Expense deducts the supplier bill from owner payout; use Tenant Expenses for an exceptional tenant recovery."
+                  : "WiFi is owner-borne. Use Tenant Expenses for an exceptional tenant recovery."
             }
           >
             <div className="grid gap-2">
-              <Segmented<Bearer>
-                ariaLabel="WiFi bearer"
-                value={form.wifiBearer}
-                onChange={(v) => set("wifiBearer", v)}
-                options={BEARER_OPTIONS}
-                disabled={fieldsDisabled}
-              />
+              <div className="rounded-md border border-border/60 bg-muted/30 px-3 py-2 text-sm font-medium">
+                Owner
+              </div>
               {natureRoutingOn && (
                 <Segmented<NatureValue>
                   ariaLabel="WiFi nature"
@@ -670,7 +668,7 @@ export function SettingDrawer({ apartmentId, open, onClose, subRows, isWholeUnit
           {!recurringFlagOn && (
             <Field
               label="Cleaning recurring amount (RM)"
-              error={isManager && !cleaningAmountValid ? "Enter a cleaning amount" : null}
+              error={canEditBillingSettings && !cleaningAmountValid ? "Enter a cleaning amount" : null}
             >
               <TextInput
                 type="number"
@@ -686,6 +684,60 @@ export function SettingDrawer({ apartmentId, open, onClose, subRows, isWholeUnit
         </div>
       )}
 
+      <div
+        data-testid="management-fee-settings"
+        className="mt-2 grid gap-3 rounded-xl border border-amber-300/70 bg-amber-50/40 p-4 dark:border-amber-700/60 dark:bg-amber-950/20"
+      >
+        <div className="flex flex-wrap items-start justify-between gap-3">
+          <div>
+            <p className="text-sm font-semibold text-foreground">Management Fee</p>
+            <p className="text-xs text-muted-foreground">
+              Configure this unit&apos;s percentage, cap, pax deduction, free months and first charge.
+              Management services always include 8% SST.
+            </p>
+          </div>
+          <span
+            className={
+              managementFee?.configured
+                ? "rounded-full border border-emerald-300 bg-emerald-50 px-2.5 py-1 text-xs font-semibold text-emerald-800"
+                : "rounded-full border border-red-300 bg-red-50 px-2.5 py-1 text-xs font-semibold text-red-700"
+            }
+          >
+            {managementFee?.configured ? "Configured" : "Not configured"}
+          </span>
+        </div>
+
+        {managementFee?.configured ? (
+          <div className="rounded-lg border border-border/70 bg-background/75 px-3 py-2">
+            <p className="text-xs text-muted-foreground">Current billing month preview</p>
+            <p className="text-base font-bold text-foreground">
+              RM {Number(managementFee.total || 0).toLocaleString("en-MY", {
+                minimumFractionDigits: 2,
+                maximumFractionDigits: 2,
+              })}
+              <span className="ml-1 text-xs font-normal text-muted-foreground">including SST</span>
+            </p>
+            {managementFee.reason ? (
+              <p className="mt-1 text-xs text-muted-foreground">{managementFee.reason}</p>
+            ) : null}
+          </div>
+        ) : null}
+
+        {!ownerAssigned ? (
+          <Callout variant="warning">Assign an owner to this unit before setting its Management Fee.</Callout>
+        ) : (
+          <Button
+            type="button"
+            variant="outline"
+            className="w-full"
+            onClick={onOpenManagementFee}
+            disabled={!onOpenManagementFee}
+          >
+            Open Management Fee settings
+          </Button>
+        )}
+      </div>
+
       {/* PAX-per-room (partition units only): per-room tenant headcount, editor-editable, its own
           save flow via PATCH /meter/tenancies/:id/pax — decoupled from the manager-only bearer Save. */}
       {showPaxSection && <PaxPerRoomSection subRows={subRows!} canEdit={canEditPax} />}
@@ -694,7 +746,7 @@ export function SettingDrawer({ apartmentId, open, onClose, subRows, isWholeUnit
           rate that drives amount = (current−previous)×rate is fixable HERE, not only in the
           tenant tracker. Its own per-room save flow (PATCH /meter/:id, or POST /meter for a
           room with no meter yet), decoupled from the bearer Save. */}
-      {showRateSection && <RatePerRoomSection subRows={subRows!} canEdit={isManager} open={open} />}
+      {showRateSection && <RatePerRoomSection subRows={subRows!} canEdit={canEditBillingSettings} open={open} />}
 
       {/* Recurring-charges (Task 7): settings-controlled recurring fees (cleaning/WiFi/custom).
           Flag-gated; own preview→confirm→apply flow, decoupled from the bearer-config Save above. */}

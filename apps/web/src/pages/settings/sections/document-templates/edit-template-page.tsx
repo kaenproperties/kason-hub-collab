@@ -27,7 +27,7 @@ const DOC_TYPE_LABEL: Record<DocType, string> = {
   rental_commission_claim: "Rental Commission Claim",
   invoice: "Invoice",
   renovation_claim: "Renovation Claim",
-  owner_statement: "Owner Statement",
+  owner_statement: "Owner Payout Report",
   credit_note: "Credit Note",
   refund_note: "Refund Note",
   tenancy_agreement: "Tenancy Agreement",
@@ -459,7 +459,7 @@ export default function EditTemplatePage() {
               // per-expense receipt (landscape). The backend sets the title on
               // render; editing it here has no effect. See service.ts titleOverrides.
               <Callout variant="info" title="Title is fixed">
-                The title for this document is set automatically by the system (e.g. <strong>Owner Statement</strong> or <strong>Invoice</strong>) and isn&apos;t editable here. The letterhead logo, organisation details, and contact info below apply to both.
+                The title for this document is set automatically by the system (e.g. <strong>Owner Payout Report</strong> or <strong>Invoice</strong>) and isn&apos;t editable here. The letterhead logo, organisation details, and contact info below apply to both.
               </Callout>
             ) : (
               <div className="space-y-1.5">

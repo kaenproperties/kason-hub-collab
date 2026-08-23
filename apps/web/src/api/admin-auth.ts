@@ -3,10 +3,14 @@ import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 
 export type AdminSession = {
   userId: string;
+  id: string;
+  fullName: string;
+  email: string;
   userType: string;
-  partyId: string;
+  partyId: string | null;
   orgId: string;
   role: string;
+  permissions: string[];
   mustChangePassword: boolean;
 };
 

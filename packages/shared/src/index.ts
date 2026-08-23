@@ -62,6 +62,7 @@ export * from "./schemas/tasks";
 export * from "./schemas/sprints";
 export * from "./schemas/owner-billing";
 export * from "./finance/owner-billing-fee";
+export * from "./finance/inclusive-sst";
 export * from "./finance/owner-statement-totals";
 export * from "./finance/owner-net-payout";
 export * from "./schemas/data-import";

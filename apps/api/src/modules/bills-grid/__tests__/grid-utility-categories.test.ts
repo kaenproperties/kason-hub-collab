@@ -144,7 +144,7 @@ dn("per-utility ChargeCategory seeds (Task 3)", () => {
     expect(owner?.defaultSstRate.toString()).toBe("0");
   });
 
-  it("seeds wifi_tenant/wifi_owner with correct family/series/docType, SST mirroring cleaning's own convention", async () => {
+  it("seeds Cleaning at 8% SST while WiFi supplier pass-through stays at 0%", async () => {
     await ensureChargeCategorySeeds(ORG);
 
     const wifiTenant = await categoryByCode("wifi_tenant");
@@ -154,10 +154,8 @@ dn("per-utility ChargeCategory seeds (Task 3)", () => {
 
     expect(wifiTenant).toMatchObject({ family: "tenant_income", docType: "invoice" });
     expect(wifiTenant?.series.code).toBe("IVTEN");
-    // WiFi is a SERVICE (classify-utility.ts's SERVICE bucket, alongside cleaning),
-    // not a pure pass-through — its defaultSstRate mirrors whatever cleaning_tenant
-    // itself carries, rather than an independently-hardcoded "0".
-    expect(wifiTenant?.defaultSstRate.toString()).toBe(cleaningTenant?.defaultSstRate.toString());
+    expect(cleaningTenant?.defaultSstRate.toString()).toBe("8");
+    expect(wifiTenant?.defaultSstRate.toString()).toBe("0");
 
     expect(wifiOwner).toMatchObject({
       family: "owner_income",
@@ -166,7 +164,8 @@ dn("per-utility ChargeCategory seeds (Task 3)", () => {
       isSystem: true,
     });
     expect(wifiOwner?.series.code).toBe("IVOWN");
-    expect(wifiOwner?.defaultSstRate.toString()).toBe(cleaningOwner?.defaultSstRate.toString());
+    expect(cleaningOwner?.defaultSstRate.toString()).toBe("8");
+    expect(wifiOwner?.defaultSstRate.toString()).toBe("0");
   });
 
   it("seeds subsidy_tenant only (no subsidy_owner — an owner-funded offset shown on the TENANT invoice), lands the org at exactly SEED_CHARGE_CATEGORIES.length, and re-running the seeder creates no duplicate rows", async () => {

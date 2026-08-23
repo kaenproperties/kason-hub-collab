@@ -4,6 +4,7 @@ import {
   createPortalUnitSchema,
   createUnitsBatchSchema,
   createPortalUnitsBatchSchema,
+  updateApartmentSharedSchema,
 } from "../inventory";
 
 const base = {
@@ -15,14 +16,27 @@ const base = {
 };
 
 describe("createUnitSchema — apartment-scoped fields", () => {
-  it("accepts owner and billing mode", () => {
+  it("accepts owner, billing mode, and a nonnegative monthly TNB subsidy cap", () => {
     const parsed = createUnitSchema.parse({
       ...base,
       ownerPartyId: "22222222-2222-4222-8222-222222222222",
       partitionBillingMode: "SUBSIDY",
+      tnbSubsidyCapMonthly: 200,
     });
     expect(parsed.ownerPartyId).toBe("22222222-2222-4222-8222-222222222222");
     expect(parsed.partitionBillingMode).toBe("SUBSIDY");
+    expect(parsed.tnbSubsidyCapMonthly).toBe(200);
+  });
+
+  it("accepts null as the explicit legacy per-pax policy and rejects negative caps", () => {
+    expect(createUnitSchema.parse({ ...base, tnbSubsidyCapMonthly: null }).tnbSubsidyCapMonthly)
+      .toBeNull();
+    expect(createUnitSchema.parse({ ...base, tnbSubsidyCapMonthly: "" }).tnbSubsidyCapMonthly)
+      .toBeNull();
+    expect(createUnitSchema.safeParse({ ...base, tnbSubsidyCapMonthly: -0.01 }).success)
+      .toBe(false);
+    expect(updateApartmentSharedSchema.safeParse({ tnbSubsidyCapMonthly: -1 }).success)
+      .toBe(false);
   });
 
   it("accepts occupied with monthlyRent", () => {
@@ -74,14 +88,15 @@ describe("createUnitSchema — apartment-scoped fields", () => {
   // these become unrecognized keys (rejected) rather than silently dropped. We
   // verify the FULL admin-only set -- a typo omitting any one from Step 6's
   // .omit({...}) would leave it a known field that slips past .strict().
-  it("portal schema strips ownerPartyId, partitionBillingMode, and monthlyRent", () => {
+  it("portal schema strips ownerPartyId, partitionBillingMode, TNB cap, and monthlyRent", () => {
     const result = createPortalUnitSchema.safeParse({
       ...base,
       ownerPartyId: "22222222-2222-4222-8222-222222222222",
       partitionBillingMode: "SUBSIDY",
+      tnbSubsidyCapMonthly: 200,
       monthlyRent: 3000,
     });
-    for (const key of ["ownerPartyId", "partitionBillingMode", "monthlyRent"]) {
+    for (const key of ["ownerPartyId", "partitionBillingMode", "tnbSubsidyCapMonthly", "monthlyRent"]) {
       if (result.success) {
         expect(key in result.data).toBe(false);
       } else {
@@ -95,18 +110,20 @@ describe("createUnitSchema — apartment-scoped fields", () => {
     }
   });
 
-  it("batch shared accepts owner and billing mode", () => {
+  it("batch shared accepts owner, billing mode, and monthly TNB subsidy cap", () => {
     const parsed = createUnitsBatchSchema.parse({
       shared: {
         propertyId: base.propertyId,
         unitCode: "TD-01",
         ownerPartyId: "22222222-2222-4222-8222-222222222222",
         partitionBillingMode: "SUBSIDY",
+        tnbSubsidyCapMonthly: 200,
       },
       rooms: [{ unitType: "Master", depositMonths: 2, utilitiesDepositMonths: 1 }],
     });
     expect(parsed.shared.ownerPartyId).toBe("22222222-2222-4222-8222-222222222222");
     expect(parsed.shared.partitionBillingMode).toBe("SUBSIDY");
+    expect(parsed.shared.tnbSubsidyCapMonthly).toBe(200);
   });
 
   // Permission boundary on the PORTAL batch path. We pin the invariant on BOTH
@@ -127,13 +144,14 @@ describe("createUnitSchema — apartment-scoped fields", () => {
   //                 offending key in issue.keys), so an unrelated new required
   //                 field on batchRoomFields can't turn this green by accident.
   it("portal batch rejects ownerPartyId", () => {
-    const adminOnly = ["ownerPartyId", "partitionBillingMode"] as const;
+    const adminOnly = ["ownerPartyId", "partitionBillingMode", "tnbSubsidyCapMonthly"] as const;
     const result = createPortalUnitsBatchSchema.safeParse({
       shared: {
         propertyId: base.propertyId,
         unitCode: "TD-01",
         ownerPartyId: "22222222-2222-4222-8222-222222222222",
         partitionBillingMode: "SUBSIDY",
+        tnbSubsidyCapMonthly: 200,
       },
       rooms: [{ unitType: "Master", depositMonths: 2, utilitiesDepositMonths: 1 }],
     });

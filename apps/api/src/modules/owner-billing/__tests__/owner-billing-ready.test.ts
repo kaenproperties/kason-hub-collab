@@ -109,6 +109,15 @@ describe("resolveBillingReadiness / assertOwnerBillingReady", () => {
     ).rejects.toMatchObject({ code: "OWNER_BILLING_NOT_CONFIGURED" });
   });
 
+  it("accepts a config that starts later within the prorated billing month", async () => {
+    vi.mocked(findApartmentOwner).mockResolvedValue({ ownerPartyId: "owner", propertyId: "P" });
+    const midMonth = new Date(Date.UTC(2026, 5, 25)); // 2026-06-25, still part of June billing
+    vi.mocked(findFeeConfigsForOwner).mockResolvedValue([cfg({ effectiveFrom: midMonth })]);
+    await expect(
+      assertOwnerBillingReady(tx, { orgId: "o", scope: { kind: "apartment", apartmentId: "A" }, asOf: ASOF }),
+    ).resolves.toBeUndefined();
+  });
+
   it("picks the matching property-specific config among several for different properties", async () => {
     vi.mocked(findListingOwner).mockResolvedValue({ ownerPartyId: "owner", propertyId: "P2" });
     vi.mocked(findFeeConfigsForOwner).mockResolvedValue([

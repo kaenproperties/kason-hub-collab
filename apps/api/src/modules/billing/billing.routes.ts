@@ -19,7 +19,7 @@ import {
 } from "./billing.validation";
 import type { BillingSession } from "./billing.types";
 import { formatZodError } from "../../lib/zod-error-mapper";
-import { requireWorkspaceOrRank } from "../../lib/workspace-access";
+import { requirePermission } from "../../middleware/require-permission";
 import { getDb } from "@kason/db";
 import { patchEconomicTreatmentInput, resolveDocumentClassification } from "@kason/shared";
 import type { CommercialPurpose, FundedBy, RevenueRecognition, SettlementRecipient } from "@kason/shared";
@@ -28,7 +28,7 @@ const billingRoutes = new Hono<{ Variables: { session: BillingSession } }>();
 
 // Registered BEFORE the "/charges" handler below so the static "/grouped"
 // path never falls through to it (Hono matches route order).
-billingRoutes.get("/charges/grouped", async (c) => {
+billingRoutes.get("/charges/grouped", requirePermission("billing.view"), async (c) => {
   const session = c.get("session");
   const parsed = chargesGroupedQuerySchema.safeParse(c.req.query());
   if (!parsed.success) {
@@ -41,7 +41,7 @@ billingRoutes.get("/charges/grouped", async (c) => {
 
 // Registered ABOVE "/charges" (static path first, spec §3.1) so it never
 // falls through to the "/charges" handler below.
-billingRoutes.get("/charges/summary", async (c) => {
+billingRoutes.get("/charges/summary", requirePermission("billing.view"), async (c) => {
   const session = c.get("session");
   const parsed = chargesSummaryQuerySchema.safeParse(c.req.query());
   if (!parsed.success) {
@@ -51,7 +51,7 @@ billingRoutes.get("/charges/summary", async (c) => {
   return c.json(await getChargesSummaryService(session, parsed.data));
 });
 
-billingRoutes.get("/charges", async (c) => {
+billingRoutes.get("/charges", requirePermission("billing.view"), async (c) => {
   const session = c.get("session");
   const parsed = listChargesQuerySchema.safeParse(c.req.query());
   if (!parsed.success) {
@@ -84,9 +84,8 @@ const chargeIdParamSchema = z.object({ chargeId: z.string().uuid() });
 // static "/grouped" or "/summary" paths, spec §3.1) and admin-only per spec
 // (stricter than the sibling POST admin+manager gate — the ledger-row
 // trigger this backs is admin-gated).
-billingRoutes.get("/charges/:chargeId", async (c) => {
+billingRoutes.get("/charges/:chargeId", requirePermission("billing.view"), async (c) => {
   const session = c.get("session");
-  if (session.role !== "admin") return c.json({ error: "Admin only" }, 403);
 
   const parsed = chargeIdParamSchema.safeParse({ chargeId: c.req.param("chargeId") });
   if (!parsed.success) {
@@ -103,7 +102,7 @@ billingRoutes.get("/charges/:chargeId", async (c) => {
 // UNISSUED charges only — an issued charge (any BillingDocumentLine references it) cannot be
 // reclassified in place (409); it requires the audited correction path. Also clears the
 // fail-closed NEEDS_ECONOMIC_CLASSIFICATION marker so a corrected charge can re-issue.
-billingRoutes.patch("/charges/:chargeId/economic-treatment", requireWorkspaceOrRank("accounting", "manager"), async (c) => {
+billingRoutes.patch("/charges/:chargeId/economic-treatment", requirePermission("billing.rebill"), async (c) => {
   const session = c.get("session");
   const idParsed = chargeIdParamSchema.safeParse({ chargeId: c.req.param("chargeId") });
   if (!idParsed.success) return c.json({ error: "invalid chargeId" }, 400);
@@ -146,11 +145,8 @@ billingRoutes.patch("/charges/:chargeId/economic-treatment", requireWorkspaceOrR
   return c.json({ data: result.data }, 200);
 });
 
-billingRoutes.post("/charges", async (c) => {
+billingRoutes.post("/charges", requirePermission("billing.charge.edit"), async (c) => {
   const session = c.get("session");
-  if (session.role !== "admin" && session.role !== "manager") {
-    return c.json({ error: "Admin or manager only" }, 403);
-  }
   const body = await c.req.json();
   const parsed = createChargeSchema.safeParse(body);
 
@@ -171,11 +167,8 @@ billingRoutes.post("/charges", async (c) => {
   return c.json(result.data, result.status as 201);
 });
 
-billingRoutes.post("/charges/:chargeId/post", async (c) => {
+billingRoutes.post("/charges/:chargeId/post", requirePermission("billing.bill"), async (c) => {
   const session = c.get("session");
-  if (session.role !== "admin" && session.role !== "manager") {
-    return c.json({ error: "Admin or manager only" }, 403);
-  }
   const parsed = postChargeSchema.safeParse({ chargeId: c.req.param("chargeId") });
 
   if (!parsed.success) {
@@ -188,7 +181,7 @@ billingRoutes.post("/charges/:chargeId/post", async (c) => {
   return c.json(result.data);
 });
 
-billingRoutes.post("/charges/:chargeId/void", requireWorkspaceOrRank("accounting", "manager"), async (c) => {
+billingRoutes.post("/charges/:chargeId/void", requirePermission("billing.rebill"), async (c) => {
   const session = c.get("session");
   // (inline admin||manager check removed — middleware admits admin/manager via rank + accountant via workspace)
   const body = await c.req.json().catch(() => ({}));

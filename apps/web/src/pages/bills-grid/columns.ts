@@ -22,11 +22,10 @@ export const CURRENT_COLUMNS: GridColumn[] = [
   { id: "unitCode",         header: "Unit",            grain: "unit",   editable: false, numeric: false },
   { id: "rental",           header: "Rental",           band: "Rent & Deposit", grain: "unit", editable: false, numeric: true },
   { id: "deposit",          header: "Deposit",          band: "Rent & Deposit", grain: "unit", editable: false, numeric: true },
-  { id: "agreementFee",     header: "TA",               band: "Rent & Deposit", grain: "unit", editable: false, numeric: true },
+  { id: "agreementFee",     header: "TA (WITH SST)",    band: "Rent & Deposit", grain: "unit", editable: false, numeric: true },
   // Recurring-charges (R9): cleaning/WiFi are settings-controlled recurring fees, generated
   // read-only per period like rental — NOT editable grid cells (backend also 409s a direct edit).
   { id: "cleaningOwner",    header: "Owner",           band: "Cleaning", grain: "unit",  editable: false, numeric: true },
-  { id: "cleaningTenant",   header: "Tenant",          band: "Cleaning", grain: "unit",  editable: false, numeric: true },
   { id: "tnbOwner",         header: "Owner",           band: "TNB",     grain: "unit",   editable: true,  numeric: true },
   { id: "tnbTenant",        header: "Tenant",          band: "TNB",     grain: "unit",   editable: true,  numeric: true },
   { id: "previousKwh",      header: "P. Meter (kWh)", band: "TNB", grain: "subRow", editable: true, numeric: true },
@@ -35,7 +34,6 @@ export const CURRENT_COLUMNS: GridColumn[] = [
   { id: "airOwner",         header: "Owner",           band: "Water",   grain: "unit",   editable: true,  numeric: true },
   { id: "airTenant",        header: "Tenant",          band: "Water",   grain: "unit",   editable: true,  numeric: true },
   { id: "wifiOwner",        header: "Owner",           band: "WiFi",    grain: "unit",   editable: false, numeric: true },
-  { id: "wifiTenant",       header: "Tenant",          band: "WiFi",    grain: "unit",   editable: false, numeric: true },
   // editable:false since 2026-08-06 — maintenanceFee joined the governable scalars: like
   // cleaning/wifi it renders an EditableCell only while no enabled recurring def governs it.
   { id: "maintenanceFee",   header: "Owner",           band: "Maint Fee", grain: "unit", editable: false, numeric: true },

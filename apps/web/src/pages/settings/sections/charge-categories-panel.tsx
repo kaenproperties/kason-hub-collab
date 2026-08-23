@@ -63,7 +63,7 @@ import {
   SheetDescription,
 } from "@/components/ui/sheet";
 import { Field, SelectInput, TextInput } from "@/components/form-ui";
-import { useAuth } from "@/lib/auth";
+import { usePermission } from "@/components/permission-gate";
 import { formatDate } from "@/components/format";
 
 // ─── Side (bearer) vocabulary ────────────────────────────────────────────────
@@ -490,9 +490,7 @@ function AddCategorySheet({
 // ─── Panel ───────────────────────────────────────────────────────────────────
 
 export function ChargeCategoriesPanel() {
-  const { user } = useAuth();
-  // Manager-or-above, mirroring the API gate on POST / PATCH / deactivate.
-  const canWrite = user?.role === "admin" || user?.role === "manager";
+  const canWrite = usePermission("settings.manage");
   const { data, isLoading, isError } = useChargeCategories({ includeInactive: true });
   const { data: seriesData } = useDocumentSeries();
   const [addOpen, setAddOpen] = useState(false);

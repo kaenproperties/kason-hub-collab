@@ -123,9 +123,9 @@ export function firstOfMonthUTC(d: Date): Date {
  * skipDuplicates })` which compiles to `INSERT … ON CONFLICT DO NOTHING`: it never
  * raises on a concurrent insert, leaving the transaction alive for the follow-up
  * read. On create, the five bearer columns come from the apartment's LISTING-MODE
- * defaults (`bearerDefaultsFor`) — WHOLE starts cleaning/WiFi tenant-borne,
- * PARTITIONED starts them owner-borne; TNB/AIR are "recharged" in both. Every other
- * column still falls back to its Prisma default (cleaningRecurringAmount 100, natures
+ * defaults (`bearerDefaultsFor`) — Cleaning/WiFi are owner-borne in both modes and
+ * TNB/AIR are "recharged" in both. Every other
+ * column still falls back to its Prisma default (cleaningRecurringAmount 0, natures
  * null/undecided). The loser of a concurrent insert writes nothing and reads back the
  * winner's row, so the two can never disagree on the seeded bearers.
  */
@@ -142,8 +142,8 @@ export async function resolveBearerConfig(
   // Unit-type defaults, NOT the bare Prisma column defaults. This is the CREATE half of
   // the pair — getBearerConfigService/toBearerConfigDto is the read half, and both must
   // resolve through `bearerDefaultsFor` or they disagree: the drawer would show the
-  // admin "Tenant" while the entry this config is snapshotted into silently bills
-  // "owner". Org-scoped so a cross-org apartmentId can never leak a listing mode.
+  // admin one value while the entry this config is snapshotted into bills another.
+  // Org-scoped so a cross-org apartmentId can never leak a listing mode.
   const apt = await tx.apartment.findFirst({
     where: { id: ctx.apartmentId, organizationId: ctx.orgId },
     select: { listingMode: true },

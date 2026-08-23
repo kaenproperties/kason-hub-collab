@@ -122,6 +122,27 @@ dn("setBearerConfigService — push-to-open-months semantics", () => {
     });
     expect(cfg.cleaningBearer).toBe("owner");
   });
+
+  it("canonicalises a stale client's tenant Cleaning/WiFi save to Owner", async () => {
+    const e = await makeEntry(currentMonth());
+    const r = await setBearerConfigService(SESSION, APT, {
+      ...BODY,
+      cleaningBearer: "tenant",
+      wifiBearer: "tenant",
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+
+    const db = getDb();
+    const cfg = await db.unitBillsBearerConfig.findUniqueOrThrow({
+      where: { organizationId_apartmentId: { organizationId: ORG, apartmentId: APT } },
+    });
+    const fresh = await db.unitBillsGridEntry.findUniqueOrThrow({ where: { id: e.id } });
+    expect(cfg.cleaningBearer).toBe("owner");
+    expect(cfg.wifiBearer).toBe("owner");
+    expect(fresh.cleaningBearer).toBe("owner");
+    expect(fresh.wifiBearer).toBe("owner");
+  });
 });
 
 dn("applyRecurringService — nature copy-forward on edits", () => {

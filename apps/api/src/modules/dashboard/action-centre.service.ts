@@ -1,5 +1,7 @@
 import { getDb } from "@kason/db";
 import { computeManagementFee } from "@kason/shared";
+import type { AdminRole } from "../../lib/rbac";
+import { resolveOwnerPayoutForScope } from "../owner-ledger/owner-payout-scope.service";
 import type { DashboardSession } from "./dashboard.types";
 
 export type ActionSeverity = "critical" | "warning" | "review";
@@ -29,10 +31,14 @@ const money = (value: unknown) => Number(value?.toString?.() ?? 0);
 export async function getActionCentreService(session: DashboardSession) {
   const db = getDb();
   const now = new Date();
-  const monthStart = new Date(now.getFullYear(), now.getMonth(), 1);
-  const nextMonth = new Date(now.getFullYear(), now.getMonth() + 1, 1);
-  const renewalWindowEnd = new Date(now.getFullYear(), now.getMonth() + 2, now.getDate());
-  const recentTenancyStart = new Date(now.getFullYear(), now.getMonth() - 1, 1);
+  // Billing periods are persisted as UTC month boundaries. Creating these dates at
+  // local midnight makes Malaysia/Singapore time serialize as the previous UTC
+  // date (for example 1 August becomes 31 July), which shifts Month-End Control
+  // and owner-payout checks into the wrong month.
+  const monthStart = new Date(Date.UTC(now.getFullYear(), now.getMonth(), 1));
+  const nextMonth = new Date(Date.UTC(now.getFullYear(), now.getMonth() + 1, 1));
+  const renewalWindowEnd = new Date(Date.UTC(now.getFullYear(), now.getMonth() + 2, now.getDate(), 23, 59, 59, 999));
+  const recentTenancyStart = new Date(Date.UTC(now.getFullYear(), now.getMonth() - 1, 1));
   const org = session.orgId;
 
   const [
@@ -110,12 +116,25 @@ export async function getActionCentreService(session: DashboardSession) {
         id: true, endDate: true, renewalDecision: true,
         tenantParty: { select: { displayName: true } },
         unit: { select: { apartment: { select: { unitCode: true, property: { select: { name: true } } } } } },
-        charges: { where: { chargeType: "renewal_fee", status: { not: "void" } }, take: 1, select: { id: true } },
+        // Renewal SST is a linked payable child, not a second renewal action.
+        charges: { where: { chargeType: "renewal_fee", parentChargeId: null, status: { not: "void" } }, take: 1, select: { id: true } },
       },
     }),
   ]);
 
-  const [savedRows, overdueRows, missingCostRows, unmatchedBankRows] = await Promise.all([
+  const [
+    savedRows,
+    overdueRows,
+    missingCostRows,
+    unmatchedBankRows,
+    pendingPaymentRows,
+    submittedClaimRows,
+    reimbursementClaimRows,
+    reviewBankRows,
+    chargeRequiredRows,
+    draftPayoutRows,
+    firstCheckedPayoutRows,
+  ] = await Promise.all([
     db.unitBillsGridEntry.findMany({
       where: {
         organizationId: org, periodMonth: { gte: monthStart, lt: nextMonth }, billedAt: null,
@@ -155,7 +174,77 @@ export async function getActionCentreService(session: DashboardSession) {
       orderBy: [{ transactionDate: "desc" }, { createdAt: "desc" }],
       select: { id: true, transactionDate: true, description: true, debit: true, credit: true, account: { select: { nickname: true, bankName: true } } },
     }),
+    db.payment.findMany({
+      where: { organizationId: org, status: "pending_approval" },
+      orderBy: [{ receivedAt: "asc" }, { paymentNumber: "asc" }],
+      select: {
+        id: true, paymentNumber: true, amount: true, receivedAt: true, referenceNote: true,
+        party: { select: { displayName: true } },
+      },
+    }),
+    db.supplierExpense.findMany({
+      where: { organizationId: org, status: "recorded", approvalStatus: "submitted" },
+      orderBy: [{ expenseDate: "asc" }, { expenseNumber: "asc" }],
+      select: { id: true, expenseNumber: true, claimantName: true, supplierName: true, description: true, totalAmount: true },
+    }),
+    db.supplierExpense.findMany({
+      where: { organizationId: org, status: "recorded", approvalStatus: "approved", reimbursementStatus: { in: ["awaiting_reimbursement", "partial"] } },
+      orderBy: [{ expenseDate: "asc" }, { expenseNumber: "asc" }],
+      select: { id: true, expenseNumber: true, claimantName: true, supplierName: true, description: true, totalAmount: true, bankCostAllocations: { select: { amount: true } } },
+    }),
+    db.bankReconciliationTransaction.findMany({
+      where: { organizationId: org, status: "review" },
+      orderBy: [{ transactionDate: "desc" }, { createdAt: "desc" }],
+      select: { id: true, transactionDate: true, description: true, debit: true, credit: true, account: { select: { nickname: true, bankName: true } } },
+    }),
+    db.bankReconciliationTransaction.findMany({
+      where: { organizationId: org, chargeRequired: true },
+      orderBy: [{ transactionDate: "desc" }, { createdAt: "desc" }],
+      select: { id: true, transactionDate: true, description: true, debit: true, account: { select: { nickname: true, bankName: true } } },
+    }),
+    db.invoice.findMany({
+      where: { organizationId: org, invoiceType: "owner_statement", periodMonth: { gte: monthStart, lt: nextMonth }, status: "draft", apartmentId: { not: null } },
+      orderBy: [{ invoiceNumber: "asc" }],
+      select: { id: true, invoiceNumber: true, apartmentId: true, ownerPartyId: true, totalAmount: true, ownerParty: { select: { displayName: true } } },
+    }),
+    db.invoice.findMany({
+      where: { organizationId: org, invoiceType: "owner_statement", periodMonth: { gte: monthStart, lt: nextMonth }, status: "first_checked", apartmentId: { not: null } },
+      orderBy: [{ invoiceNumber: "asc" }],
+      select: { id: true, invoiceNumber: true, apartmentId: true, ownerPartyId: true, totalAmount: true, ownerParty: { select: { displayName: true } } },
+    }),
   ]);
+
+  const payoutApartmentIds = [...new Set(
+    [...draftPayoutRows, ...firstCheckedPayoutRows]
+      .map((row) => row.apartmentId)
+      .filter((id): id is string => id != null),
+  )];
+  const payoutApartments = payoutApartmentIds.length > 0
+    ? await db.apartment.findMany({
+        where: { organizationId: org, id: { in: payoutApartmentIds } },
+        select: { id: true, unitCode: true, property: { select: { name: true } } },
+      })
+    : [];
+  const payoutApartmentById = new Map(payoutApartments.map((row) => [row.id, row]));
+  const payoutMonthKey = monthStart.toISOString().slice(0, 7);
+  const payoutActor = {
+    orgId: session.orgId,
+    actorUserId: session.userId,
+    actorRole: session.role as AdminRole,
+  };
+  const payoutAmountRows = await Promise.all(
+    [...draftPayoutRows, ...firstCheckedPayoutRows].map(async (row) => {
+      if (!row.ownerPartyId || !row.apartmentId) return [row.id, money(row.totalAmount)] as const;
+      const payout = await resolveOwnerPayoutForScope(
+        payoutActor,
+        row.ownerPartyId,
+        payoutMonthKey,
+        row.apartmentId,
+      );
+      return [row.id, payout ? payout.payableToOwnerC / 100 : money(row.totalAmount)] as const;
+    }),
+  );
+  const payoutAmountByInvoiceId = new Map(payoutAmountRows);
 
   // Revenue-leakage controls. These are intentionally read-only detectors: the
   // source workflow remains the only place that can create charges.
@@ -333,6 +422,55 @@ export async function getActionCentreService(session: DashboardSession) {
     amount: money(row.debit) + money(row.credit),
   }));
 
+  const paymentVerificationBreakdown: ActionBreakdownRow[] = pendingPaymentRows.map((row) => ({
+    id: row.id,
+    label: `${row.paymentNumber} · ${row.party.displayName}`,
+    detail: `${row.receivedAt.toISOString().slice(0, 10)}${row.referenceNote ? ` · ${row.referenceNote}` : ""}`,
+    amount: money(row.amount),
+  }));
+  const submittedClaimBreakdown: ActionBreakdownRow[] = submittedClaimRows.map((row) => ({
+    id: row.id,
+    label: `${row.expenseNumber} · ${row.claimantName || row.supplierName}`,
+    detail: row.description || row.supplierName,
+    amount: money(row.totalAmount),
+  }));
+  const reimbursementClaimBreakdown: ActionBreakdownRow[] = reimbursementClaimRows.map((row) => {
+    const reimbursed = row.bankCostAllocations.reduce((sum, allocation) => sum + money(allocation.amount), 0);
+    const remaining = Math.max(0, Math.round((money(row.totalAmount) - reimbursed) * 100) / 100);
+    return {
+      id: row.id,
+      label: `${row.expenseNumber} · ${row.claimantName || row.supplierName}`,
+      detail: `${row.description || row.supplierName} · reimbursed RM ${reimbursed.toFixed(2)}`,
+      amount: remaining,
+    };
+  });
+  const reviewBankBreakdown: ActionBreakdownRow[] = reviewBankRows.map((row) => ({
+    id: row.id,
+    label: `${row.account.nickname || row.account.bankName} · ${row.transactionDate.toISOString().slice(0, 10)}`,
+    detail: row.description,
+    amount: money(row.debit) + money(row.credit),
+  }));
+  const chargeRequiredBreakdown: ActionBreakdownRow[] = chargeRequiredRows.map((row) => ({
+    id: row.id,
+    label: `${row.account.nickname || row.account.bankName} · ${row.transactionDate.toISOString().slice(0, 10)}`,
+    detail: `${row.description} · customer or owner charge is still missing`,
+    amount: money(row.debit),
+  }));
+  const payoutBreakdown = (
+    rows: typeof draftPayoutRows,
+    stage: "First Check" | "final Approval",
+  ): ActionBreakdownRow[] => rows.map((row) => {
+    const apartment = row.apartmentId ? payoutApartmentById.get(row.apartmentId) : undefined;
+    return {
+      id: row.id,
+      label: apartment ? `${apartment.property.name} ${apartment.unitCode}` : row.invoiceNumber,
+      detail: `${row.ownerParty?.displayName ?? "Owner not assigned"} · waiting for ${stage}`,
+      amount: payoutAmountByInvoiceId.get(row.id) ?? money(row.totalAmount),
+    };
+  });
+  const draftPayoutBreakdown = payoutBreakdown(draftPayoutRows, "First Check");
+  const firstCheckedPayoutBreakdown = payoutBreakdown(firstCheckedPayoutRows, "final Approval");
+
   const noBreakdown: ActionBreakdownRow[] = [];
   const renewalBreakdown: ActionBreakdownRow[] = renewalReviews.map((row) => ({
     id: row.id,
@@ -354,17 +492,17 @@ export async function getActionCentreService(session: DashboardSession) {
     { id: "missing-management-fee", category: "billing", title: "Management fees not generated", description: "Rent exists and the unit has an active management-fee setting, but this month's management-fee charge is missing.", severity: "critical", count: missingManagementFeeBreakdown.length, amount: missingManagementFeeBreakdown.reduce((sum, row) => sum + (row.amount ?? 0), 0), href: "/billing/tenant-owner-billing", cta: "Review billing", breakdown: missingManagementFeeBreakdown },
     { id: "missing-letting-commission", category: "billing", title: "First-month commissions not charged", description: "The tenancy is marked as first-month rent commission, but the corresponding owner commission charge is missing.", severity: "critical", count: missingCommissionBreakdown.length, amount: missingCommissionBreakdown.reduce((sum, row) => sum + (row.amount ?? 0), 0), href: "/tenancy/tenancies", cta: "Review tenancies", breakdown: missingCommissionBreakdown },
     { id: "overdue-tenant", category: "collections", title: "Overdue tenant balances", description: "Posted tenant charges are past their due date and still outstanding.", severity: "critical", count: overdue._count._all, amount: money(overdue._sum.outstandingAmount), href: "/billing/tenant-owner-billing", cta: "Review outstanding", breakdown: overdueBreakdown },
-    { id: "payment-verification", category: "collections", title: "Payments awaiting verification", description: "Payment proof has been submitted and needs approval or rejection.", severity: "review", count: pendingPayments._count._all, amount: money(pendingPayments._sum.amount), href: "/accounting/receipts", cta: "Verify payments", breakdown: noBreakdown },
+    { id: "payment-verification", category: "collections", title: "Payments awaiting verification", description: "Payment proof has been submitted and needs approval or rejection.", severity: "review", count: pendingPayments._count._all, amount: money(pendingPayments._sum.amount), href: "/accounting/receipts", cta: "Verify payments", breakdown: paymentVerificationBreakdown },
     { id: "deposit-owner-transfer", category: "payout", title: "Deposit custody transfers need attention", description: "Collected deposits must be transferred to the owner for custody without becoming owner income. These records do not match and must be reviewed before payout approval.", severity: "critical", count: depositMismatchBreakdown.length, amount: depositMismatchBreakdown.reduce((sum, row) => sum + Math.abs(row.amount ?? 0), 0), href: "/parties", cta: "Review deposit ledgers", breakdown: depositMismatchBreakdown },
     { id: "deposit-owner-refund", category: "payout", title: "Owner deposit refunds outstanding", description: "These tenants have moved out, but the refundable deposit balance has not yet been recorded as returned by the owner.", severity: "critical", count: depositRefundBreakdown.length, amount: depositRefundBreakdown.reduce((sum, row) => sum + (row.amount ?? 0), 0), href: "/tenancy/tenancies", cta: "Complete deposit settlement", breakdown: depositRefundBreakdown },
     { id: "missing-actual-cost", category: "costs", title: "Actual costs not completed", description: "Customer-facing charges exist but their actual cost has not been recorded.", severity: "critical", count: missingCosts._count._all, amount: money(missingCosts._sum.amount), href: "/billing/tenant-owner-billing", cta: "Add costs", breakdown: missingCostBreakdown },
-    { id: "claims-approval", category: "costs", title: "Employee claims awaiting approval", description: "Submitted employee expenses need a manager decision.", severity: "review", count: submittedClaims._count._all, amount: money(submittedClaims._sum.totalAmount), href: "/accounting/employee-expense-claims", cta: "Review claims", breakdown: noBreakdown },
-    { id: "claims-reimbursement", category: "costs", title: "Approved claims awaiting reimbursement", description: "Approved employee advances have not been fully reimbursed.", severity: "warning", count: reimbursementClaims._count._all, amount: money(reimbursementClaims._sum.totalAmount), href: "/accounting/employee-expense-claims", cta: "Open reimbursements", breakdown: noBreakdown },
+    { id: "claims-approval", category: "costs", title: "Employee claims awaiting approval", description: "Submitted employee expenses need a manager decision.", severity: "review", count: submittedClaims._count._all, amount: money(submittedClaims._sum.totalAmount), href: "/accounting/employee-expense-claims", cta: "Review claims", breakdown: submittedClaimBreakdown },
+    { id: "claims-reimbursement", category: "costs", title: "Approved claims awaiting reimbursement", description: "Approved employee advances have not been fully reimbursed.", severity: "warning", count: reimbursementClaims._count._all, amount: reimbursementClaimBreakdown.reduce((sum, row) => sum + (row.amount ?? 0), 0), href: "/accounting/employee-expense-claims", cta: "Open reimbursements", breakdown: reimbursementClaimBreakdown },
     { id: "bank-unmatched", category: "bank", title: "Unmatched bank transactions", description: "Imported bank movements are not linked to their business purpose.", severity: "warning", count: unmatchedBank._count._all, amount: money(unmatchedBank._sum.debit) + money(unmatchedBank._sum.credit), href: "/accounting/bank-reconciliation", cta: "Reconcile bank", breakdown: unmatchedBankBreakdown },
-    { id: "bank-review", category: "bank", title: "Bank transactions needing review", description: "Potential duplicate, sequence or categorisation issues need checking.", severity: "critical", count: reviewBank._count._all, amount: money(reviewBank._sum.debit) + money(reviewBank._sum.credit), href: "/accounting/bank-reconciliation", cta: "Review exceptions", breakdown: noBreakdown },
-    { id: "cost-without-charge", category: "bank", title: "Costs awaiting customer charge", description: "Company money went out, but the related tenant or owner charge is still missing.", severity: "critical", count: chargeRequired._count._all, amount: money(chargeRequired._sum.debit), href: "/accounting/bank-reconciliation", cta: "Create missing charges", breakdown: noBreakdown },
-    { id: "payout-first-check", category: "payout", title: "Owner payouts awaiting first check", description: "Draft owner reports require the manager's first checking.", severity: "warning", count: draftPayouts._count._all, amount: money(draftPayouts._sum.totalAmount), href: "/billing/tenant-owner-billing", cta: "Check payouts", breakdown: noBreakdown },
-    { id: "payout-approval", category: "payout", title: "Owner payouts awaiting approval", description: "First-checked owner reports are ready for final approval.", severity: "review", count: firstCheckedPayouts._count._all, amount: money(firstCheckedPayouts._sum.totalAmount), href: "/billing/tenant-owner-billing", cta: "Approve payouts", breakdown: noBreakdown },
+    { id: "bank-review", category: "bank", title: "Bank transactions needing review", description: "Potential duplicate, sequence or categorisation issues need checking.", severity: "critical", count: reviewBank._count._all, amount: money(reviewBank._sum.debit) + money(reviewBank._sum.credit), href: "/accounting/bank-reconciliation", cta: "Review exceptions", breakdown: reviewBankBreakdown },
+    { id: "cost-without-charge", category: "bank", title: "Costs awaiting customer charge", description: "Company money went out, but the related tenant or owner charge is still missing.", severity: "critical", count: chargeRequired._count._all, amount: money(chargeRequired._sum.debit), href: "/accounting/bank-reconciliation", cta: "Create missing charges", breakdown: chargeRequiredBreakdown },
+    { id: "payout-first-check", category: "payout", title: "Owner payouts awaiting first check", description: "Draft owner reports require the manager's first checking.", severity: "warning", count: draftPayouts._count._all, amount: money(draftPayouts._sum.totalAmount), href: "/billing/tenant-owner-billing", cta: "Check payouts", breakdown: draftPayoutBreakdown },
+    { id: "payout-approval", category: "payout", title: "Owner payouts awaiting approval", description: "First-checked owner reports are ready for final approval.", severity: "review", count: firstCheckedPayouts._count._all, amount: money(firstCheckedPayouts._sum.totalAmount), href: "/billing/tenant-owner-billing", cta: "Approve payouts", breakdown: firstCheckedPayoutBreakdown },
   ];
   const items = candidates.filter((item) => item.count > 0);
 

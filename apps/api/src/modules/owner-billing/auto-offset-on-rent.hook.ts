@@ -115,9 +115,9 @@ const centsToAmountString = (c: number): string => (c / 100).toFixed(2);
  * than KAEN owes stays impossible either way — `OFFSET_EXCEEDS_PAYABLE` re-reads the
  * available payable under the advisory lock and is the authority.
  */
-function deterministicOffsetKey(orgId: string, ownerPartyId: string, rentChargeIds: string[], targetLineIds: string[]): string {
+function deterministicOffsetKey(orgId: string, ownerPartyId: string, triggeringChargeIds: string[], targetAllocations: string[]): string {
   const h = createHash("sha256")
-    .update(`auto-offset:${orgId}:${ownerPartyId}:${[...rentChargeIds].sort().join(",")}:${[...targetLineIds].sort().join(",")}`)
+    .update(`auto-offset:${orgId}:${ownerPartyId}:${[...triggeringChargeIds].sort().join(",")}:${[...targetAllocations].sort().join(",")}`)
     .digest("hex");
   // Stamp version (5) and RFC-4122 variant so the value is a well-formed UUID —
   // offsetCreateSchema validates it with z.string().uuid().
@@ -422,8 +422,10 @@ async function settleLedgerBackedLines(
 }
 
 /**
- * For each just-settled FULLY PAID rent charge, net the owning owner's open IVOWN
- * lines against what KAEN now holds for them.
+ * For each newly settled source of owner money, net the owning owner's open IVOWN
+ * lines against what KAEN now holds for them. Owner money includes fully-paid rent
+ * and every posted partial/full deposit collection that has already been projected
+ * as payable to the owner.
  *
  * `chargeIds` are the charges the payment touched — the same list the caller hands
  * the sibling hooks.
@@ -447,9 +449,9 @@ export async function autoOffsetOwnerReceivablesForPaidRent(
   try {
     const db = getDb();
 
-    // Only rent, only fully paid — the same trigger as the management fee it settles.
-    // A partial rent payment deliberately does nothing: the fee invoice it would
-    // settle has not been issued yet either (mgmt-fee-on-payment.hook.ts).
+    // Rent remains a FULLY-paid trigger: a partial rent payment is not yet owner
+    // payout money under the current business rule, and its management fee has not
+    // been issued either.
     const rentCharges = await db.charge.findMany({
       where: {
         organizationId: orgId,
@@ -465,12 +467,32 @@ export async function autoOffsetOwnerReceivablesForPaidRent(
         carpark: { select: { ownerPartyId: true } },
       },
     });
-    if (rentCharges.length === 0) return;
 
-    // Collapse to the distinct owners whose rent just settled, carrying the charge
+    // Deposits are different: KAEN transfers every amount collected to the owner,
+    // including a partial collection. afterPaymentSettled records that collected
+    // delta in Deposit BEFORE calling this hook, so computeAvailableOwnerPayableC
+    // can safely use it without treating the deposit as income.
+    const depositCharges = await db.charge.findMany({
+      where: {
+        organizationId: orgId,
+        id: { in: chargeIds },
+        chargeType: { in: ["security_deposit", "utility_deposit"] },
+        status: { notIn: ["void", "credited"] },
+      },
+      select: {
+        id: true,
+        unit: { select: { ownerPartyId: true } },
+        carpark: { select: { ownerPartyId: true } },
+      },
+    });
+
+    const ownerFundCharges = [...rentCharges, ...depositCharges];
+    if (ownerFundCharges.length === 0) return;
+
+    // Collapse to the distinct owners whose funds just settled, carrying the charge
     // ids that triggered each — they key that owner's idempotency below.
     const byOwner = new Map<string, string[]>();
-    for (const c of rentCharges) {
+    for (const c of ownerFundCharges) {
       const owner = c.unit?.ownerPartyId ?? c.carpark?.ownerPartyId ?? null;
       if (!owner) continue;
       if (!byOwner.has(owner)) byOwner.set(owner, []);
@@ -535,12 +557,16 @@ export async function autoOffsetOwnerReceivablesForPaidRent(
         effectiveDate: new Date().toISOString().slice(0, 10),
         currency: org.defaultCurrency as "MYR",
         lineAllocations,
-        memo: "Auto-settled from tenant rent collection",
+        memo: "Auto-settled from tenant funds held for owner payout",
         idempotencyKey: deterministicOffsetKey(
           orgId,
           ownerPartyId,
           triggeringChargeIds,
-          lineAllocations.map((l) => l.billingDocumentLineId),
+          // Include the amount as well as the line. A later deposit receipt may top
+          // up a line that an earlier rent payment only settled partially. Using the
+          // line id alone made that legitimate second offset collide with the first
+          // idempotency key and left the expense yellow forever.
+          lineAllocations.map((l) => `${l.billingDocumentLineId}:${l.allocatedAmount}`),
         ),
       });
 

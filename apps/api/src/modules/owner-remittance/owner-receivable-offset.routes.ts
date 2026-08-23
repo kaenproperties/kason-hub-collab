@@ -19,7 +19,7 @@ import { offsetCreateSchema, reverseSchema } from "@kason/shared";
 import type { SessionPayload } from "../../lib/auth";
 import { isPhase2FlagEnabled } from "../../lib/feature-flags";
 import { formatZodError } from "../../lib/zod-error-mapper";
-import { requireWorkspaceOrRank } from "../../lib/workspace-access";
+import { requirePermission } from "../../middleware/require-permission";
 import { getActorHeaders } from "../../lib/actor-ctx";
 import { recordOffsetService, reverseOffsetService } from "./owner-remittance.service";
 import type { RemittanceActorCtx } from "./owner-remittance.service";
@@ -56,7 +56,7 @@ function zerr(c: OffsetCtx, err: ZodError) {
 }
 
 // POST /api/owner-receivable-offsets — WRITE = accounting workspace OR rank>=manager.
-ownerReceivableOffsetRoutes.post("/", requireWorkspaceOrRank("accounting", "manager"), async (c) => {
+ownerReceivableOffsetRoutes.post("/", requirePermission("owner_payout.record"), async (c) => {
   const body = await c.req.json().catch(() => null);
   if (!body) return c.json({ error: "Invalid JSON body" }, 400);
   const parsed = offsetCreateSchema.safeParse(body);
@@ -72,7 +72,7 @@ ownerReceivableOffsetRoutes.post("/", requireWorkspaceOrRank("accounting", "mana
 // settled charges' outstanding, atomically, no cash refund. Same WRITE gate
 // as create. `:id` is the path param; reverseSchema covers only
 // {reason, idempotencyKey}.
-ownerReceivableOffsetRoutes.post("/:id/reverse", requireWorkspaceOrRank("accounting", "manager"), async (c) => {
+ownerReceivableOffsetRoutes.post("/:id/reverse", requirePermission("owner_payout.reverse"), async (c) => {
   const body = await c.req.json().catch(() => null);
   if (!body) return c.json({ error: "Invalid JSON body" }, 400);
   const parsed = reverseSchema.safeParse(body);

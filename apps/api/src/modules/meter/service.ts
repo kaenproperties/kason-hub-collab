@@ -31,6 +31,10 @@ import {
 } from "./compute";
 import * as repo from "./repository";
 import type { BillRoomRow, DbClient } from "./types";
+import {
+  resolveUtilitySubsidyPolicy,
+  toUtilitySubsidyPolicySnapshot,
+} from "./subsidy-policy";
 import { syncOwnerLedgerForApartmentMonth } from "../owner-ledger/owner-ledger.sync-hook";
 import { assertPeriodOpen } from "../owner-ledger/assert-period-open";
 import { assertOwnerBillingReady, OwnerBillingNotReadyError } from "../owner-billing/owner-billing-ready";
@@ -399,7 +403,7 @@ export async function updateUtilityBillService(session: SessionPayload, id: stri
 // written here (no Charge / UtilityAllocation rows — those remain the charge path).
 type OwnerBorneSnapshot = {
   billingMode: BillingMode;
-  subsidyPerPax: string;
+  subsidyPerPax: string | null;
   subsidyCovered: string;
   ownerAttributableAircond: string;
   roundingResidual: string;
@@ -410,14 +414,17 @@ type OwnerBorneSnapshot = {
 async function computeOwnerBorneSnapshot(
   tx: DbClient,
   session: SessionPayload,
-  bill: { apartmentId: string; periodMonth: Date; tnbTotal: unknown; airSelangor: unknown; indahWater: unknown; wifi: unknown; cleaning: unknown; indahWaterBearer?: unknown; cleaningBearer?: unknown; wifiBearer?: unknown },
+  bill: UtilityBillForCompute,
 ): Promise<OwnerBorneSnapshot> {
-  const { mode, subsidyPerPax, pool, roomInputs, bearers, privateAircond } = await buildComputeInputs(tx, session, bill);
   try {
-    const result = computeAllocation(mode, subsidyPerPax, pool, roomInputs, bearers, privateAircond);
+    const { mode, subsidyPolicy, pool, roomInputs, bearers, privateAircond } = await buildComputeInputs(tx, session, bill);
+    const result = computeAllocation(mode, subsidyPolicy, pool, roomInputs, bearers, privateAircond);
     return {
       billingMode: mode,
-      subsidyPerPax: subsidyPerPax.toFixed(2),
+      subsidyPerPax:
+        subsidyPolicy.kind === "legacy_per_pax"
+          ? subsidyPolicy.amountPerPax.toFixed(2)
+          : null,
       subsidyCovered: result.subsidyCovered.toFixed(2),
       ownerAttributableAircond: result.ownerAttributableAircond.toFixed(2),
       roundingResidual: result.roundingResidual.toFixed(2),
@@ -432,15 +439,63 @@ async function computeOwnerBorneSnapshot(
   }
 }
 
+type UtilityBillForCompute = {
+  apartmentId: string;
+  periodMonth: Date;
+  billingMode: unknown;
+  status: string;
+  subsidyPolicySnapshot: unknown;
+  tnbSubsidyCapSnapshot: unknown;
+  subsidyPerPax: unknown;
+  tnbTotal: unknown;
+  airSelangor: unknown;
+  indahWater: unknown;
+  wifi: unknown;
+  cleaning: unknown;
+  indahWaterBearer?: unknown;
+  cleaningBearer?: unknown;
+  wifiBearer?: unknown;
+};
+
 // Shared helper: build mode + pool + RoomInput[] for compute (no writes).
-async function buildComputeInputs(db: DbClient, session: SessionPayload, bill: { apartmentId: string; periodMonth: Date; tnbTotal: unknown; airSelangor: unknown; indahWater: unknown; wifi: unknown; cleaning: unknown; indahWaterBearer?: unknown; cleaningBearer?: unknown; wifiBearer?: unknown }) {
+async function buildComputeInputs(
+  db: DbClient,
+  session: SessionPayload,
+  bill: UtilityBillForCompute,
+) {
   const rooms = await repo.findBillRooms(db, session.orgId, bill.apartmentId, bill.periodMonth);
   const apt = await repo.findApartmentModes(db, session.orgId, bill.apartmentId);
-  const mode: BillingMode = apt?.listingMode === "WHOLE" ? "whole" : apt?.partitionBillingMode === "SUBSIDY" ? "subsidy" : "no_subsidy";
+  // A non-null per-apartment cap is itself an explicit opt-in to the new subsidy
+  // policy for a PARTITIONED apartment. Null is the compatibility path and keeps
+  // the existing partitionBillingMode + org subsidyPerPax behaviour untouched.
+  const liveMode: BillingMode = apt?.listingMode === "WHOLE"
+    ? "whole"
+    : apt?.tnbSubsidyCapMonthly != null || apt?.partitionBillingMode === "SUBSIDY"
+      ? "subsidy"
+      : "no_subsidy";
+  // Org subsidyPerPax remains the legacy fallback only. A non-null apartment
+  // cap opts a NEW/unlocked subsidy bill into the unit-level TNB policy; locked
+  // and historical bills are resolved solely from their bill snapshots.
+  const mayNeedLegacyRate =
+    liveMode === "subsidy" ||
+    bill.billingMode === "subsidy" ||
+    bill.subsidyPolicySnapshot === "legacy_per_pax";
+  const organizationSubsidyPerPax = mayNeedLegacyRate
+    ? await repo.findUtilityBillingConfig(db, session.orgId)
+    : 0;
+  const { mode, subsidyPolicy } = resolveUtilitySubsidyPolicy({
+    liveMode,
+    apartmentTnbSubsidyCap: apt?.tnbSubsidyCapMonthly ?? null,
+    organizationSubsidyPerPax,
+    billStatus: bill.status,
+    billBillingMode: bill.billingMode,
+    billPolicySnapshot: bill.subsidyPolicySnapshot,
+    billTnbSubsidyCapSnapshot: bill.tnbSubsidyCapSnapshot,
+    billSubsidyPerPax: bill.subsidyPerPax,
+  });
   // PARTITIONED units bill private per-room electricity: aircond Σ may exceed the
   // master TNB bill (excess = owner profit). WHOLE (single master meter) does not.
   const privateAircond = mode !== "whole";
-  const subsidyPerPax = mode === "subsidy" ? await repo.findUtilityBillingConfig(db, session.orgId) : 0;
   const pool: PoolComponents = {
     tnbTotal: num(String(bill.tnbTotal)),
     airSelangor: num(String(bill.airSelangor)),
@@ -467,7 +522,7 @@ async function buildComputeInputs(db: DbClient, session: SessionPayload, bill: {
     unitCode: r.unitCode,
     listingType: r.listingType,
   }));
-  return { mode, subsidyPerPax, pool, roomInputs, rooms, bearers, privateAircond };
+  return { mode, subsidyPolicy, pool, roomInputs, rooms, bearers, privateAircond };
 }
 
 // Preview — recompute allocations, NO writes.
@@ -475,11 +530,11 @@ export async function previewUtilityBillService(session: SessionPayload, id: str
   const db = getDb();
   const bill = await repo.getBill(db, session.orgId, id);
   if (!bill) return err(404, "BILL_NOT_FOUND");
-  const { mode, subsidyPerPax, pool, roomInputs, rooms, bearers, privateAircond } = await buildComputeInputs(db, session, bill);
-  const paxlessActiveRooms = findPaxlessActiveRooms(rooms);
   try {
-    const result = computeAllocation(mode, subsidyPerPax, pool, roomInputs, bearers, privateAircond);
-    return ok({ billId: id, ...result, paxlessActiveRooms });
+    const { mode, subsidyPolicy, pool, roomInputs, rooms, bearers, privateAircond } = await buildComputeInputs(db, session, bill);
+    const paxlessActiveRooms = findPaxlessActiveRooms(rooms);
+    const result = computeAllocation(mode, subsidyPolicy, pool, roomInputs, bearers, privateAircond);
+    return ok({ billId: id, ...result, subsidyPolicy, paxlessActiveRooms });
   } catch (e) {
     if (e instanceof ComputeError) return err(422, e.code);
     return err(422, "COMPUTE_ERROR");
@@ -624,17 +679,25 @@ export async function chargeUtilityBillService(session: SessionPayload, id: stri
       await assertPeriodOpen(tx, session.orgId, ownerPartyId, bill.periodMonth);
     }
 
-    const { mode, subsidyPerPax, pool, roomInputs, rooms, bearers, privateAircond } = await buildComputeInputs(tx, session, bill);
+    let computeInputs: Awaited<ReturnType<typeof buildComputeInputs>>;
+    try {
+      computeInputs = await buildComputeInputs(tx, session, bill);
+    } catch (e) {
+      if (e instanceof ComputeError) return err(422, e.code);
+      throw e;
+    }
+    const { mode, subsidyPolicy, pool, roomInputs, rooms, bearers, privateAircond } = computeInputs;
 
-    // Money-safety: refuse to charge if any active tenancy has no pax — its
-    // aircon would be subtracted from TNB but the room never billed (silent
-    // leak). Block BEFORE any charge is created (no partial work).
+    // Money-safety: refuse to charge if any active tenancy has no pax. The unit
+    // cap's TNB denominator is tenancy/room (so preview can still show it), but
+    // water and any other tenant-borne utilities remain per-pax. Posting without
+    // pax would therefore leak those components. Block before any money write.
     const paxlessActiveRooms = findPaxlessActiveRooms(rooms);
     if (paxlessActiveRooms.length > 0) return err(422, "ACTIVE_TENANCY_NO_PAX");
 
     let result;
     try {
-      result = computeAllocation(mode, subsidyPerPax, pool, roomInputs, bearers, privateAircond);
+      result = computeAllocation(mode, subsidyPolicy, pool, roomInputs, bearers, privateAircond);
     } catch (e) {
       if (e instanceof ComputeError) return err(422, e.code);
       return err(422, "COMPUTE_ERROR");
@@ -802,12 +865,16 @@ export async function chargeUtilityBillService(session: SessionPayload, id: stri
       throw e;
     }
 
+    const policySnapshot = toUtilitySubsidyPolicySnapshot(subsidyPolicy);
     await tx.unitUtilityBill.update({
       where: { id, organizationId: session.orgId },
       data: {
         status: "charged",
         billingMode: mode,
-        subsidyPerPax: subsidyPerPax.toFixed(2),
+        // Lock the exact policy only at the successful posting seam. This update
+        // shares the charge/document transaction, so any later failure rolls the
+        // snapshot back together with every money row.
+        ...policySnapshot,
         subsidyCovered: result.subsidyCovered.toFixed(2),
         ownerAttributableAircond: result.ownerAttributableAircond.toFixed(2),
         roundingResidual: result.roundingResidual.toFixed(2),
@@ -815,7 +882,7 @@ export async function chargeUtilityBillService(session: SessionPayload, id: stri
         ownerBorneUtilitiesTotal: result.ownerBorneUtilitiesTotal.toFixed(2),
       },
     });
-    await recordAudit(tx, { organizationId: session.orgId, actorUserId: session.userId, actorRole: session.role, action: "meter.utilitybill.compute", entityType: "UnitUtilityBill", entityId: id, diff: { after: { utilityCharges, aircondCharges, ownerAttributableAircond: result.ownerAttributableAircond, subsidyCovered: result.subsidyCovered, roundingResidual: result.roundingResidual } } as unknown as Prisma.InputJsonValue });
+    await recordAudit(tx, { organizationId: session.orgId, actorUserId: session.userId, actorRole: session.role, action: "meter.utilitybill.compute", entityType: "UnitUtilityBill", entityId: id, diff: { after: { utilityCharges, aircondCharges, subsidyPolicy, ownerAttributableAircond: result.ownerAttributableAircond, subsidyCovered: result.subsidyCovered, roundingResidual: result.roundingResidual } } as unknown as Prisma.InputJsonValue });
     // Accounting docs (§4.2 mint-on-post): ONE DEP debit note per charge this
     // posting created (utility, rent, carpark, aircond) — minted INSIDE this
     // transaction, so a mint failure aborts the posting (§4.6) and no charge

@@ -42,10 +42,24 @@ export async function lockOwnerPayable(
 // ─── Available payable (cents) ────────────────────────────────────────────────
 
 /**
- * Reversal-aware owner payable, in integer cents. Loads every `status:"active"`
- * OwnerLedgerEntry row for the owner and reduces them through the SAME
+ * Reversal-aware owner payable, in integer cents. The payable has TWO cash
+ * sources which the owner statement already presents as one payout:
+ *
+ *   1. active OwnerLedgerEntry rows (rent/income less expenses/remittances), and
+ *   2. tenant deposits collected for onward transfer to this owner.
+ *
+ * Deposits are deliberately not owner income and therefore do not belong in the
+ * owner ledger. They are nevertheless cash payable to the owner, so excluding
+ * them here made the remittance/offset guard disagree with the owner report:
+ * the report showed deposit cash in Owner Payout while owner-borne expenses
+ * could only consume the rent component. That left later owner expenses
+ * partially paid even though the displayed Owner Payout still covered them.
+ *
+ * The ledger component reduces every `status:"active"` row through the SAME
  * pure-calc primitives resolveOwnerBalance uses (computeOwnerRunningBalance +
- * signedToCents) — one source of truth, no re-derivation. Task 3 made
+ * signedToCents). The deposit component sums append-only `released_to_owner`
+ * deltas for units currently belonging to this owner; reversals are negative
+ * deltas, so the sum is reversal-aware without mutating history. Task 3 made
  * computeOwnerRunningBalance reversal-aware: a payout row with
  * reversalOfEntryId set ADDS instead of subtracting, restoring payable
  * exactly; an included expense still deducts, an excluded one (owner-paid-
@@ -59,11 +73,26 @@ export async function computeAvailableOwnerPayableC(
   orgId: string,
   ownerPartyId: string,
 ): Promise<number> {
-  const rows = await tx.ownerLedgerEntry.findMany({
-    where: { organizationId: orgId, ownerPartyId, status: "active" },
-  });
+  const [rows, deposits] = await Promise.all([
+    tx.ownerLedgerEntry.findMany({
+      where: { organizationId: orgId, ownerPartyId, status: "active" },
+    }),
+    tx.deposit.aggregate({
+      where: {
+        organizationId: orgId,
+        status: "released_to_owner",
+        unit: { ownerPartyId },
+      },
+      _sum: { amount: true },
+    }),
+  ]);
   const balance = computeOwnerRunningBalance(rows.map(rowToLedgerLine));
-  return signedToCents(balance, "computeAvailableOwnerPayableC");
+  const ledgerBalanceC = signedToCents(balance, "computeAvailableOwnerPayableC.ledger");
+  const releasedDepositC = signedToCents(
+    deposits._sum.amount?.toString() ?? "0.00",
+    "computeAvailableOwnerPayableC.deposits",
+  );
+  return ledgerBalanceC + releasedDepositC;
 }
 
 // ─── Idempotency read ─────────────────────────────────────────────────────────

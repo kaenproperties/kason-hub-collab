@@ -122,6 +122,28 @@ dn("issueDocumentTx — integration", () => {
     expect(doc.lines[0].sstAmount.toString()).toBe("20");
   });
 
+  it("honours an exact inclusive-SST residual without increasing the gross total", async () => {
+    const input = baseInput();
+    input.idempotencyKey = "doc:TA-INCLUSIVE-500";
+    input.lines = [
+      {
+        chargeId: CHARGE,
+        categoryId: rentalCategoryId,
+        description: "Admin and Agreement Fee",
+        amount: "462.96",
+        sstRate: "8",
+        sstAmount: "37.04",
+      },
+    ];
+    const res = await getDb().$transaction((tx) => issueDocumentTx(tx, input));
+    const doc = await getDb().billingDocument.findUniqueOrThrow({ where: { id: res.id }, include: { lines: true } });
+    expect(doc.subtotal.toFixed(2)).toBe("462.96");
+    expect(doc.sstAmount.toFixed(2)).toBe("37.04");
+    expect(doc.total.toFixed(2)).toBe("500.00");
+    expect(doc.lines[0].sstRate.toFixed(2)).toBe("8.00");
+    expect(doc.lines[0].sstAmount.toFixed(2)).toBe("37.04");
+  });
+
   it("dedupes on idempotencyKey — second issue returns the existing document, no second number", async () => {
     const db = getDb();
     const first = await db.$transaction((tx) => issueDocumentTx(tx, baseInput()));

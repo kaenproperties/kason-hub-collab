@@ -10,7 +10,7 @@ import {
   ownerLedgerSyncInput,
   ownerLedgerRangeQuery,
 } from "@kason/shared";
-import { requireRole } from "../../middleware/require-role";
+import { requirePermission } from "../../middleware/require-permission";
 import type { SessionPayload } from "../../lib/auth";
 import type { AdminRole } from "../../lib/rbac";
 import { getActorHeaders } from "../../lib/actor-ctx";
@@ -72,7 +72,7 @@ const voidBody = z.object({ expectedUpdatedAt: z.string().datetime() });
 // ─── Ledger entries — CRUD ────────────────────────────────────────────────────
 // WRITES = requireRole("admin"); READS = requireRole("manager").
 
-ownerLedgerRoutes.post("/entries", requireRole("admin"), async (c) => {
+ownerLedgerRoutes.post("/entries", requirePermission("owner_report.generate"), async (c) => {
   const body = await c.req.json().catch(() => null);
   if (!body) return c.json({ error: "Invalid JSON body" }, 400);
   const parsed = ownerLedgerEntryInput.safeParse(body);
@@ -86,7 +86,7 @@ ownerLedgerRoutes.post("/entries", requireRole("admin"), async (c) => {
   return c.json({ data: result.data }, result.status as 201);
 });
 
-ownerLedgerRoutes.get("/entries", requireRole("manager"), async (c) => {
+ownerLedgerRoutes.get("/entries", requirePermission("owner_report.view"), async (c) => {
   const parsed = ownerLedgerListQuery.safeParse(c.req.query());
   if (!parsed.success) return zerr(c, parsed.error);
   const { limit, offset, ...filters } = parsed.data;
@@ -119,13 +119,13 @@ ownerLedgerRoutes.get("/entries", requireRole("manager"), async (c) => {
   return c.json({ data: result.data });
 });
 
-ownerLedgerRoutes.get("/entries/:id", requireRole("manager"), async (c) => {
+ownerLedgerRoutes.get("/entries/:id", requirePermission("owner_report.view"), async (c) => {
   const result = await getEntryService(actor(c), c.req.param("id"));
   if (!result.ok) return c.json({ error: result.error }, result.status as 404);
   return c.json({ data: result.data });
 });
 
-ownerLedgerRoutes.patch("/entries/:id", requireRole("admin"), async (c) => {
+ownerLedgerRoutes.patch("/entries/:id", requirePermission("owner_report.reopen"), async (c) => {
   const body = await c.req.json().catch(() => null);
   if (!body) return c.json({ error: "Invalid JSON body" }, 400);
   const parsed = ownerLedgerEntryPatch.safeParse(body);
@@ -135,7 +135,7 @@ ownerLedgerRoutes.patch("/entries/:id", requireRole("admin"), async (c) => {
   return c.json({ data: result.data });
 });
 
-ownerLedgerRoutes.post("/entries/:id/void", requireRole("admin"), async (c) => {
+ownerLedgerRoutes.post("/entries/:id/void", requirePermission("owner_report.reopen"), async (c) => {
   const body = await c.req.json().catch(() => null);
   if (!body) return c.json({ error: "Invalid JSON body" }, 400);
   const parsed = voidBody.safeParse(body);
@@ -148,7 +148,7 @@ ownerLedgerRoutes.post("/entries/:id/void", requireRole("admin"), async (c) => {
 // ─── Sync ─────────────────────────────────────────────────────────────────────
 // WRITE = requireRole("admin").
 
-ownerLedgerRoutes.post("/sync", requireRole("admin"), async (c) => {
+ownerLedgerRoutes.post("/sync", requirePermission("owner_report.generate"), async (c) => {
   const body = await c.req.json().catch(() => null);
   if (!body) return c.json({ error: "Invalid JSON body" }, 400);
   const parsed = ownerLedgerSyncInput.safeParse(body);
@@ -204,7 +204,7 @@ ownerLedgerRoutes.post(
     }
     await next();
   },
-  requireRole("admin"),
+  requirePermission("owner_report.reopen"),
   async (c) => {
     const body = await c.req.json().catch(() => null);
     if (!body) return c.json({ error: "Invalid JSON body" }, 400);
@@ -223,7 +223,7 @@ ownerLedgerRoutes.post(
 // ─── Summary / tax-summary ────────────────────────────────────────────────────
 // READ = requireRole("manager").
 
-ownerLedgerRoutes.get("/summary", requireRole("manager"), async (c) => {
+ownerLedgerRoutes.get("/summary", requirePermission("owner_report.view"), async (c) => {
   const parsed = ownerLedgerRangeQuery.safeParse(c.req.query());
   if (!parsed.success) return zerr(c, parsed.error);
   const result = await getSummaryService(actor(c), parsed.data);
@@ -231,7 +231,7 @@ ownerLedgerRoutes.get("/summary", requireRole("manager"), async (c) => {
   return c.json({ data: result.data });
 });
 
-ownerLedgerRoutes.get("/tax-summary", requireRole("manager"), async (c) => {
+ownerLedgerRoutes.get("/tax-summary", requirePermission("owner_report.view"), async (c) => {
   const parsed = ownerLedgerRangeQuery.safeParse(c.req.query());
   if (!parsed.success) return zerr(c, parsed.error);
   const result = await getTaxSummaryService(actor(c), parsed.data);
@@ -246,7 +246,7 @@ const ownerTreeQuery = z.object({
   ownerPartyId: z.string().uuid({ message: "ownerPartyId must be a valid UUID" }),
 });
 
-ownerLedgerRoutes.get("/owner-tree", requireRole("manager"), async (c) => {
+ownerLedgerRoutes.get("/owner-tree", requirePermission("owner_report.view"), async (c) => {
   const parsed = ownerTreeQuery.safeParse(c.req.query());
   if (!parsed.success) return zerr(c, parsed.error);
   const result = await getOwnerTreeService(actor(c), parsed.data.ownerPartyId);
@@ -268,7 +268,7 @@ const ownersSummaryQuery = z.object({
     .optional(),
 });
 
-ownerLedgerRoutes.get("/owners-summary", requireRole("manager"), async (c) => {
+ownerLedgerRoutes.get("/owners-summary", requirePermission("owner_report.view"), async (c) => {
   const parsed = ownersSummaryQuery.safeParse(c.req.query());
   if (!parsed.success) return zerr(c, parsed.error);
 
@@ -295,7 +295,7 @@ const ownerMonthsQuery = z.object({
   apartmentId: z.string().uuid().optional(),
 });
 
-ownerLedgerRoutes.get("/owners/:ownerPartyId/months", requireRole("manager"), async (c) => {
+ownerLedgerRoutes.get("/owners/:ownerPartyId/months", requirePermission("owner_report.view"), async (c) => {
   const ownerPartyId = c.req.param("ownerPartyId");
   const parsed = ownerMonthsQuery.safeParse(c.req.query());
   if (!parsed.success) return zerr(c, parsed.error);
@@ -320,7 +320,7 @@ const unitsSummaryQuery = z.object({
     .regex(/^\d{4}-\d{2}$/, "month must match YYYY-MM"),
 });
 
-ownerLedgerRoutes.get("/owners/:ownerPartyId/units-summary", requireRole("manager"), async (c) => {
+ownerLedgerRoutes.get("/owners/:ownerPartyId/units-summary", requirePermission("owner_report.view"), async (c) => {
   const ownerPartyId = c.req.param("ownerPartyId");
   const parsed = unitsSummaryQuery.safeParse(c.req.query());
   if (!parsed.success) return zerr(c, parsed.error);
@@ -350,7 +350,7 @@ const orgUnitsSummaryQuery = z.object({
   pageSize: z.coerce.number().int().min(1).max(50).default(20),
 });
 
-ownerLedgerRoutes.get("/units-summary", requireRole("manager"), async (c) => {
+ownerLedgerRoutes.get("/units-summary", requirePermission("owner_report.view"), async (c) => {
   const parsed = orgUnitsSummaryQuery.safeParse(c.req.query());
   if (!parsed.success) return zerr(c, parsed.error);
   // requireRole("manager") guarantees role is "admin" | "manager" — cast is safe
@@ -374,7 +374,7 @@ const recomputeBody = z.object({
   ownerPartyId: z.string().uuid().optional(),
 });
 
-ownerLedgerRoutes.post("/units-summary/recompute", requireRole("manager"), async (c) => {
+ownerLedgerRoutes.post("/units-summary/recompute", requirePermission("owner_report.generate"), async (c) => {
   const parsed = recomputeBody.safeParse(await c.req.json().catch(() => null));
   if (!parsed.success) return zerr(c, parsed.error);
   const result = await recomputeUnitMonthLedgerService(
@@ -390,7 +390,7 @@ ownerLedgerRoutes.post("/units-summary/recompute", requireRole("manager"), async
 
 const apartmentIdParam = z.string().uuid();
 
-ownerLedgerRoutes.get("/units/:apartmentId/context", requireRole("manager"), async (c) => {
+ownerLedgerRoutes.get("/units/:apartmentId/context", requirePermission("owner_report.view"), async (c) => {
   const apartmentId = c.req.param("apartmentId");
   if (!apartmentIdParam.safeParse(apartmentId).success) {
     return c.json({ error: "Invalid apartment id" }, 400);
@@ -419,7 +419,7 @@ const entryAttachmentUploadSchema = z.object({
   sizeBytes: z.number().int().positive().max(15 * 1024 * 1024),
 });
 
-ownerLedgerRoutes.post("/entries/attachments/upload-url", requireRole("admin"), async (c) => {
+ownerLedgerRoutes.post("/entries/attachments/upload-url", requirePermission("owner_report.generate"), async (c) => {
   const body = await c.req.json().catch(() => null);
   if (!body) return c.json({ error: "Invalid JSON body" }, 400);
   const parsed = entryAttachmentUploadSchema.safeParse(body);
@@ -448,7 +448,7 @@ const receiptQuery = z.object({
   apartmentId: z.string().uuid().optional(),
 });
 
-ownerLedgerRoutes.get("/receipt", requireRole("manager"), async (c) => {
+ownerLedgerRoutes.get("/receipt", requirePermission("owner_report.download"), async (c) => {
   const parsed = receiptQuery.safeParse(c.req.query());
   if (!parsed.success) return zerr(c, parsed.error);
   const { ownerPartyId, month, apartmentId } = parsed.data;

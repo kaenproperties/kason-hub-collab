@@ -5,7 +5,7 @@ import { utilityBillingConfigSchema } from "@kason/shared";
 import type { SessionPayload } from "../../lib/auth";
 import { isPhase2FlagEnabled } from "../../lib/feature-flags";
 import { formatZodError } from "../../lib/zod-error-mapper";
-import { requireRole } from "../../middleware/require-role";
+import { requirePermission } from "../../middleware/require-permission";
 import { getUtilityBillingConfigService, upsertUtilityBillingConfigService } from "./service";
 
 const utilityBillingConfigRoutes = new Hono<{ Variables: { session: SessionPayload } }>();
@@ -22,14 +22,14 @@ function zodBadRequest(c: Context, error: ZodError) {
 }
 
 // GET /api/utility-billing-config — requires editor
-utilityBillingConfigRoutes.get("/", requireRole("editor"), async (c) => {
+utilityBillingConfigRoutes.get("/", requirePermission("settings.view"), async (c) => {
   const session = c.get("session");
   const result = await getUtilityBillingConfigService(session);
   return c.json(result, 200);
 });
 
 // PATCH /api/utility-billing-config — requires admin
-utilityBillingConfigRoutes.patch("/", requireRole("admin"), async (c) => {
+utilityBillingConfigRoutes.patch("/", requirePermission("settings.manage"), async (c) => {
   const session = c.get("session");
   const parsed = utilityBillingConfigSchema.safeParse(await c.req.json().catch(() => null));
   if (!parsed.success) return zodBadRequest(c, parsed.error);

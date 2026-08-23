@@ -9,7 +9,7 @@ const rows: DraftInvoiceListItem[] = [
 
 describe("invoiceTypeMeta", () => {
   it("maps enum values to human labels stating invoice vs statement (no underscores)", () => {
-    expect(invoiceTypeMeta("tenant_rental").label).toBe("Rental Invoice");
+    expect(invoiceTypeMeta("tenant_rental").label).toBe("Rental Payment Request");
     expect(invoiceTypeMeta("owner_statement").label).toBe("Owner Statement");
     expect(invoiceTypeMeta("tenant_aircon").label).toBe("Aircon Invoice");
   });
@@ -27,7 +27,7 @@ describe("DraftApprovalsTable", () => {
       <DraftApprovalsTable invoices={rows} selectedIds={[]} onSelectionChange={() => {}} onRowClick={() => {}} />,
     );
     // Readable kind labels (answers "is it an invoice or a statement?").
-    expect(screen.getByText("Rental Invoice")).toBeInTheDocument();
+    expect(screen.getByText("Rental Payment Request")).toBeInTheDocument();
     expect(screen.getByText("Owner Statement")).toBeInTheDocument();
     // The document code is still shown.
     expect(screen.getByText("TR-202607-1a93")).toBeInTheDocument();

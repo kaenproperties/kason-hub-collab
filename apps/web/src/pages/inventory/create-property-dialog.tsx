@@ -84,7 +84,7 @@ export function CreatePropertyDialog({ trigger }: { trigger: ReactNode }) {
           <Field label="Property name">
             <TextInput name="name" required placeholder="Northshore Residence" />
           </Field>
-          <Field label="Property code">
+          <Field label="Property Short Form">
             <TextInput name="propertyCode" required placeholder="PR-1024" />
           </Field>
           <Field label="Property type">

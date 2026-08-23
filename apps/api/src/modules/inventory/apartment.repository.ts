@@ -16,6 +16,7 @@ export const APARTMENT_SELECT = {
   highlights: true,
   publishedDescription: true,
   publishedTitle: true,
+  tnbSubsidyCapMonthly: true,
   underManagement: true,
   createdAt: true,
   updatedAt: true,
@@ -67,6 +68,7 @@ export type ApartmentSharedPatch = Partial<{
   publishedDescription: string | null;
   publishedTitle: string | null;
   partitionBillingMode: "SUBSIDY" | "NO_SUBSIDY";
+  tnbSubsidyCapMonthly: Prisma.Decimal | number | string | null;
   underManagement: boolean;
 }>;
 

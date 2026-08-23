@@ -71,6 +71,16 @@ function row(partial: Partial<GridRow> = {}): GridRow {
 }
 
 describe("bills-grid export", () => {
+  it("omits the removed Cleaning Tenant and WiFi Tenant columns", async () => {
+    expect(CURRENT_COLUMNS.map((column) => column.id)).not.toContain("cleaningTenant");
+    expect(CURRENT_COLUMNS.map((column) => column.id)).not.toContain("wifiTenant");
+
+    const wb = await buildGridWorkbook([row()], CURRENT_COLUMNS, ["2026-07-01"]);
+    const ws = wb.getWorksheet("Tenant & Owner Billing")!;
+    const headers = ws.getRow(2).values as unknown[];
+    expect(headers.filter((value) => value === "Tenant")).toHaveLength(3);
+  });
+
   it("band headers: TNB spans previousKwh..amount as a merged range", async () => {
     const wb = await buildGridWorkbook([row({ apartmentId: "a1", unitCode: "PV9 A-13-13" })], CURRENT_COLUMNS, ["2026-07-01"]);
     const ws = wb.getWorksheet("Tenant & Owner Billing")!;

@@ -1,6 +1,5 @@
 import { Hono } from "hono";
 import type { SessionPayload } from "../../lib/auth";
-import { requireRole } from "../../middleware/require-role";
 import { requirePermission } from "../../middleware/require-permission";
 import { formatZodError } from "../../lib/zod-error-mapper";
 import { createUserSchema, updateUserSchema, resetPasswordSchema } from "./users.validation";
@@ -15,8 +14,8 @@ import {
 
 const usersRoutes = new Hono<{ Variables: { session: SessionPayload } }>();
 
-// GET /api/users — editor+ can list operator users in their org
-usersRoutes.get("/", requireRole("editor"), async (c) => {
+// GET /api/users — follows the same capability as the Roles page itself.
+usersRoutes.get("/", requirePermission("roles.manage"), async (c) => {
   const session = c.get("session");
   const rawRoles = c.req.query("roles");
   const roles = rawRoles

@@ -177,10 +177,17 @@ export async function createSupplierExpenseService(
   });
 }
 
-export async function listSupplierExpensesService(ctx: ExpenseActorCtx) {
+export async function listSupplierExpensesService(
+  ctx: ExpenseActorCtx,
+  options?: { ownOnly?: boolean },
+) {
   const db = getDb();
   const rows = await db.supplierExpense.findMany({
-    where: { organizationId: ctx.orgId, status: "recorded" },
+    where: {
+      organizationId: ctx.orgId,
+      status: "recorded",
+      ...(options?.ownOnly ? { createdById: ctx.actorUserId } : {}),
+    },
     include: {
       allocations: true,
       costAssignments: true,

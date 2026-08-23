@@ -27,6 +27,8 @@ let ownerPartyId = "";
 let statementId = "";
 let mgmtChargeId = "";
 let cleaningChargeId = "";
+let commissionChargeId = "";
+let commissionSstChargeId = "";
 
 async function cleanOrg() {
   const db = getDb();
@@ -123,16 +125,17 @@ async function seed() {
     data: {
       organizationId: ORG, invoiceNumber: "OS-202607-testowner", partyId: ownerPartyId,
       ownerPartyId, invoiceType: "owner_statement", status: "draft", invoiceDate: new Date(),
-      periodMonth: new Date("2026-07-01T00:00:00.000Z"), totalAmount: "370.00", sstAmount: "20.00",
+      periodMonth: new Date("2026-07-01T00:00:00.000Z"), totalAmount: "1990.00", sstAmount: "20.00",
       currency: "MYR", idempotencyKey: `owner:${ownerPartyId}:2026-07-01`,
     },
     select: { id: true },
   });
   statementId = statement.id;
-  const mkStmtCharge = (n: string, type: string, amount: string) =>
+  const mkStmtCharge = (n: string, type: string, amount: string, description?: string) =>
     db.charge.create({
       data: {
         organizationId: ORG, chargeNumber: n, partyId: ownerPartyId, chargeType: type, status: "draft",
+        description,
         dueDate: new Date("2026-07-01T00:00:00.000Z"), amount, currency: "MYR", outstandingAmount: amount,
         attachmentKeys: [], invoiceId: statementId, billingMonth: new Date("2026-07-01T00:00:00.000Z"),
         unitId: UNIT,
@@ -141,8 +144,14 @@ async function seed() {
     });
   mgmtChargeId = (await mkStmtCharge("OSC-202607-x-0001", "management_fee", "250.00")).id;
   cleaningChargeId = (await mkStmtCharge("OSC-202607-x-0002", "cleaning", "100.00")).id;
+  commissionChargeId = (
+    await mkStmtCharge("OSC-202607-x-0003", "letting_commission", "1500.00", "Legacy internal commission label")
+  ).id;
+  commissionSstChargeId = (
+    await mkStmtCharge("OSC-202607-x-0004", "letting_commission_sst", "120.00", "Legacy internal SST label")
+  ).id;
   // pass-through utility line — must be EXCLUDED from the IVOWN document
-  await mkStmtCharge("OSC-202607-x-0003", "tnb", "42.00");
+  await mkStmtCharge("OSC-202607-x-0005", "tnb", "42.00");
 }
 
 dn("issueStatementIvownDocumentTx — integration", () => {
@@ -155,7 +164,7 @@ dn("issueStatementIvownDocumentTx — integration", () => {
     delete process.env.ENABLE_PHASE2_BILLING_DOCS;
   });
 
-  it("issues ONE IVOWN invoice with mgmt-fee (8% SST) + cleaning lines, excluding pass-through", async () => {
+  it("issues ONE IVOWN invoice with management, cleaning and exact owner Admin Fee + SST lines", async () => {
     await mintIvownInTx(ORG, actorId, statementId);
     const db = getDb();
     const docs = await db.billingDocument.findMany({ where: { organizationId: ORG }, include: { lines: true } });
@@ -167,11 +176,32 @@ dn("issueStatementIvownDocumentTx — integration", () => {
     expect(doc.partyId).toBe(ownerPartyId);
     expect(doc.statementInvoiceId).toBe(statementId);
     expect(doc.idempotencyKey).toBe(`ivown:owner:${ownerPartyId}:2026-07-01`);
-    expect(doc.lines).toHaveLength(2); // mgmt + cleaning, NOT tnb
-    expect(doc.lines.map((l) => l.chargeId).sort()).toEqual([mgmtChargeId, cleaningChargeId].sort());
-    expect(doc.subtotal.toString()).toBe("350");
+    expect(doc.lines).toHaveLength(4); // mgmt + cleaning + Admin Fee + its flat SST, NOT tnb
+    expect(doc.lines.map((l) => l.chargeId).sort()).toEqual(
+      [mgmtChargeId, cleaningChargeId, commissionChargeId, commissionSstChargeId].sort(),
+    );
+    const byChargeId = new Map(doc.lines.map((line) => [line.chargeId, line]));
+    const commission = byChargeId.get(commissionChargeId)!;
+    const commissionSst = byChargeId.get(commissionSstChargeId)!;
+    expect(commission.description).toBe("Admin Fee (First Month Rental)");
+    expect(commission.amount.toString()).toBe("1500");
+    expect(commission.sstRate.toString()).toBe("0");
+    expect(commissionSst.description).toBe("SST on Admin Fee (First Month Rental)");
+    expect(commissionSst.amount.toString()).toBe("120");
+    expect(commissionSst.sstRate.toString()).toBe("0");
+    const commissionCategory = await db.chargeCategory.findFirstOrThrow({
+      where: { organizationId: ORG, code: "letting_commission" },
+      select: { id: true },
+    });
+    const commissionSstCategory = await db.chargeCategory.findFirstOrThrow({
+      where: { organizationId: ORG, code: "letting_commission_sst" },
+      select: { id: true },
+    });
+    expect(commission.categoryId).toBe(commissionCategory.id);
+    expect(commissionSst.categoryId).toBe(commissionSstCategory.id);
+    expect(doc.subtotal.toString()).toBe("1970");
     expect(doc.sstAmount.toString()).toBe("20"); // owner's config sstPercent (8) applied to the 250 mgmt-fee base
-    expect(doc.total.toString()).toBe("370");
+    expect(doc.total.toString()).toBe("1990");
   });
 
   it("re-running the generate dedupes on the ivown: idempotency key", async () => {
@@ -241,7 +271,12 @@ dn("issueStatementIvownDocumentTx — integration", () => {
 
   it("statement with no income lines mints nothing", async () => {
     const db = getDb();
-    await db.charge.deleteMany({ where: { organizationId: ORG, chargeType: { in: ["management_fee", "cleaning"] } } });
+    await db.charge.deleteMany({
+      where: {
+        organizationId: ORG,
+        chargeType: { in: ["management_fee", "cleaning", "letting_commission", "letting_commission_sst"] },
+      },
+    });
     await mintIvownInTx(ORG, actorId, statementId);
     expect(await db.billingDocument.count({ where: { organizationId: ORG } })).toBe(0);
   });

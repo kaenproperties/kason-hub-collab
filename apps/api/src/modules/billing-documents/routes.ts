@@ -1,8 +1,7 @@
 import { Hono } from "hono";
 import { listBillingDocumentsQuery, applyCreditInput, manualInvoiceInput, createCreditNoteInput, chargeAdjustmentInput, voidChargeAdjustmentInput } from "@kason/shared";
 import type { SessionPayload } from "../../lib/auth";
-import { requireRole } from "../../middleware/require-role";
-import { requireWorkspace } from "../../lib/workspace-access";
+import { requirePermission } from "../../middleware/require-permission";
 import { formatZodError } from "../../lib/zod-error-mapper";
 import { billingDocsFlagGate } from "./billing-documents.gate";
 import { chargeAdjustmentsFlagGate } from "./charge-adjustment.gate";
@@ -30,7 +29,6 @@ const multiPayGate = async (c: any, next: any) => {
 // Flag gate FIRST (canonical 404 while dark — before any auth/role logic
 // leaks the surface's existence), then manager read for everything.
 billingDocumentsRoutes.use("*", billingDocsFlagGate);
-billingDocumentsRoutes.use("*", requireWorkspace("accounting"));
 // DEVIATION FROM SPEC R4 (intentional, behavior-identical): spec R4 says convert
 // apply-credit to `requireWorkspace("accounting")` AND an admin capability check. We
 // keep `requireRole("admin")` because it yields the SAME outcome (admin allowed;
@@ -39,7 +37,7 @@ billingDocumentsRoutes.use("*", requireWorkspace("accounting"));
 // "apply-credit stays admin-only". refund-proofs gate replacement → P3.
 
 // GET / — the Documents register (Yannie's reconciliation/audit surface).
-billingDocumentsRoutes.get("/", async (c) => {
+billingDocumentsRoutes.get("/", requirePermission("accounting.view"), async (c) => {
   const session = c.get("session");
   const parsed = listBillingDocumentsQuery.safeParse(c.req.query());
   if (!parsed.success) {
@@ -51,7 +49,7 @@ billingDocumentsRoutes.get("/", async (c) => {
 });
 
 // GET /:id — detail with lines + related documents.
-billingDocumentsRoutes.get("/:id", async (c) => {
+billingDocumentsRoutes.get("/:id", requirePermission("accounting.view"), async (c) => {
   const session = c.get("session");
   const detail = await getBillingDocumentDetail(session.orgId, c.req.param("id"));
   if (!detail) return c.json({ error: "Document not found" }, 404);
@@ -65,7 +63,7 @@ billingDocumentsRoutes.get("/:id", async (c) => {
 // tenant-uploaded slips, and both should stay dark while the multi-pay flag is
 // off. Without it, turning the flag off leaves this panel rendering cards whose
 // Approve/Reject buttons both 404 (those routes ARE gated).
-billingDocumentsRoutes.get("/:id/pending-payments", multiPayGate, async (c) => {
+billingDocumentsRoutes.get("/:id/pending-payments", multiPayGate, requirePermission("accounting.view"), async (c) => {
   const session = c.get("session");
   const data = await getPendingPaymentsForDocument(session.orgId, c.req.param("id"));
   if (data === null) return c.json({ error: "Document not found" }, 404);
@@ -74,7 +72,7 @@ billingDocumentsRoutes.get("/:id/pending-payments", multiPayGate, async (c) => {
 
 // GET /:id/attachments/:attachmentId/url — signed URL for an expense-line attachment,
 // only when the attachment is genuinely linked to this document (bill-expenses R6).
-billingDocumentsRoutes.get("/:id/attachments/:attachmentId/url", async (c) => {
+billingDocumentsRoutes.get("/:id/attachments/:attachmentId/url", requirePermission("accounting.view"), async (c) => {
   const session = c.get("session");
   const result = await resolveAttachmentUrlService(session.orgId, c.req.param("id"), c.req.param("attachmentId"));
   if (!result) return c.json({ error: "Attachment not found" }, 404);
@@ -82,7 +80,7 @@ billingDocumentsRoutes.get("/:id/attachments/:attachmentId/url", async (c) => {
 });
 
 // GET /:id/pdf — signed URL; renders on demand when pdfKey is null.
-billingDocumentsRoutes.get("/:id/pdf", async (c) => {
+billingDocumentsRoutes.get("/:id/pdf", requirePermission("accounting.view"), async (c) => {
   const session = c.get("session");
   const result = await getBillingDocumentPdfUrl(session.orgId, c.req.param("id"));
   if (!result) return c.json({ error: "Document not found" }, 404);
@@ -92,7 +90,7 @@ billingDocumentsRoutes.get("/:id/pdf", async (c) => {
 // Local-storage-independent PDF download. The URL endpoint above points here
 // automatically when Supabase is not configured; it is also useful as a stable
 // direct-download route for accountants.
-billingDocumentsRoutes.get("/:id/pdf-file", async (c) => {
+billingDocumentsRoutes.get("/:id/pdf-file", requirePermission("accounting.view"), async (c) => {
   const session = c.get("session");
   const result = await renderBillingDocumentPdfFile(session.orgId, c.req.param("id"));
   if (!result) return c.json({ error: "Document not found" }, 404);
@@ -106,7 +104,7 @@ billingDocumentsRoutes.get("/:id/pdf-file", async (c) => {
 // category-routed BillingDocument (invoice/debit_note) per line, all in one
 // transaction. Module gate above is already requireWorkspace("accounting");
 // this per-route gate is belt-and-braces + explicit.
-billingDocumentsRoutes.post("/invoices", requireWorkspace("accounting"), async (c) => {
+billingDocumentsRoutes.post("/invoices", requirePermission("accounting.issue"), async (c) => {
   const parsed = manualInvoiceInput.safeParse(await c.req.json().catch(() => null));
   if (!parsed.success) {
     const friendly = formatZodError(parsed.error, { domain: "billing" });
@@ -124,7 +122,7 @@ billingDocumentsRoutes.post("/invoices", requireWorkspace("accounting"), async (
 // P4: manual overpayment Credit Note (R12). Accounting workspace only; the
 // accountantScope allow-list (accountant-scope.ts) also grants this exact
 // tuple. Delegates to the row-locked, idempotent service.
-billingDocumentsRoutes.post("/credit-notes", requireWorkspace("accounting"), async (c) => {
+billingDocumentsRoutes.post("/credit-notes", requirePermission("accounting.issue"), async (c) => {
   const parsed = createCreditNoteInput.safeParse(await c.req.json().catch(() => null));
   if (!parsed.success) {
     const friendly = formatZodError(parsed.error, { domain: "billing" });
@@ -143,7 +141,7 @@ billingDocumentsRoutes.post("/credit-notes", requireWorkspace("accounting"), asy
 // TENANT-ONLY. Own flag gate (ENABLE_PHASE2_INVOICE_ADJUSTMENTS, layered on
 // top of the module-wide ENABLE_PHASE2_BILLING_DOCS gate above) + accounting
 // workspace, mirroring the P4 credit-notes route's per-route gate style.
-billingDocumentsRoutes.post("/charge-adjustments", chargeAdjustmentsFlagGate, requireWorkspace("accounting"), async (c) => {
+billingDocumentsRoutes.post("/charge-adjustments", chargeAdjustmentsFlagGate, requirePermission("accounting.issue"), async (c) => {
   const parsed = chargeAdjustmentInput.safeParse(await c.req.json().catch(() => null));
   if (!parsed.success) {
     const friendly = formatZodError(parsed.error, { domain: "billing" });
@@ -162,7 +160,7 @@ billingDocumentsRoutes.post("/charge-adjustments", chargeAdjustmentsFlagGate, re
 // tenant-only, safe-default BLOCK. Reuses chargeAdjustmentsFlagGate (both
 // ENABLE_PHASE2_BILLING_DOCS and ENABLE_PHASE2_INVOICE_ADJUSTMENTS gates) —
 // mirrors the /charge-adjustments route's per-route gate style.
-billingDocumentsRoutes.post("/:id/void", chargeAdjustmentsFlagGate, requireWorkspace("accounting"), async (c) => {
+billingDocumentsRoutes.post("/:id/void", chargeAdjustmentsFlagGate, requirePermission("accounting.void"), async (c) => {
   const parsed = voidChargeAdjustmentInput.safeParse(await c.req.json().catch(() => null));
   if (!parsed.success) {
     const friendly = formatZodError(parsed.error, { domain: "billing" });
@@ -180,7 +178,7 @@ billingDocumentsRoutes.post("/:id/void", chargeAdjustmentsFlagGate, requireWorks
 
 // P3 (spec §4.3): manual Apply-credit escape hatch — apply an open CN balance
 // to an older outstanding charge, or split differently than the FIFO auto-apply.
-billingDocumentsRoutes.post("/:id/apply-credit", requireRole("admin"), async (c) => {
+billingDocumentsRoutes.post("/:id/apply-credit", requirePermission("accounting.issue"), async (c) => {
   const parsed = applyCreditInput.safeParse(await c.req.json().catch(() => null));
   if (!parsed.success) {
     const friendly = formatZodError(parsed.error, { domain: "billing" });
@@ -198,7 +196,7 @@ billingDocumentsRoutes.post("/:id/apply-credit", requireRole("admin"), async (c)
 
 // P3: refund transfer-slip upload. Server-minted key + putObject — the void
 // dialog uploads FIRST, then sends the returned key as refund.proofKey.
-billingDocumentsRoutes.post("/refund-proofs", requireWorkspace("accounting"), async (c) => {
+billingDocumentsRoutes.post("/refund-proofs", requirePermission("accounting.void"), async (c) => {
   const form = await c.req.formData().catch(() => null);
   if (!form) return c.json({ error: "Invalid form body" }, 400);
   const entry = form.get("file") ?? form.get("files");
@@ -218,7 +216,7 @@ billingDocumentsRoutes.post("/refund-proofs", requireWorkspace("accounting"), as
 // the org-scoped key prefix minted above — reject any key that doesn't
 // start with this org's prefix (403) before touching storage. Delete itself
 // is best-effort: 200 even if the object is already gone.
-billingDocumentsRoutes.delete("/refund-proofs", requireWorkspace("accounting"), async (c) => {
+billingDocumentsRoutes.delete("/refund-proofs", requirePermission("accounting.void"), async (c) => {
   const body = await c.req.json().catch(() => null);
   const key = body && typeof (body as Record<string, unknown>).key === "string" ? ((body as Record<string, unknown>).key as string) : null;
   if (!key) return c.json({ error: "Missing key" }, 400);

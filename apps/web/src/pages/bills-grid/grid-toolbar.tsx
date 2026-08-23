@@ -90,6 +90,10 @@ export interface GridToolbarProps {
   onPropertyChange: (next: string | "all") => void; // R29 "Categorize", default "all"
   dirtyCount: number;
   onSave: () => void; // R23 Save enabled only when dirtyCount > 0
+  canEditAction?: boolean;
+  canSaveAction?: boolean;
+  canBillAction?: boolean;
+  canExportAction?: boolean;
   // Excel-Web V2 — undo/redo over the staged edit buffer. In-memory only; undo/redo
   // never issue a server write. Buttons disable when the respective stack is empty.
   canUndo: boolean;
@@ -206,6 +210,10 @@ export function GridToolbar({
   onPropertyChange,
   dirtyCount,
   onSave,
+  canEditAction = true,
+  canSaveAction = true,
+  canBillAction = true,
+  canExportAction = true,
   canUndo,
   canRedo,
   undoDepth,
@@ -295,7 +303,7 @@ export function GridToolbar({
               aria-label="Previous month"
               data-testid="anchor-prev-month"
               onClick={() => onStepMonth(-1)}
-              className="grid h-8 w-8 place-items-center rounded-md border border-[var(--border)] text-muted-foreground outline-none transition hover:bg-muted/40 focus:border-[var(--primary)] focus:ring-2 focus:ring-[var(--ring)]"
+              className="grid h-10 w-10 place-items-center rounded-md border border-[var(--border)] text-muted-foreground outline-none transition hover:bg-muted/40 focus:border-[var(--primary)] focus:ring-2 focus:ring-[var(--ring)]"
             >
               <ChevronLeft />
             </button>
@@ -308,14 +316,14 @@ export function GridToolbar({
               onChange={(e) => {
                 if (e.target.value) onAnchorMonthChange(`${e.target.value}-01`);
               }}
-              className="min-h-10 rounded-md border border-[var(--input-border)] bg-[var(--card-bg)] px-2 py-1.5 text-base text-[var(--text-primary)] outline-none transition focus:border-[var(--primary)] focus:ring-2 focus:ring-[var(--ring)]"
+              className="h-10 rounded-md border border-[var(--input-border)] bg-[var(--card-bg)] px-2 py-1.5 text-base text-[var(--text-primary)] outline-none transition focus:border-[var(--primary)] focus:ring-2 focus:ring-[var(--ring)]"
             />
             <button
               type="button"
               aria-label="Next month"
               data-testid="anchor-next-month"
               onClick={() => onStepMonth(1)}
-              className="grid h-8 w-8 place-items-center rounded-md border border-[var(--border)] text-muted-foreground outline-none transition hover:bg-muted/40 focus:border-[var(--primary)] focus:ring-2 focus:ring-[var(--ring)]"
+              className="grid h-10 w-10 place-items-center rounded-md border border-[var(--border)] text-muted-foreground outline-none transition hover:bg-muted/40 focus:border-[var(--primary)] focus:ring-2 focus:ring-[var(--ring)]"
             >
               <ChevronRight />
             </button>
@@ -357,7 +365,7 @@ export function GridToolbar({
             id="bills-grid-property-filter"
             value={propertyId}
             onChange={(e) => onPropertyChange(e.target.value)}
-            className="min-h-10 rounded-md border border-[var(--input-border)] bg-[var(--card-bg)] px-2.5 py-1.5 text-base text-[var(--text-primary)] outline-none transition focus:border-[var(--primary)] focus:ring-2 focus:ring-[var(--ring)]"
+            className="h-10 rounded-md border border-[var(--input-border)] bg-[var(--card-bg)] px-2.5 py-1.5 text-base text-[var(--text-primary)] outline-none transition focus:border-[var(--primary)] focus:ring-2 focus:ring-[var(--ring)]"
           >
             <option value="all">All</option>
             {properties.map((p) => (
@@ -420,14 +428,14 @@ export function GridToolbar({
             aria-label="Filter by unit code, owner/tenant name, or phone"
             value={columnFilters.unitCode ?? ""}
             onChange={(e) => onColumnFilterChange("unitCode", e.target.value)}
-            className="min-h-10 w-56 rounded-md border border-[var(--input-border)] bg-[var(--card-bg)] px-2.5 py-1.5 text-base text-[var(--text-primary)] outline-none transition placeholder:text-[var(--text-muted)] focus:border-[var(--primary)] focus:ring-2 focus:ring-[var(--ring)]"
+            className="h-10 w-56 rounded-md border border-[var(--input-border)] bg-[var(--card-bg)] px-2.5 py-1.5 text-base text-[var(--text-primary)] outline-none transition placeholder:text-[var(--text-muted)] focus:border-[var(--primary)] focus:ring-2 focus:ring-[var(--ring)]"
           />
         </div>
 
         <div>
           <span className="mb-1 block text-sm font-medium text-muted-foreground">Filter by colour</span>
           <details className="relative" data-testid="colour-filter-menu">
-            <summary aria-label="Filter by colour" className="flex min-h-10 min-w-52 cursor-pointer list-none items-center justify-between gap-3 rounded-md border border-[var(--input-border)] bg-[var(--card-bg)] px-2.5 py-1.5 text-base text-[var(--text-primary)] outline-none transition hover:bg-muted/40 focus:border-[var(--primary)] focus:ring-2 focus:ring-[var(--ring)]">
+            <summary aria-label="Filter by colour" className="flex h-10 min-w-52 cursor-pointer list-none items-center justify-between gap-3 rounded-md border border-[var(--input-border)] bg-[var(--card-bg)] px-2.5 py-1.5 text-base text-[var(--text-primary)] outline-none transition hover:bg-muted/40 focus:border-[var(--primary)] focus:ring-2 focus:ring-[var(--ring)]">
               <span>{colourFilters.length === 0 ? "All colours" : `${colourFilters.length} colour${colourFilters.length === 1 ? "" : "s"} selected`}</span>
               <span aria-hidden="true" className="text-xs">▼</span>
             </summary>
@@ -457,7 +465,7 @@ export function GridToolbar({
         <div>
           <span className="mb-1 block text-sm font-medium text-muted-foreground">Owner payout status</span>
           <details className="relative" data-testid="owner-payout-filter-menu">
-            <summary aria-label="Filter owner payout status" className="flex min-h-10 min-w-52 cursor-pointer list-none items-center justify-between gap-3 rounded-md border border-[var(--input-border)] bg-[var(--card-bg)] px-2.5 py-1.5 text-base text-[var(--text-primary)] outline-none transition hover:bg-muted/40 focus:border-[var(--primary)] focus:ring-2 focus:ring-[var(--ring)]">
+            <summary aria-label="Filter owner payout status" className="flex h-10 min-w-52 cursor-pointer list-none items-center justify-between gap-3 rounded-md border border-[var(--input-border)] bg-[var(--card-bg)] px-2.5 py-1.5 text-base text-[var(--text-primary)] outline-none transition hover:bg-muted/40 focus:border-[var(--primary)] focus:ring-2 focus:ring-[var(--ring)]">
               <span>{ownerPayoutFilters.length === 0 ? "All payout statuses" : `${ownerPayoutFilters.length} status${ownerPayoutFilters.length === 1 ? "" : "es"} selected`}</span>
               <span aria-hidden="true" className="text-xs">▼</span>
             </summary>
@@ -487,7 +495,7 @@ export function GridToolbar({
         {onDisplayModeChange && (
           <div>
             <span className="mb-1 block text-sm font-medium text-muted-foreground">Table view</span>
-            <div className="flex min-h-10 overflow-hidden rounded-md border border-[var(--input-border)] bg-[var(--card-bg)]">
+            <div className="flex h-10 overflow-hidden rounded-md border border-[var(--input-border)] bg-[var(--card-bg)]">
               <button type="button" aria-pressed={displayMode === "easy-read"} onClick={() => onDisplayModeChange("easy-read")} className={cn("px-3 text-sm font-semibold transition", displayMode === "easy-read" ? "bg-[var(--navy)] text-white" : "hover:bg-muted/50")}>Easy Read</button>
               <button type="button" aria-pressed={displayMode === "fit-all"} onClick={() => onDisplayModeChange("fit-all")} className={cn("border-l border-[var(--input-border)] px-3 text-sm font-semibold transition", displayMode === "fit-all" ? "bg-[var(--navy)] text-white" : "hover:bg-muted/50")}>Fit All</button>
             </div>
@@ -505,7 +513,7 @@ export function GridToolbar({
               onChange={(e) =>
                 onDateRangeChange({ ...dateRange, from: e.target.value ? `${e.target.value}-01` : null })
               }
-              className="min-h-10 rounded-md border border-[var(--input-border)] bg-[var(--card-bg)] px-2 py-1.5 text-base text-[var(--text-primary)] outline-none transition focus:border-[var(--primary)] focus:ring-2 focus:ring-[var(--ring)]"
+              className="h-10 rounded-md border border-[var(--input-border)] bg-[var(--card-bg)] px-2 py-1.5 text-base text-[var(--text-primary)] outline-none transition focus:border-[var(--primary)] focus:ring-2 focus:ring-[var(--ring)]"
             />
             <span className="text-xs text-muted-foreground">–</span>
             <input
@@ -516,7 +524,7 @@ export function GridToolbar({
               onChange={(e) =>
                 onDateRangeChange({ ...dateRange, to: e.target.value ? `${e.target.value}-01` : null })
               }
-              className="min-h-10 rounded-md border border-[var(--input-border)] bg-[var(--card-bg)] px-2 py-1.5 text-base text-[var(--text-primary)] outline-none transition focus:border-[var(--primary)] focus:ring-2 focus:ring-[var(--ring)]"
+              className="h-10 rounded-md border border-[var(--input-border)] bg-[var(--card-bg)] px-2 py-1.5 text-base text-[var(--text-primary)] outline-none transition focus:border-[var(--primary)] focus:ring-2 focus:ring-[var(--ring)]"
             />
           </div>
         </div>
@@ -524,7 +532,7 @@ export function GridToolbar({
         <div>
           <span className="mb-1 block text-sm font-medium text-muted-foreground">Columns</span>
           <details className="relative" data-testid="hide-column-menu">
-            <summary className="cursor-pointer list-none rounded-md border border-[var(--border)] px-2.5 py-1.5 text-xs font-medium text-muted-foreground transition hover:bg-muted/40">
+            <summary className="flex h-10 cursor-pointer list-none items-center rounded-md border border-[var(--border)] px-2.5 text-sm font-medium text-muted-foreground transition hover:bg-muted/40">
               {hiddenColumns.length > 0 ? `Hidden (${hiddenColumns.length})` : "Show/Hide"}
             </summary>
             <div className="absolute z-20 mt-1 max-h-64 w-56 space-y-0.5 overflow-y-auto rounded-lg border border-border/50 bg-background/95 p-2 shadow-xl backdrop-blur-xl">
@@ -553,7 +561,7 @@ export function GridToolbar({
 
         <div>
           <span className="mb-1 block text-sm font-medium text-muted-foreground">Vacant</span>
-          <label className="flex min-h-10 items-center gap-1.5 rounded-md border border-[var(--border)] px-3 py-2 text-sm font-medium text-muted-foreground">
+          <label className="flex h-10 items-center gap-1.5 rounded-md border border-[var(--border)] px-3 text-sm font-medium text-muted-foreground">
             <input type="checkbox" data-testid="show-vacant-toggle" checked={showVacant} onChange={onToggleShowVacant} />
             Show vacant
           </label>
@@ -561,13 +569,13 @@ export function GridToolbar({
       </div>
 
       {viewControls && (
-        <div className="flex min-w-fit shrink-0 items-center justify-center self-center">
+        <div data-testid="grid-view-controls" className="flex min-w-fit shrink-0 items-end justify-center self-end">
           {viewControls}
         </div>
       )}
 
-      <div className="flex shrink-0 flex-nowrap items-center gap-2">
-        <div className="flex items-center gap-1" data-testid="colour-fill-swatches">
+      <div data-testid="grid-toolbar-actions" className="flex h-10 shrink-0 flex-nowrap items-center gap-2 self-end">
+        {canEditAction && <div className="flex h-10 items-center gap-1" data-testid="colour-fill-swatches">
           <span className="text-sm font-medium text-muted-foreground">Colour</span>
           {COLOUR_SWATCHES.map((s) => (
             <button
@@ -586,16 +594,17 @@ export function GridToolbar({
             data-testid="colour-swatch-clear"
             disabled={!hasSelection}
             onClick={() => onApplyColour("")}
-            className="rounded-md border border-[var(--border)] px-3 py-2 text-sm text-muted-foreground transition hover:bg-muted/40 disabled:cursor-not-allowed disabled:opacity-40"
+            className="h-10 rounded-md border border-[var(--border)] px-3 py-0 text-sm text-muted-foreground transition hover:bg-muted/40 disabled:cursor-not-allowed disabled:opacity-40"
           >
             Clear
           </button>
-        </div>
-        <div className="flex items-center gap-1">
+        </div>}
+        {canEditAction && <div className="flex items-center gap-1">
           <Button
             type="button"
             variant="outline"
             size="default"
+            className="h-10 w-10 p-0"
             data-testid="grid-undo"
             aria-label="Undo"
             disabled={!canUndo}
@@ -608,6 +617,7 @@ export function GridToolbar({
             type="button"
             variant="outline"
             size="default"
+            className="h-10 w-10 p-0"
             data-testid="grid-redo"
             aria-label="Redo"
             disabled={!canRedo}
@@ -616,16 +626,16 @@ export function GridToolbar({
           >
             <Redo2 className="h-4 w-4" />
           </Button>
-        </div>
-        <Button type="button" variant="gold" size="lg" className="h-14 px-5 text-[22px]" disabled={dirtyCount === 0} onClick={onSave}>
+        </div>}
+        {canSaveAction && <Button type="button" variant="gold" size="lg" className="h-10 px-4 text-lg" disabled={dirtyCount === 0} onClick={onSave}>
           {dirtyCount > 0 ? `Save (${dirtyCount})` : "Save"}
-        </Button>
-        <div className="flex flex-col items-end gap-0.5">
+        </Button>}
+        {canBillAction && <div className="flex h-10 items-end">
           <Button
             type="button"
             variant="gold"
             size="lg"
-            className="h-14 px-5 text-[22px]"
+            className="h-10 px-4 text-lg"
             disabled={selectedRowCount === 0 || !canBillPeriod}
             onClick={onBill}
             title={!canBillPeriod ? "Only the current or next billing month can be billed" : undefined}
@@ -633,14 +643,14 @@ export function GridToolbar({
             {selectedRowCount > 0 ? `Bill (${selectedRowCount})` : "Bill"}
           </Button>
           {!canBillPeriod && (
-            <span data-testid="bill-period-locked" className="max-w-[9rem] text-right text-[10px] leading-tight text-muted-foreground">
+            <span data-testid="bill-period-locked" className="sr-only">
               Only current or next month can be billed
             </span>
           )}
-        </div>
-        <div className="flex items-center gap-2">
+        </div>}
+        {canExportAction && <div className="flex h-10 items-center gap-2">
           <DropdownMenu>
-            <DropdownMenuTrigger disabled={!canExport} className="inline-flex h-14 items-center gap-2 rounded-lg border border-[var(--gold)] bg-white px-5 text-[22px] font-semibold text-[var(--navy)] shadow-sm hover:bg-[var(--gold)]/10 disabled:opacity-50">
+            <DropdownMenuTrigger disabled={!canExport} className="inline-flex h-10 items-center gap-2 rounded-lg border border-[var(--gold)] bg-white px-4 text-lg font-semibold text-[var(--navy)] shadow-sm hover:bg-[var(--gold)]/10 disabled:opacity-50">
               Export <ChevronDown className="h-5 w-5" />
             </DropdownMenuTrigger>
             <DropdownMenuContent align="end" className="w-80 p-2 text-base">
@@ -660,7 +670,7 @@ export function GridToolbar({
             </DropdownMenuContent>
           </DropdownMenu>
           {!canExport && <span className="text-xs text-muted-foreground">Nothing to export</span>}
-        </div>
+        </div>}
       </div>
       </div>
     </div>

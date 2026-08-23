@@ -117,6 +117,71 @@ export interface GridSettlementDto {
   expenseLines: Record<string, SettlementState>;
 }
 
+// ─── Confirm-Bill utility plan (READ-TIME, no writes) ────────────────────────
+
+/** One utility Charge the Bills Grid's first-issuance path is prepared to mint.
+ * `amount` is the exact 2-dp Charge amount (a subsidy is negative). `listingId`
+ * and `tenancyId` retain room grain for partitioned units; owner lines have no
+ * tenancy and use the representative owner listing when one resolves. */
+export interface GridBillUtilityPlanLineDto {
+  key: string;
+  code: string;
+  label: string;
+  payer: "tenant" | "owner";
+  amount: string;
+  listingId: string | null;
+  tenancyId: string | null;
+}
+
+/** Subsidy policy frozen for a unit-month once the additive unit-cap rail is used. */
+export type GridTnbSubsidyPolicy =
+  | "legacy_per_pax"
+  | "unit_tnb_cap_equal_tenancy"
+  | "none";
+
+/** Exact room-grain share of the TNB amount above the owner's monthly unit cap.
+ * This is explanatory only: the corresponding electricity/subsidy Charge lines
+ * remain the one monetary source of truth. */
+export interface GridBillTnbExcessAllocationDto {
+  listingId: string;
+  tenancyId: string;
+  amount: string;
+}
+
+/** Informational reconciliation for the per-unit monthly TNB cap.
+ * `residual = ownerPortion + tenantExcess`; the excess is split by occupied
+ * tenancy/room, never by pax. It must not be rendered as an extra bill line. */
+export interface GridBillTnbSubsidyBreakdownDto {
+  residual: string;
+  ownerCap: string;
+  ownerPortion: string;
+  tenantExcess: string;
+  occupiedRoomCount: number;
+  allocations: GridBillTnbExcessAllocationDto[];
+}
+
+/** Exact utility component plan for the next normal (first-issuance) Bill.
+ *
+ * A re-Bill is deliberately `rebill_review`: the server may retain paid lines,
+ * and a grid read cannot honestly predict that component-aware decision. A
+ * blocked/unavailable plan carries no would-be lines, so clients cannot present
+ * a known subtotal as the amount that will actually be issued. */
+export interface GridBillUtilityPlanDto {
+  status: "ready" | "not_applicable" | "pax_blocked" | "unavailable" | "rebill_review";
+  mode: "whole" | "subsidy" | "no_subsidy" | null;
+  subsidyPerPax: string;
+  /** Effective policy used by this read/preflight. Optional only for a rolling
+   * cached payload from a server predating unit-level TNB caps. */
+  subsidyPolicy?: GridTnbSubsidyPolicy | null;
+  /** The snapshotted/current unit cap used by `subsidyPolicy`, if applicable. */
+  tnbSubsidyCap?: string | null;
+  /** Present only when an exact fresh unit-cap allocation can be explained. */
+  tnbSubsidyBreakdown?: GridBillTnbSubsidyBreakdownDto | null;
+  lines: GridBillUtilityPlanLineDto[];
+  blockedTenancyIds: string[];
+  errorCode: string | null;
+}
+
 export const gridQuerySchema = z.object({
   period: periodMonth.optional(),
   propertyId: uuid.optional(),
@@ -302,6 +367,10 @@ export interface RecurringRevisionDto { id: string; amount: string; bearer: "own
 // into the "custom" list because `kind !== "MAINTENANCE"` wouldn't even have typechecked).
 export interface RecurringDefinitionDto { id: string; kind: z.infer<typeof recurringKind>; code: string; name: string; archivedAt: string | null; revisions: RecurringRevisionDto[] }
 /** Per-row CUSTOM recurring totals for the grid summary cells (mirrors GridExpensesDto). */
-export interface GridRecurringDto { owner: { total: string; count: number }; tenant: { total: string; count: number } }
+export interface GridRecurringItemDto { id: string; name: string; amount: string }
+export interface GridRecurringDto {
+  owner: { total: string; count: number; items?: GridRecurringItemDto[] };
+  tenant: { total: string; count: number; items?: GridRecurringItemDto[] };
+}
 /** A read-only recurring snapshot line for the grid dialog. */
 export interface RecurringLineDto { id: string; name: string; amount: string; bearer: "owner" | "tenant"; nature: "expense" | "profit" | null; categoryName: string }

@@ -6,6 +6,7 @@ import path from "path";
 const RUN_INTEGRATION = process.env.RUN_INTEGRATION === "1";
 
 const alias: Record<string, string> = {
+  "@kason/shared/owner-remittance": path.resolve(__dirname, "../../packages/shared/src/finance/owner-remittance.ts"),
   "@kason/shared": path.resolve(__dirname, "../../packages/shared/src"),
 };
 if (!RUN_INTEGRATION) {

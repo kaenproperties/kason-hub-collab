@@ -20,10 +20,27 @@ vi.mock("sonner", () => ({ toast: { success: vi.fn(), error: vi.fn() } }));
 
 import { OccupancyFields } from "../occupancy-fields";
 import { apiFetch } from "@/lib/api-client";
+import { AuthContext } from "@/lib/auth";
 
 function wrap(ui: React.ReactNode) {
   const qc = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
-  return <QueryClientProvider client={qc}>{ui}</QueryClientProvider>;
+  return (
+    <AuthContext.Provider value={{
+      user: {
+        id: "operator-1",
+        fullName: "Test Operator",
+        email: "operator@example.test",
+        role: "admin",
+        orgId: "org-1",
+        permissions: ["party.create"],
+      },
+      setAuth: vi.fn(),
+      clearAuth: vi.fn(),
+      isAuthenticated: true,
+    }}>
+      <QueryClientProvider client={qc}>{ui}</QueryClientProvider>
+    </AuthContext.Provider>
+  );
 }
 
 const base = {
@@ -77,7 +94,7 @@ describe("<OccupancyFields> — monthly rent (flag ON)", () => {
     await waitFor(() =>
       expect(vi.mocked(apiFetch)).toHaveBeenCalledWith(expect.stringContaining("rent-preview")),
     );
-    expect(await screen.findByText(/first invoice/i)).toBeTruthy();
+    expect(await screen.findByText(/first rent to collect for owner/i)).toBeTruthy();
   });
 
   // B13 — the fix now prefills the tenancy's REAL rent (edit-unit-dialog
@@ -111,7 +128,7 @@ describe("<OccupancyFields> — monthly rent (flag ON)", () => {
     await waitFor(() =>
       expect(vi.mocked(apiFetch)).toHaveBeenCalledWith(expect.stringContaining("rent-preview")),
     );
-    expect(await screen.findByText(/first invoice/i)).toBeTruthy();
+    expect(await screen.findByText(/first rent to collect for owner/i)).toBeTruthy();
   });
 
   // B9 — the rent field is server-inert on a same-tenant in-place edit
@@ -161,6 +178,6 @@ describe("<OccupancyFields> — monthly rent (flag ON)", () => {
     await waitFor(() =>
       expect(vi.mocked(apiFetch)).toHaveBeenCalledWith(expect.stringContaining("rent-preview")),
     );
-    expect(await screen.findByText(/first invoice/i)).toBeTruthy();
+    expect(await screen.findByText(/first rent to collect for owner/i)).toBeTruthy();
   });
 });

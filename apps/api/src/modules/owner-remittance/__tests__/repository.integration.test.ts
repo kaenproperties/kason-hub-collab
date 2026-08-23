@@ -52,6 +52,10 @@ const ACTOR = "15000000-0000-4000-8000-0000000000a2";
 const OWNER = "15000000-0000-4000-8000-0000000000a4";
 const OWNER2 = "15000000-0000-4000-8000-0000000000a5"; // B13 cross-owner isolation
 const PROPERTY = "15000000-0000-4000-8000-0000000000a6";
+const APARTMENT = "15000000-0000-4000-8000-0000000000a7";
+const LISTING = "15000000-0000-4000-8000-0000000000a8";
+const TENANT = "15000000-0000-4000-8000-0000000000a9";
+const TENANCY = "15000000-0000-4000-8000-0000000000aa";
 // A second, throwaway ORGANIZATION for B11's cross-org rejection proof. OwnerStatementPeriod
 // DOES carry a real FK to Organization (unlike OwnerLedgerEntry's plain columns), so this
 // needs a genuine row, not just a UUID literal.
@@ -66,6 +70,10 @@ async function cleanup() {
   await db.ownerRemittanceAllocation.deleteMany({ where: org });
   await db.ownerLedgerEntry.deleteMany({ where: org });
   await db.ownerStatementPeriod.deleteMany({ where: org });
+  await db.deposit.deleteMany({ where: org });
+  await db.tenancy.deleteMany({ where: org });
+  await db.listing.deleteMany({ where: org });
+  await db.apartment.deleteMany({ where: org });
   // Symmetric OTHER_ORG deletes (same FK-safe order as ORG above) — OTHER_ORG
   // today only ever gets an Organization + OwnerStatementPeriod row (B11), but
   // a future test that also seeds an OTHER_ORG ledger/allocation row must not
@@ -96,6 +104,9 @@ async function seed() {
   await db.party.create({
     data: { id: OWNER, organizationId: ORG, displayName: "T5 Owner", partyType: "individual", status: "active" },
   });
+  await db.party.create({
+    data: { id: TENANT, organizationId: ORG, displayName: "T5 Tenant", partyType: "individual", status: "active" },
+  });
   await db.property.create({
     data: {
       id: PROPERTY,
@@ -108,6 +119,42 @@ async function seed() {
       country: "MY",
       status: "active",
       publishStatus: "draft",
+    },
+  });
+  await db.apartment.create({
+    data: {
+      id: APARTMENT,
+      organizationId: ORG,
+      propertyId: PROPERTY,
+      unitCode: "T5-A-01",
+      listingMode: "WHOLE",
+    },
+  });
+  await db.listing.create({
+    data: {
+      id: LISTING,
+      organizationId: ORG,
+      apartmentId: APARTMENT,
+      listingType: "whole_unit",
+      occupancyStatus: "occupied",
+      listingStatus: "active",
+      currency: "MYR",
+      ownerPartyId: OWNER,
+    },
+  });
+  await db.tenancy.create({
+    data: {
+      id: TENANCY,
+      organizationId: ORG,
+      propertyId: PROPERTY,
+      unitId: LISTING,
+      tenantPartyId: TENANT,
+      tenancyCode: "T5-TEN-1",
+      startDate: EFFECTIVE_DATE,
+      endDate: new Date(Date.UTC(2027, 6, 14)),
+      monthlyRentAmount: "1000.00",
+      billingStatus: "active",
+      status: "active",
     },
   });
 }
@@ -238,6 +285,55 @@ dn("owner-remittance.repository — Task 5 integration", () => {
 
   it("(B8) zero rows ⇒ zero available payable", async () => {
     const availableC = await getDb().$transaction((tx) => computeAvailableOwnerPayableC(tx, ORG, OWNER));
+    expect(availableC).toBe(0);
+  });
+
+  it("includes deposits collected for onward transfer in the owner's available payable", async () => {
+    const db = getDb();
+    await seedIncomeRow("483.87");
+    await seedExpenseRow("51.84", true);
+    await db.deposit.create({
+      data: {
+        organizationId: ORG,
+        tenancyId: TENANCY,
+        partyId: TENANT,
+        unitId: LISTING,
+        type: "utilities",
+        amount: "514.95",
+        status: "released_to_owner",
+      },
+    });
+
+    const availableC = await db.$transaction((tx) =>
+      computeAvailableOwnerPayableC(tx, ORG, OWNER),
+    );
+
+    // RM483.87 rent - RM51.84 fee + RM514.95 deposit transfer = RM946.98.
+    expect(availableC).toBe(94_698);
+  });
+
+  it("does not leak another owner's collected deposit into payable", async () => {
+    const db = getDb();
+    await db.party.create({
+      data: { id: OWNER2, organizationId: ORG, displayName: "T5 Owner 2", partyType: "individual", status: "active" },
+    });
+    await db.listing.update({ where: { id: LISTING }, data: { ownerPartyId: OWNER2 } });
+    await db.deposit.create({
+      data: {
+        organizationId: ORG,
+        tenancyId: TENANCY,
+        partyId: TENANT,
+        unitId: LISTING,
+        type: "rental",
+        amount: "500.00",
+        status: "released_to_owner",
+      },
+    });
+
+    const availableC = await db.$transaction((tx) =>
+      computeAvailableOwnerPayableC(tx, ORG, OWNER),
+    );
+
     expect(availableC).toBe(0);
   });
 

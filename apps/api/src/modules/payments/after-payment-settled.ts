@@ -19,18 +19,16 @@
  * settled through postPaymentService → here, and no receipt was ever minted. Both it
  * and graduation now live in this list so no path can skip them again.
  *
- * ORDER MATTERS within the rent chain, and each of its steps depends on the one before:
+ * ORDER MATTERS within the owner-funds chain, and each step depends on the one before:
  *   1. ledger sync — so rental_income reflects the cash just received (it books the
  *      COLLECTED amount), which is what the owner's payable is computed from.
  *   2. fee issue — re-syncs its own charges. Reversing 1 and 2 would compute a fee
  *      against a stale ledger row.
- *   3. auto-offset — settles the IVOWN lines step 2 just created, against the
- *      payable step 1 just refreshed. It MUST run last of the rent chain: run before
- *      step 2 and there is no fee invoice yet to settle; run before step 1 and the
- *      payable it nets against is stale by exactly the rent that triggered it.
- *   4. deposit-held — records a paid deposit charge. Order-independent of 1-3
- *      (deposits are not rent), so it sits after them rather than inside their chain,
- *      and moves no payout of its own.
+ *   3. deposit payable — projects every partial/full deposit collection into the
+ *      amount transferable to the owner. It is not income, but it is owner money.
+ *   4. auto-offset — settles open IVOWN lines against the payable refreshed by steps
+ *      1 and 3. It MUST run after the deposit projection; otherwise the screen can
+ *      show the deposit inside Owner Payout while owner expenses remain yellow.
  *   5. graduation — mints the real invoice from the proforma lines this payment paid.
  *   6. receipt — acknowledges that invoice. MUST run after step 5: issueReceiptDocumentTx
  *      only recognises lines on an invoice/debit_note, so with no graduated invoice yet
@@ -74,12 +72,10 @@ export async function afterPaymentSettled(
 ): Promise<void> {
   await syncOwnerLedgerForCharges(orgId, userId, role, chargeIds);
   await issueMgmtFeeForPaidRent(orgId, userId, role, chargeIds);
-  await autoOffsetOwnerReceivablesForPaidRent(orgId, userId, role, chargeIds);
-  // 4. deposit-held record — a paid DEPRENT/DEPUTIL charge means KAEN now holds
-  //    that money for the tenancy. Independent of steps 1-3 (a deposit is not
-  //    rent: it earns no management fee and settles no receivable), so it neither
-  //    reads nor disturbs what they wrote. It books NO payout — see the hook.
+  // Deposit is non-income, but every amount collected is payable to the owner and
+  // may fund owner-borne expenses. Project it before calculating available payout.
   await recordDepositsPayableToOwnerForPaidCharges(orgId, userId, role, chargeIds);
+  await autoOffsetOwnerReceivablesForPaidRent(orgId, userId, role, chargeIds);
   if (!payment) return;
   await graduateProformaForPayment(orgId, userId, role, payment.paymentId, payment.partyId, payment.paidChargeIds);
   await issueReceiptForPayment(orgId, userId, role, payment.paymentId, payment.partyId, chargeIds);

@@ -21,7 +21,8 @@ const owners = [
 function activeCfg(over: Partial<FeeConfigRow>): FeeConfigRow {
   return {
     id: "cfg-1", ownerPartyId: "owner-1", propertyId: null, feeType: "percent", feeValue: "10",
-    capAmount: null, sstPercent: "8", freePeriodStart: null, freePeriodEnd: null,
+    capAmount: null, sstPercent: "8", firstChargeMonth: null, firstChargeBaseAmount: null,
+    paxDeductionPerPerson: null, freePeriodStart: null, freePeriodEnd: null,
     isActive: true, effectiveFrom: null, effectiveTo: null, createdAt: "2026-06-01T00:00:00.000Z",
     updatedAt: "2026-06-10T00:00:00.000Z", ...over,
   };

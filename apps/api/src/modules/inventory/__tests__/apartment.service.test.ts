@@ -506,6 +506,38 @@ describe("updateApartmentSharedService — partitionBillingMode", () => {
   });
 });
 
+describe("updateApartmentSharedService — monthly TNB subsidy cap", () => {
+  it("persists a per-unit monthly cap and can clear it back to legacy policy", async () => {
+    seedApartment("PARTITIONED");
+
+    const setResult = await updateApartmentSharedService(session, APT, {
+      tnbSubsidyCapMonthly: 200,
+    });
+    expect(setResult.ok).toBe(true);
+    expect(apartmentStore.get(APT)!.tnbSubsidyCapMonthly).toBe(200);
+
+    const clearResult = await updateApartmentSharedService(session, APT, {
+      tnbSubsidyCapMonthly: null,
+    });
+    expect(clearResult.ok).toBe(true);
+    expect(apartmentStore.get(APT)!.tnbSubsidyCapMonthly).toBeNull();
+  });
+
+  it("omitting the cap leaves the existing policy unchanged", async () => {
+    seedApartment("PARTITIONED");
+    apartmentStore.set(APT, {
+      ...apartmentStore.get(APT)!,
+      tnbSubsidyCapMonthly: 200,
+    });
+
+    const result = await updateApartmentSharedService(session, APT, {
+      bedrooms: 3,
+    });
+    expect(result.ok).toBe(true);
+    expect(apartmentStore.get(APT)!.tnbSubsidyCapMonthly).toBe(200);
+  });
+});
+
 describe("updateApartmentSharedService — underManagement", () => {
   // B3: present-key write — the value must land on the apartment row.
   it("sets underManagement on the apartment row when present", async () => {

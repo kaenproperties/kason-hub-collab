@@ -222,6 +222,9 @@ export async function updateApartmentSharedService(
   if (input.publishedDescription !== undefined) data.publishedDescription = input.publishedDescription;
   if (input.publishedTitle !== undefined) data.publishedTitle = input.publishedTitle;
   if (input.partitionBillingMode !== undefined) data.partitionBillingMode = input.partitionBillingMode;
+  if (input.tnbSubsidyCapMonthly !== undefined) {
+    data.tnbSubsidyCapMonthly = input.tnbSubsidyCapMonthly;
+  }
   if (input.underManagement !== undefined) data.underManagement = input.underManagement;
 
   const db = getDb();

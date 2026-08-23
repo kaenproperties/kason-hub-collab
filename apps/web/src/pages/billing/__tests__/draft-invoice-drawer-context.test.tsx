@@ -82,7 +82,7 @@ describe("Draft invoice drawer — which unit, which tenant, which period", () =
 
   it("humanises the invoice type", async () => {
     await mount();
-    expect(screen.getByText("Rental Invoice")).toBeInTheDocument();
+    expect(screen.getByText("Rental Payment Request")).toBeInTheDocument();
     expect(screen.queryByText("tenant_rental")).toBeNull();
   });
 

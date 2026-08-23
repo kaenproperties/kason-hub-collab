@@ -1,16 +1,8 @@
 // Per-listing-mode DEFAULTS for a unit that has NEVER been configured.
 //
-// These are DEFAULTS, not rules. Every one of them stays editable per unit in the
-// Setting drawer (manager-only, set-once + audited unlock). Nothing here forces a
-// bearer onto a unit; it only decides the value a unit STARTS with, before an admin
-// has said anything.
-//
-// Why per listing mode: a WHOLE unit is one tenant who takes the whole package, so
-// cleaning and WiFi are theirs. A PARTITIONED unit's cleaning and WiFi are shared
-// common-area costs the owner carries as part of running the rooms. Before this, one
-// set of Prisma column defaults served both, so every partition unit and every whole
-// unit started identical (cleaning/WiFi owner-borne) — and a whole unit's tenant was
-// silently never billed for either unless an admin remembered to flip them.
+// These are defaults for settings that still vary by unit. Cleaning and WiFi are
+// deliberately owner-borne in both listing modes: exceptional tenant recoveries go
+// through Tenant Expenses, not a second permanent grid column.
 //
 // TNB / AIR default to "recharged" (= Tenant) in BOTH modes. The partitioned
 // excess→owner behaviour is NOT expressed here: it is engine-side, driven off
@@ -39,22 +31,21 @@ export type UnitBearerDefaults = {
 /**
  * `Record<ListingMode, …>` on purpose, never a lookup with a fallback branch: adding a
  * member to the `ListingMode` enum must be a TYPE ERROR here, not a silent fallthrough
- * to whichever mode happened to be the default. A missed mode is money — it decides
- * whether a tenant is billed for cleaning and WiFi.
+ * to whichever mode happened to be the default.
  */
 export const BEARER_DEFAULTS_BY_LISTING_MODE: Record<ListingMode, UnitBearerDefaults> = {
   WHOLE: {
     tnbPattern: "recharged", // Tenant
     airPattern: "recharged", // Tenant
-    cleaningBearer: "tenant",
-    wifiBearer: "tenant",
+    cleaningBearer: "owner",
+    wifiBearer: "owner",
     maintenanceFeeBearer: "owner", // unchanged — the drawer control is read-only today
   },
   PARTITIONED: {
     tnbPattern: "recharged", // Tenant — the excess→owner spread is engine-side, see above
     airPattern: "recharged", // Tenant
-    cleaningBearer: "owner", // shared common-area cost
-    wifiBearer: "owner", // shared common-area cost
+    cleaningBearer: "owner",
+    wifiBearer: "owner",
     maintenanceFeeBearer: "owner",
   },
 };
@@ -87,10 +78,7 @@ export const DEFAULT_CLEANING_RECURRING_AMOUNT = "0.00";
  *
  * `listingMode` is NON-NULL in the schema, so the nullable input is defensive only —
  * it covers a caller that could not resolve the apartment at all. That case falls back
- * to WHOLE deliberately: a unit whose mode is unknown is far more likely to be a plain
- * whole unit, and WHOLE's tenant-borne cleaning/WiFi is the recoverable direction (an
- * admin sees an unexpected tenant charge and flips it) rather than the silent one
- * (nobody is billed and it is noticed months later).
+ * to WHOLE deliberately; both modes share the owner-only Cleaning/WiFi rule.
  */
 export function bearerDefaultsFor(listingMode: ListingMode | string | null | undefined): UnitBearerDefaults {
   return listingMode === "PARTITIONED"

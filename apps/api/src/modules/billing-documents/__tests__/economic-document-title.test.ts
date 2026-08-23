@@ -31,6 +31,36 @@ describe("economic billing-document names", () => {
     expect(billingDocumentFilename(model())).toBe("Invoice Property Management Fee KENSHO A-13-01.pdf");
   });
 
+  it("uses owner-facing Admin Fee filenames without relabelling legacy tenant commission documents", () => {
+    const commissionLine = {
+      categoryCode: "letting_commission",
+      description: "Internal commission description",
+      amount: "1500.00",
+      sstRate: "0",
+      sstAmount: "0.00",
+      attachmentFilenames: [],
+      unitCode: "A-13-01",
+    };
+    expect(billingDocumentFilename(model({ lines: [commissionLine] })))
+      .toBe("Invoice Admin Fee (First Month Rental) KENSHO A-13-01.pdf");
+    expect(billingDocumentFilename(model({ documentNumber: "IVTEN-0001", lines: [commissionLine] })))
+      .toBe("Invoice Rental Commission KENSHO A-13-01.pdf");
+  });
+
+  it("uses the owner-facing Admin Fee wording for the SST filename", () => {
+    expect(billingDocumentFilename(model({
+      lines: [{
+        categoryCode: "letting_commission_sst",
+        description: "Internal commission SST description",
+        amount: "120.00",
+        sstRate: "0",
+        sstAmount: "0.00",
+        attachmentFilenames: [],
+        unitCode: "A-13-01",
+      }],
+    }))).toBe("Invoice SST on Admin Fee (First Month Rental) KENSHO A-13-01.pdf");
+  });
+
   it("does not title pure pass-through utilities as an invoice", () => {
     expect(resolveEconomicDocTitle("invoice", "IVTEN-0001", ["electricity_tenant", "water_tenant"]))
       .toBe("UTILITY PAYMENT REQUEST");

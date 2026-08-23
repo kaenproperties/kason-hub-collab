@@ -36,7 +36,7 @@ import { Receipt, X } from "lucide-react";
 import { PageHeader } from "@/components/ui";
 import { Callout } from "@/components/ui/callout";
 import { Button } from "@/components/ui/button";
-import { Sheet, SheetContent, SheetHeader, SheetBody, SheetTitle } from "@/components/ui/sheet";
+import { Sheet, SheetContent, SheetHeader, SheetBody, SheetFooter, SheetTitle } from "@/components/ui/sheet";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from "@/components/ui/dialog";
 import { cn } from "@/lib/utils";
 import { isPhase2FlagEnabled } from "@/lib/feature-flags";
@@ -54,6 +54,7 @@ import {
   type SaveReadingInput,
   type BillRowResult,
   type BillingFundsSummary,
+  type GridBillingCapabilities,
 } from "@/api/bills-grid";
 import { GridTable, rowHasBillingState, type CellEditHandler, type ExpenseBearer, type RecurringBearer, type SelectionEdges } from "./grid-table";
 import { billFailureReason, saveFailureReason } from "./bill-failure-reason";
@@ -87,8 +88,15 @@ import { isCellLocked, isRowLocked } from "./row-lock";
 import { isApplicable } from "./cell-applicability";
 import { planRectangularCopy, matrixToTsv, countCells } from "./grid-copy";
 import { findUnbillableAmounts, type UnbillableRow } from "./unbillable-amounts";
-import { downloadLiveStatementPdf, useAllStatementsForMonth } from "@/api/owner-billing";
+import {
+  downloadLiveStatementPdf,
+  useAllStatementsForMonth,
+  useFeeConfigs,
+} from "@/api/owner-billing";
 import { getBankReconciliationSummary } from "@/api/bank-reconciliation";
+import { usePermission } from "@/components/permission-gate";
+import { FeeConfigDrawer } from "@/pages/settings/sections/owner-billing/fee-config-drawer";
+import { BillConfirmDetails } from "./bill-confirm-details";
 
 // namespace for view-prefs' localStorage keys (colours + hidden columns) —
 // see use-grid-selection.ts's own `NS` constant, must match.
@@ -99,7 +107,7 @@ function rm(value: string): string {
   return `RM ${Number.isFinite(amount) ? amount.toLocaleString("en-MY", { minimumFractionDigits: 2, maximumFractionDigits: 2 }) : "0.00"}`;
 }
 
-function FundsSummaryPanel({ data, onFillExpense }: { data?: BillingFundsSummary; onFillExpense: (item: BillingFundsSummary["tenantExpenseActionItems"][number]) => void }) {
+function FundsSummaryPanel({ data, onFillExpense, canViewCosts }: { data?: BillingFundsSummary; onFillExpense: (item: BillingFundsSummary["tenantExpenseActionItems"][number]) => void; canViewCosts: boolean }) {
   const [actionsOpen, setActionsOpen] = useState(false);
   if (!data) return (
     <div className="flex h-16 w-44 items-center justify-center rounded-xl border border-amber-400 bg-amber-50 px-4 text-center text-sm font-semibold text-amber-900 sm:w-56" aria-label="Monthly funds summary unavailable">
@@ -174,11 +182,11 @@ function FundsSummaryPanel({ data, onFillExpense }: { data?: BillingFundsSummary
         </div>
         <div className="mt-4 grid grid-cols-3 gap-2 text-sm">
           <div className="rounded-lg bg-[var(--page-bg)] p-3"><span className="text-[var(--text-secondary)]">Tenant expenses charged</span><strong className="block text-base">{rm(data.tenantExpenseCharges)}</strong></div>
-          <div className="rounded-lg bg-[var(--page-bg)] p-3"><span className="text-[var(--text-secondary)]">Direct costs recorded</span><strong className="block text-base">{rm(data.tenantExpenseDirectCosts)}</strong></div>
-          <div className="rounded-lg bg-[var(--page-bg)] p-3"><span className="text-[var(--text-secondary)]">Gross Margin</span><strong className="block text-base">{rm(data.tenantExpenseGrossMargin)}</strong></div>
-          <button type="button" className="rounded-lg bg-orange-50 p-3 text-left transition hover:bg-orange-100 focus:outline-none focus:ring-2 focus:ring-orange-500" onClick={() => setActionsOpen(true)}>
+          {canViewCosts && <div className="rounded-lg bg-[var(--page-bg)] p-3"><span className="text-[var(--text-secondary)]">Direct costs recorded</span><strong className="block text-base">{rm(data.tenantExpenseDirectCosts)}</strong></div>}
+          {canViewCosts && <div className="rounded-lg bg-[var(--page-bg)] p-3"><span className="text-[var(--text-secondary)]">Gross Margin</span><strong className="block text-base">{rm(data.tenantExpenseGrossMargin)}</strong></div>}
+          {canViewCosts && <button type="button" className="rounded-lg bg-orange-50 p-3 text-left transition hover:bg-orange-100 focus:outline-none focus:ring-2 focus:ring-orange-500" onClick={() => setActionsOpen(true)}>
             <span className="text-orange-800">Cost action required</span><strong className="block text-base text-orange-900">{actionCount} item{actionCount === 1 ? "" : "s"}</strong><small className="text-orange-800">{data.tenantExpenseCostPendingCount ?? 0} missing actual cost · Click to view</small>
-          </button>
+          </button>}
           <div className="rounded-lg bg-[var(--page-bg)] p-3"><span className="text-[var(--text-secondary)]">Owner costs to pay</span><strong className="block text-base">{rm(data.ownerExpenses)}</strong></div>
           <div className="rounded-lg bg-[var(--page-bg)] p-3"><span className="text-[var(--text-secondary)]">Management fee before SST</span><strong className="block text-base">{rm(data.managementFeeNonSst)}</strong></div>
           <div className="rounded-lg bg-[var(--page-bg)] p-3"><span className="text-[var(--text-secondary)]">Management fee SST</span><strong className="block text-base">{rm(data.managementFeeSst)}</strong></div>
@@ -283,6 +291,13 @@ function readCellDisplayString(node: HTMLElement): string {
 
 export default function BillsGridPage() {
   const queryClient = useQueryClient();
+  const canViewCosts = usePermission("cost.view");
+  const canEditCharges = usePermission("billing.charge.edit");
+  const canSaveBilling = usePermission("billing.save");
+  const canBillTenants = usePermission("billing.bill");
+  const canExportBilling = usePermission("billing.export");
+  const canManageDocuments = usePermission("billing.document_manage");
+  const canConfigureManagementFee = usePermission("management_fee.configure");
   // Multi-user live view: keep polling state outside the query callback so an
   // in-progress local edit can pause incoming snapshots before they overwrite
   // what the current user is typing.
@@ -307,7 +322,12 @@ export default function BillsGridPage() {
 
   // Error Handling #1: a rejected query's `data` is undefined — keep our own
   // last-known-good snapshot so the grid never blanks out under the banner.
-  const [lastGood, setLastGood] = useState<{ rows: GridRow[]; periods: string[]; period: string }>({
+  const [lastGood, setLastGood] = useState<{
+    rows: GridRow[];
+    periods: string[];
+    period: string;
+    billingCapabilities?: GridBillingCapabilities;
+  }>({
     rows: [],
     periods: [],
     period: "",
@@ -315,7 +335,12 @@ export default function BillsGridPage() {
   useEffect(() => {
     if (gridQuery.data) {
       // eslint-disable-next-line react-hooks/set-state-in-effect -- intentional derived-state sync: persist the last-known-good snapshot so the grid never blanks under the error banner (Error Handling #1).
-      setLastGood({ rows: gridQuery.data.rows, periods: gridQuery.data.periods, period: gridQuery.data.period });
+      setLastGood({
+        rows: gridQuery.data.rows,
+        periods: gridQuery.data.periods,
+        period: gridQuery.data.period,
+        billingCapabilities: gridQuery.data.billingCapabilities,
+      });
     }
   }, [gridQuery.data]);
 
@@ -594,7 +619,10 @@ export default function BillsGridPage() {
   const [editingCellKey, setEditingCellKey] = useState<string | null>(null);
   const activeCellKey = nav.active ? `${nav.active.cellKey}:${nav.active.columnId}` : null;
   const editing = editingCellKey != null && editingCellKey === activeCellKey;
-  const beginEdit = useCallback((key?: string) => setEditingCellKey(key ?? activeCellKey), [activeCellKey]);
+  const beginEdit = useCallback((key?: string) => {
+    if (!canEditCharges) return;
+    setEditingCellKey(key ?? activeCellKey);
+  }, [activeCellKey, canEditCharges]);
 
   // ── Excel MOUSE selection (V2, Task 4): the selection PRODUCER. A mouse
   // pointerdown opens a rectangle (rectBetween), drag-enter grows it, ctrl
@@ -653,6 +681,10 @@ export default function BillsGridPage() {
   // Partial re-Bill. Read once here and shared by every consumer below, so the write
   // gates and the Bill-selection gate can never disagree about which world they are in.
   const partialRebillOn = isPhase2FlagEnabled("ENABLE_PROFORMA_INVOICES");
+  const billingDocumentsOn = lastGood.billingCapabilities?.billingDocuments
+    ?? isPhase2FlagEnabled("ENABLE_PHASE2_BILLING_DOCS");
+  const billExpensesOn = lastGood.billingCapabilities?.expensesAsCharges
+    ?? (billingDocumentsOn && isPhase2FlagEnabled("ENABLE_BILL_EXPENSES_AS_CHARGES"));
   const listingToApartment = useMemo(() => {
     const map = new Map<string, { apartmentId: string; subRow: GridSubRow }>();
     for (const row of lastGood.rows) {
@@ -770,6 +802,7 @@ export default function BillsGridPage() {
 
   const handleCellEdit: CellEditHandler = useCallback(
     (cellKey, columnId, value) => {
+      if (!canEditCharges) return;
       // Never stage an edit while the grid is showing a stale (placeholder)
       // period — the displayed row belongs to the period being replaced.
       if (showingStalePeriod) return;
@@ -778,7 +811,7 @@ export default function BillsGridPage() {
       if (isCellWriteLocked(cellKey, columnId)) return;
       stage(cellKey, columnId, value);
     },
-    [stage, isCellWriteLocked, showingStalePeriod],
+    [stage, isCellWriteLocked, showingStalePeriod, canEditCharges],
   );
 
   // P4 Task 5 (R3, commit-and-move): Enter commits + moves DOWN, Tab commits +
@@ -871,6 +904,7 @@ export default function BillsGridPage() {
   //      clear; they aren't meter, aren't entry-money, and carry no staged edit).
   // The cue fires at most ONCE per Delete, not per cell.
   const onDelete = useCallback(() => {
+    if (!canEditCharges) return;
     const targets: { cellKey: string; columnId: string }[] = sel.range.length
       ? sel.range.map((c) => ({ cellKey: c.cellKey, columnId: c.columnId }))
       : nav.active
@@ -916,7 +950,7 @@ export default function BillsGridPage() {
       // 5. Read-only cells fall through → no-op.
     }
     });
-  }, [sel.range, nav.active, isCellWriteLocked, handleCellEdit, staged, unstage, runBatch]);
+  }, [sel.range, nav.active, isCellWriteLocked, handleCellEdit, staged, unstage, runBatch, canEditCharges]);
 
   // P4 Task 6 (R7): a plain arrow move must COLLAPSE any Shift-range down to the
   // single DESTINATION cell. `nav.move` is a state update, so the landing cell
@@ -1184,6 +1218,7 @@ export default function BillsGridPage() {
   }
 
   async function handleSave() {
+    if (!canSaveBilling || !canEditCharges) return;
     // Same guard as handleCellEdit: a dirty edit staged BEFORE the period
     // switch started must not be flushed while the grid is still showing the
     // stale (placeholder) period's rows — that write would resolve untouched
@@ -1376,7 +1411,8 @@ export default function BillsGridPage() {
 
   // ── Bill selection (MONEY-CRITICAL #1) ──────────────────────────────────────
   // `billableRows` is the SELECTABLE universe: every VISIBLE row with either a saved grid
-  // entry OR an orange saved Rental draft that the server could still bill. A billed-but-
+  // entry OR an orange saved tenant draft (Rental, Deposit or TA) that the server could
+  // still bill. A billed-but-
   // UNPAID row stays billable (amend + re-Bill, spec R7).
   //
   // A SETTLED row depends on partial re-Bill, and the flag is the whole difference:
@@ -1406,12 +1442,23 @@ export default function BillsGridPage() {
   // stray click can't mass-bill.
   const billableRows = useMemo(
     () => orderedRows.filter((r) => {
-      // A prorated/monthly rent draft is already represented by the orange Rental
-      // cell even when the unit has no manually-saved grid entry. Let the admin tick
-      // and Bill that unit here; the API approves the existing draft through the
-      // canonical Draft Approval rails. Rental remains read-only in the matrix.
-      const hasSavedRental = (r.subRows ?? []).some((subRow) => subRow.rentalBillingState === "saved");
-      return (r.entry != null || hasSavedRental) && (partialRebillOn || !isRowLocked(r));
+      // Current payloads expose the exact attached draft charges that this action will
+      // approve, including carpark/manual extras. Use that authoritative list so an
+      // attached carpark-only invoice remains selectable and a detached orange cell does
+      // not promise a Bill that the server cannot perform. Aggregate cell states are only
+      // a rolling-deploy fallback for an older cached/API payload.
+      const hasSavedTenancyCharge = r.pendingTenancyCharges !== undefined
+        ? r.pendingTenancyCharges.length > 0
+        : (r.subRows ?? []).some(
+            (subRow) => subRow.rentalBillingState === "saved" || subRow.depositBillingState === "saved",
+          ) || r.agreementFees?.new.state === "saved" || r.agreementFees?.renewal.state === "saved";
+      // A row lock protects an already-settled GRID entry from being rewritten. It must
+      // not hide the Bill checkbox for a separate orange tenancy draft: Rental,
+      // Deposit and TA are approved through their own canonical draft rails after the
+      // grid result. This is the common move-in shape where Rental is already green
+      // while Deposit/TA were added later and are still orange.
+      const gridEntryCanBill = r.entry != null && (partialRebillOn || !isRowLocked(r));
+      return hasSavedTenancyCharge || gridEntryCanBill;
     }),
     [orderedRows, partialRebillOn],
   );
@@ -1528,6 +1575,7 @@ export default function BillsGridPage() {
 
   /** tenant_direct silent-drop warning: surface typed amounts the Bill will discard, then bill. */
   function handleBill() {
+    if (!canBillTenants) return;
     if (selectedBillableRows.length === 0 || !currentPeriod) return;
     const unbillable = findUnbillableAmounts(selectedBillableRows);
     if (unbillable.length > 0) { setUnbillableConfirm(unbillable); return; }
@@ -1539,9 +1587,20 @@ export default function BillsGridPage() {
       setAdvanceBillConfirm(true);
       return;
     }
-    // A first issuance must never happen from one click. Existing billed rows
-    // retain their dedicated Re-Bill void/reissue confirmation from the server.
-    if (selectedBillableRows.some((row) => !row.billed)) {
+    // A first issuance must never happen from one click. A unit can already have
+    // grid documents and still acquire a fresh tenancy draft (Deposit/TA/carpark/
+    // manually attached charge); that new money needs this detailed confirmation
+    // before the existing Re-Bill guard runs. Aggregate states are only the rolling
+    // fallback for an older payload without the authoritative pending list.
+    const needsDetailedConfirmation = selectedBillableRows.some((row) => {
+      const hasPendingTenancyDraft = row.pendingTenancyCharges !== undefined
+        ? row.pendingTenancyCharges.length > 0
+        : (row.subRows ?? []).some(
+            (subRow) => subRow.rentalBillingState === "saved" || subRow.depositBillingState === "saved",
+          ) || row.agreementFees?.new.state === "saved" || row.agreementFees?.renewal.state === "saved";
+      return !row.billed || hasPendingTenancyDraft;
+    });
+    if (needsDetailedConfirmation) {
       setBillConfirm(true);
       return;
     }
@@ -1549,6 +1608,7 @@ export default function BillsGridPage() {
   }
 
   async function runBill() {
+    if (!canBillTenants) return;
     // Bill the CHECKED subset only (selectedBillableRows already intersects the
     // checked ids with the visible billable set — never a filtered-out unit).
     if (selectedBillableRows.length === 0 || !currentPeriod) return;
@@ -1605,7 +1665,7 @@ export default function BillsGridPage() {
   // user who filtered must never export the unfiltered set. ─────────────────
   const canExport = orderedRows.length > 0;
   async function handleExport(kind: GridExportKind) {
-    if (!canExport) return;
+    if (!canExportBilling || !canExport) return;
     const selected = selectedVisibleRows;
     const useSelected = kind.startsWith("selected-");
     const exportRows = useSelected ? selected : orderedRows;
@@ -1644,6 +1704,27 @@ export default function BillsGridPage() {
   // discriminator to the Setting drawer (which renders the per-room pax section only
   // for partition units). null until a settings trigger fires.
   const settingsRow = settingsApt ? (lastGood.rows.find((r) => r.apartmentId === settingsApt) ?? null) : null;
+  const [managementFeeApt, setManagementFeeApt] = useState<string | null>(null);
+  const managementFeeRow = managementFeeApt
+    ? (lastGood.rows.find((r) => r.apartmentId === managementFeeApt) ?? null)
+    : null;
+  // Opening Unit setting preloads the exact per-unit Management Fee config. This
+  // lets the shared fee drawer safely choose Edit for an existing unit rule and
+  // Create only when the unit genuinely has no override, instead of accidentally
+  // creating duplicates every time a configured unit is opened.
+  const unitFeeConfigQuery = useFeeConfigs(
+    {
+      apartmentId: settingsApt ?? undefined,
+      isActive: "true",
+      limit: 100,
+    },
+    {
+      enabled: canConfigureManagementFee && settingsApt != null && Boolean(settingsRow?.ownerPartyId),
+    },
+  );
+  const exactUnitFeeConfig = settingsApt
+    ? (unitFeeConfigQuery.data?.data.items.find((config) => config.apartmentId === settingsApt) ?? null)
+    : null;
   const [expensesTarget, setExpensesTarget] = useState<{ apartmentId: string; bearer: ExpenseBearer; withSST: boolean } | null>(null);
   // Bearer-scoped like expensesTarget above — the Owner and Tenant recurring cells open the SAME
   // dialog, so it has to know which one was clicked or it lists both bearers' lines.
@@ -1674,7 +1755,7 @@ export default function BillsGridPage() {
   }
 
   const billingViewControls = (
-    <div className="flex flex-wrap items-end justify-center gap-2" aria-label="Billing and table views">
+    <div className="flex h-10 flex-nowrap items-end justify-center gap-2" aria-label="Billing and table views">
       <div className="inline-flex gap-1" role="tablist" aria-label="Billing view">
         {(["overview", "detailed", "summary"] as const).map((view) => (
           <button
@@ -1684,7 +1765,7 @@ export default function BillsGridPage() {
             aria-selected={billingView === view}
             onClick={() => setBillingView(view)}
             className={cn(
-              "min-h-10 rounded-md border border-[var(--gold)] px-3 text-[15px] font-extrabold capitalize transition",
+              "h-10 rounded-md border border-[var(--gold)] px-3 text-[15px] font-extrabold capitalize transition",
               billingView === view ? "bg-[var(--navy)] text-[var(--gold-light)] shadow-sm" : "bg-white text-[var(--navy)] hover:bg-[var(--gold)]/10",
             )}
           >
@@ -1693,16 +1774,16 @@ export default function BillsGridPage() {
         ))}
       </div>
       {billingView === "detailed" && (
-        <div className="flex items-center gap-2 border-l border-[var(--border)] pl-3" aria-label="Table view controls">
+        <div className="flex h-10 items-center gap-2 border-l border-[var(--border)] pl-3" aria-label="Table view controls">
           <span className="whitespace-nowrap text-[13px] font-bold text-muted-foreground">Table view</span>
-          <div className="inline-flex items-center gap-0.5 rounded-md border border-[var(--border)] bg-white p-0.5" role="group" aria-label="Row density">
+          <div className="inline-flex h-10 items-center gap-0.5 rounded-md border border-[var(--border)] bg-white p-0.5" role="group" aria-label="Row density">
             {(["compact", "comfortable"] as const).map((mode) => (
               <button
                 key={mode}
                 type="button"
                 onClick={() => changeRowDensity(mode)}
                 aria-pressed={rowDensity === mode}
-                className={cn("min-h-8 rounded px-2 text-[13px] font-bold capitalize", rowDensity === mode ? "bg-[var(--navy)] text-[var(--gold-light)]" : "text-[var(--navy)] hover:bg-[var(--gold)]/10")}
+                className={cn("h-9 rounded px-2 text-[13px] font-bold capitalize", rowDensity === mode ? "bg-[var(--navy)] text-[var(--gold-light)]" : "text-[var(--navy)] hover:bg-[var(--gold)]/10")}
               >{mode}</button>
             ))}
             <span aria-hidden="true" className="mx-1 h-6 w-px bg-[var(--border)]" />
@@ -1712,7 +1793,7 @@ export default function BillsGridPage() {
                 type="button"
                 onClick={() => changeGridDisplayMode(mode)}
                 aria-pressed={gridDisplayMode === mode}
-                className={cn("min-h-8 rounded px-2 text-[13px] font-bold", gridDisplayMode === mode ? "bg-[var(--navy)] text-[var(--gold-light)]" : "text-[var(--navy)] hover:bg-[var(--gold)]/10")}
+                className={cn("h-9 rounded px-2 text-[13px] font-bold", gridDisplayMode === mode ? "bg-[var(--navy)] text-[var(--gold-light)]" : "text-[var(--navy)] hover:bg-[var(--gold)]/10")}
               >{mode === "easy-read" ? "Easy Read" : "Fit All"}</button>
             ))}
           </div>
@@ -1737,6 +1818,10 @@ export default function BillsGridPage() {
       onPropertyChange={setPropertyId}
       dirtyCount={dirtyCount}
       onSave={() => setConfirmingSave(true)}
+      canEditAction={canEditCharges}
+      canSaveAction={canSaveBilling && canEditCharges}
+      canBillAction={canBillTenants}
+      canExportAction={canExportBilling}
       canUndo={canUndo || colourUndo.length > 0}
       canRedo={canRedo || colourRedo.length > 0}
       undoDepth={undoDepth + colourUndo.length}
@@ -1807,7 +1892,7 @@ export default function BillsGridPage() {
               <span className="block text-lg font-extrabold">{bankReconSummaryQuery.data!.chargeRequired.count} item · RM {Number(bankReconSummaryQuery.data!.chargeRequired.amount).toFixed(2)}</span>
             </button>
           )}
-          <FundsSummaryPanel data={fundsSummaryQuery.data} onFillExpense={(item) => setExpensesTarget({ apartmentId: item.apartmentId, bearer: "tenant", withSST: item.withSST })} />
+          <FundsSummaryPanel data={fundsSummaryQuery.data} canViewCosts={canViewCosts} onFillExpense={(item) => setExpensesTarget({ apartmentId: item.apartmentId, bearer: "tenant", withSST: item.withSST })} />
         </div>}
       />
 
@@ -1871,10 +1956,11 @@ export default function BillsGridPage() {
             columns={visibleColumns}
             displayMode={gridDisplayMode}
             density={rowDensity}
+            canEdit={canEditCharges}
             // Mirrors the unit-level vacant filter down to the room grain so a
             // partitioned unit's vacant rooms hide/show with the same toggle.
             showVacant={showVacant}
-            onCellEdit={handleCellEdit}
+            onCellEdit={canEditCharges ? handleCellEdit : undefined}
             // ui-task-10g: the page's OWN useStagedEdits buffer, so a
             // programmatic stage that never goes through GridTable's internal
             // keystroke echo (ctrl-fill via handleCellEdit above, ui-9
@@ -1925,10 +2011,10 @@ export default function BillsGridPage() {
             // Excel-Web V2: double-click an editable cell → enter edit mode. The
             // preceding click already activated the cell; setActiveByCell keeps it
             // robust, then beginEdit flips arrows/caret to in-field editing.
-            onCellDoubleClick={(cellKey, columnId) => {
+            onCellDoubleClick={canEditCharges ? (cellKey, columnId) => {
               nav.setActiveByCell(cellKey, columnId);
               beginEdit(`${cellKey}:${columnId}`);
-            }}
+            } : undefined}
             // Excel-Web V2: click a column/band header → select the whole column.
             onSelectColumns={handleSelectColumns}
             registerCell={registerCell}
@@ -1945,12 +2031,20 @@ export default function BillsGridPage() {
             selectedForBill={selectedForBill}
             allBillableSelected={allBillableSelected}
             someBillableSelected={someBillableSelected}
-            onToggleBillSelection={toggleBillSelection}
-            onToggleSelectAllForBill={toggleSelectAllForBill}
+            onToggleBillSelection={canBillTenants ? toggleBillSelection : undefined}
+            onToggleSelectAllForBill={canBillTenants ? toggleSelectAllForBill : undefined}
             // onOpenSettings stays UNGUARDED — SettingDrawer keys off
             // getBearerConfig(apartmentId), with no period in its cache key, so
             // it is period-INDEPENDENT and safe to open during a stale window.
             onOpenSettings={(apartmentId) => setSettingsApt(apartmentId)}
+            onConfigureManagementFee={canConfigureManagementFee ? (apartmentId) => {
+              const row = lastGood.rows.find((candidate) => candidate.apartmentId === apartmentId);
+              if (!row?.ownerPartyId) {
+                toast.error("Assign an owner to this unit before configuring its management fee.");
+                return;
+              }
+              setManagementFeeApt(apartmentId);
+            } : undefined}
             // onViewExpenses/onOpenAttachments are period-scoped opens
             // (ExpensesDialog/AttachmentsPanel fetch by periodMonth =
             // currentPeriod while tenancyOptionsFor reads lastGood.rows) — a
@@ -1998,10 +2092,60 @@ export default function BillsGridPage() {
         onClose={() => setSettingsApt(null)}
         subRows={settingsRow?.subRows}
         isWholeUnit={settingsRow?.isWholeUnit}
+        managementFee={settingsRow?.managementFee}
+        ownerAssigned={Boolean(settingsRow?.ownerPartyId)}
+        onOpenManagementFee={
+          canConfigureManagementFee &&
+          settingsApt != null &&
+          settingsRow?.ownerPartyId &&
+          (settingsRow.managementFee?.configured === false ||
+            (settingsRow.managementFee?.configured === true && unitFeeConfigQuery.isSuccess))
+            ? () => setManagementFeeApt(settingsApt)
+            : undefined
+        }
       />
 
+      {managementFeeRow?.ownerPartyId && (
+        <FeeConfigDrawer
+          open={managementFeeApt != null}
+          onClose={() => {
+            setManagementFeeApt(null);
+            void queryClient.invalidateQueries({ queryKey: QUERY_KEY_ROOT });
+          }}
+          mode={managementFeeApt === settingsApt && exactUnitFeeConfig ? "edit" : "create"}
+          config={managementFeeApt === settingsApt ? exactUnitFeeConfig ?? undefined : undefined}
+          owners={[{
+            id: managementFeeRow.ownerPartyId,
+            displayName: managementFeeRow.ownerName ?? "Owner",
+          }]}
+          lockedOwner={{
+            id: managementFeeRow.ownerPartyId,
+            displayName: managementFeeRow.ownerName ?? "Owner",
+          }}
+          properties={[{
+            id: managementFeeRow.propertyId,
+            name: managementFeeRow.propertyName,
+          }]}
+          units={[{
+            apartmentId: managementFeeRow.apartmentId,
+            unitCode: managementFeeRow.unitCode,
+            propertyName: managementFeeRow.propertyName,
+          }]}
+          initialUnit={{
+            apartmentId: managementFeeRow.apartmentId,
+            unitCode: managementFeeRow.unitCode,
+            propertyName: managementFeeRow.propertyName,
+          }}
+        />
+      )}
+
       <TenantBillSummaryDialog row={tenantSummaryRow} onClose={() => setTenantSummaryRow(null)} />
-      <UnitDocumentsDialog row={tenantDocumentsRow} onClose={() => setTenantDocumentsRow(null)} />
+      <UnitDocumentsDialog
+        key={`${tenantDocumentsRow?.apartmentId ?? "closed"}:${statementMonth}`}
+        row={tenantDocumentsRow}
+        billingMonth={statementMonth}
+        onClose={() => setTenantDocumentsRow(null)}
+      />
       <OwnerReportDialog row={ownerReportRow} month={statementMonth} onClose={() => setOwnerReportRow(null)} />
       <ActivityLogDrawer row={activityRow} onClose={() => setActivityRow(null)} />
       <CellDocumentsDialog
@@ -2251,60 +2395,57 @@ export default function BillsGridPage() {
       </Sheet>
 
       <Sheet open={billConfirm} onOpenChange={setBillConfirm}>
-        <SheetContent>
+        <SheetContent size="lg">
           <SheetHeader><SheetTitle>Confirm Bill</SheetTitle></SheetHeader>
           <SheetBody>
-            <Callout variant="warning" title="Issue bills to the selected units?">
-              Confirming will create the saved charges and make them visible in each tenant&apos;s outstanding balance.
+            <Callout
+              variant="warning"
+              title={billingDocumentsOn ? "Issue bills to the selected units?" : "Approve saved tenancy drafts?"}
+            >
+              {billingDocumentsOn
+                ? "Confirming will create the listed saved charges and make them visible in the relevant outstanding balances."
+                : "The server's grid-document rail is disabled. Only the listed saved tenancy drafts will be approved; utility, recurring and expense lines will not be issued by this action."}
             </Callout>
-            <dl className="my-5 grid grid-cols-[auto_1fr] gap-x-4 gap-y-2 text-[18px]">
-              <dt className="font-semibold text-muted-foreground">Billing period</dt>
-              <dd className="font-bold text-[var(--navy-text)]">{anchorMonth.slice(0, 7)}</dd>
-              <dt className="font-semibold text-muted-foreground">Units</dt>
-              <dd className="font-bold text-[var(--navy-text)]">{selectedBillableRows.length}</dd>
-            </dl>
-            <ul className="mb-5 max-h-[45vh] space-y-2 overflow-y-auto" data-testid="bill-confirm-units">
-              {selectedBillableRows.map((row) => (
-                <li key={row.apartmentId} className="rounded-lg border border-[var(--border)] px-3 py-2 text-[18px] font-semibold text-[var(--navy-text)]">
-                  {row.propertyName} {row.unitCode}
-                </li>
-              ))}
-            </ul>
-            <p className="mb-4 text-sm text-muted-foreground">
-              Only saved values are included. Cancel leaves all data saved but unbilled.
+            <BillConfirmDetails
+              rows={selectedBillableRows}
+              billingPeriod={anchorMonth.slice(0, 7)}
+              options={{ includeGridCharges: billingDocumentsOn, includeExpenses: billExpensesOn }}
+            />
+            <p className="mt-4 text-sm text-muted-foreground">
+              Only saved values are included. Final documents still follow the normal server validation and paid-line protection. Cancel leaves all data saved but unbilled.
             </p>
-            <div className="flex justify-end gap-3">
-              <Button type="button" variant="outline" size="lg" onClick={() => setBillConfirm(false)}>Cancel</Button>
-              <Button
-                type="button"
-                variant="gold"
-                size="lg"
-                data-testid="bill-confirm-btn"
-                onClick={() => { setBillConfirm(false); void runBill(); }}
-              >
-                Confirm Bill
-              </Button>
-            </div>
           </SheetBody>
+          <SheetFooter>
+            <Button
+              type="button"
+              variant="gold"
+              size="lg"
+              data-testid="bill-confirm-btn"
+              onClick={() => { setBillConfirm(false); void runBill(); }}
+            >
+              Confirm Bill
+            </Button>
+            <Button type="button" variant="outline" size="lg" onClick={() => setBillConfirm(false)}>Cancel</Button>
+          </SheetFooter>
         </SheetContent>
       </Sheet>
 
       <Sheet open={advanceBillConfirm} onOpenChange={setAdvanceBillConfirm}>
-        <SheetContent>
+        <SheetContent size="lg">
           <SheetHeader><SheetTitle>Confirm advance Bill</SheetTitle></SheetHeader>
           <SheetBody>
             <Callout variant="warning" title="You are billing next month in advance">
               The bill will be issued now and will appear in the tenant&apos;s outstanding balance immediately.
             </Callout>
-            <dl className="my-5 grid grid-cols-[auto_1fr] gap-x-4 gap-y-2 text-[18px]">
-              <dt className="font-semibold text-muted-foreground">Billing period</dt>
-              <dd className="font-bold text-[var(--navy-text)]">{anchorMonth.slice(0, 7)}</dd>
-              <dt className="font-semibold text-muted-foreground">Due date</dt>
-              <dd className="font-bold text-[var(--navy-text)]">{anchorMonth}</dd>
-              <dt className="font-semibold text-muted-foreground">Units</dt>
-              <dd className="font-bold text-[var(--navy-text)]">{selectedBillableRows.length}</dd>
-            </dl>
-            <p className="mb-4 text-sm text-muted-foreground">
+            <BillConfirmDetails
+              rows={selectedBillableRows}
+              billingPeriod={anchorMonth.slice(0, 7)}
+              options={{ includeGridCharges: billingDocumentsOn, includeExpenses: billExpensesOn }}
+            />
+            <p className="mt-4 text-sm font-semibold text-[var(--navy-text)]">
+              Due date <span className="tabular-nums">{anchorMonth}</span>
+            </p>
+            <p className="mt-1 text-sm text-muted-foreground">
               Only saved values will be billed. Utilities without entered data will not be invented or estimated.
             </p>
             <div className="flex justify-end gap-3">
@@ -2338,14 +2479,14 @@ export default function BillsGridPage() {
           hasAmount={contextCell?.hasAmount}
           invoiceCount={contextCell?.invoiceCount}
           receiptCount={contextCell?.receiptCount}
-          onUploadInvoice={() => openCellDocuments("invoice")}
-          onUploadReceipt={() => openCellDocuments("receipt")}
-          onViewInvoice={() => openCellDocuments("invoice")}
-          onViewReceipt={() => openCellDocuments("receipt")}
-          onMarkPaid={() => openCellDocuments("receipt")}
+          onUploadInvoice={canManageDocuments ? () => openCellDocuments("invoice") : undefined}
+          onUploadReceipt={canManageDocuments ? () => openCellDocuments("receipt") : undefined}
+          onViewInvoice={canManageDocuments ? () => openCellDocuments("invoice") : undefined}
+          onViewReceipt={canManageDocuments ? () => openCellDocuments("receipt") : undefined}
+          onMarkPaid={canManageDocuments ? () => openCellDocuments("receipt") : undefined}
           onCopy={() => void handleCopy()}
-          onClearContents={onDelete}
-          onApplyColour={applyColourToSelection}
+          onClearContents={canEditCharges ? onDelete : undefined}
+          onApplyColour={canEditCharges ? applyColourToSelection : undefined}
           onHideColumn={() => sel.hideColumn(ctxMenu.columnId)}
           onClose={closeContextMenu}
         />

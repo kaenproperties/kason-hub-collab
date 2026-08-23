@@ -108,6 +108,7 @@ describe("apartmentFormChangedFields — delta detection", () => {
     highlights: ["Near KLCC"],
     description: "Sunny apartment",
     partitionBillingMode: null as null | "SUBSIDY" | "NO_SUBSIDY",
+    tnbSubsidyCapMonthly: "",
     ownerPartyId: null as string | null,
     ownerName: "",
     ownerPhone: null as string | null,
@@ -121,6 +122,15 @@ describe("apartmentFormChangedFields — delta detection", () => {
     expect(
       apartmentFormChangedFields(baseForm, { ...baseForm, bedrooms: "4" }),
     ).toEqual(["bedrooms"]);
+  });
+
+  it("flags the apartment monthly TNB subsidy cap when changed", () => {
+    expect(
+      apartmentFormChangedFields(baseForm, {
+        ...baseForm,
+        tnbSubsidyCapMonthly: "200.00",
+      }),
+    ).toEqual(["tnbSubsidyCapMonthly"]);
   });
 
   it("treats '' ↔ null as NOT a change for scalars", () => {
@@ -377,6 +387,45 @@ describe("EditApartmentDialog — partition billing mode (apartment-scoped field
 
     // Existing behaviour preserved: the batch fan-out still fires.
     expect(createUnitsBatchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("saves a monthly TNB owner subsidy cap through the apartment endpoint", async () => {
+    createUnitsBatchMock.mockReset();
+    createUnitsBatchMock.mockResolvedValue({
+      ids: [],
+      updatedIds: ["u-master", "u-medium"],
+    });
+    updateApartmentSharedMock.mockReset();
+    updateApartmentSharedMock.mockResolvedValue({ data: { id: "apt-test-edit" } });
+    const user = userEvent.setup();
+    render(
+      wrap(
+        <EditApartmentDialog
+          apartment={makeApartment({
+            listingMode: "PARTITIONED",
+            partitionBillingMode: "SUBSIDY",
+            tnbSubsidyCapMonthly: null,
+          })}
+          propertyId="p1"
+          propertyName="The Sky Residences"
+          trigger={<button>Open</button>}
+        />,
+      ),
+    );
+    await user.click(screen.getByText("Open"));
+
+    const capInput = screen.getByRole("spinbutton", {
+      name: /monthly tnb owner subsidy cap/i,
+    });
+    await user.type(capInput, "200.00");
+    await user.click(screen.getByRole("button", { name: /save apartment/i }));
+    await user.click(
+      await screen.findByRole("button", { name: /update apartment/i }),
+    );
+
+    expect(updateApartmentSharedMock).toHaveBeenCalledWith("apt-test-edit", {
+      tnbSubsidyCapMonthly: 200,
+    });
   });
 
   it("does NOT call updateApartmentShared when only a non-billing field (bedrooms) changed", async () => {

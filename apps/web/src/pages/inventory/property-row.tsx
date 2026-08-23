@@ -20,6 +20,7 @@ import {
 } from "@/api/inventory-units-batch";
 import { isEditableKeyTarget } from "@/lib/dom";
 import { isListedToAgents } from "@/lib/listing-status";
+import { usePermission } from "@/components/permission-gate";
 
 export type PropertyListItem = {
   id: string;
@@ -42,6 +43,10 @@ export function PropertyRow({
   propertyOptions: PropertyOption[];
   forceExpanded?: boolean;
 }) {
+  const canCreatePortfolio = usePermission("portfolio.create");
+  const canEditPortfolio = usePermission("portfolio.edit");
+  const canCreateParties = usePermission("party.create");
+  const canCreateTenancy = usePermission("tenancy.create");
   const [expandedLocal, setExpanded] = useState(false);
   const expanded = forceExpanded || expandedLocal;
 
@@ -117,7 +122,7 @@ export function PropertyRow({
         <div className="text-sm">{property.unitCount}</div>
         <div className="text-sm">{listedCount}</div>
         <div className="flex justify-end gap-1">
-          <CreateUnitDialog
+          {canCreatePortfolio && <CreateUnitDialog
             properties={propertyOptions}
             defaultPropertyId={property.id}
             trigger={
@@ -131,8 +136,8 @@ export function PropertyRow({
                 Unit
               </Button>
             }
-          />
-          <EditPropertyDialog
+          />}
+          {canEditPortfolio && <EditPropertyDialog
             property={propertyRowData}
             trigger={
               <Button
@@ -144,7 +149,7 @@ export function PropertyRow({
                 <Pencil />
               </Button>
             }
-          />
+          />}
         </div>
       </div>
 
@@ -198,7 +203,7 @@ export function PropertyRow({
                 key={apt.unitCode}
                 apartment={apt}
                 addTenantTrigger={
-                  vacantRoom ? (
+                  canCreateTenancy && vacantRoom ? (
                     <EditApartmentShell
                       initialSection="tenant"
                       initialIntent="addTenant"
@@ -212,7 +217,7 @@ export function PropertyRow({
                   ) : null
                 }
                 addOwnerTrigger={
-                  !apt.ownerPartyId && anchorRoom ? (
+                  canEditPortfolio && canCreateParties && !apt.ownerPartyId && anchorRoom ? (
                     <EditApartmentShell
                       initialSection="owner"
                       unit={{
@@ -225,7 +230,7 @@ export function PropertyRow({
                   ) : null
                 }
                 editApartmentTrigger={
-                  anchorRoom ? (
+                  canEditPortfolio && anchorRoom ? (
                     <EditApartmentShell
                       unit={{
                         id: anchorRoom.id,

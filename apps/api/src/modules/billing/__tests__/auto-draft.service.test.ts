@@ -837,6 +837,49 @@ describe("voidInvoiceService", () => {
     );
   });
 
+  it("voids both draft legs of an inclusive TA pair and never detaches either leg", async () => {
+    mockChargeFindMany.mockResolvedValue([
+      {
+        id: "ta-base", chargeNumber: "TA-1", chargeType: "tenancy_agreement_fee", status: "draft",
+        parentChargeId: null, sstRate: { toString: () => "8" },
+      },
+      {
+        id: "ta-tax", chargeNumber: "TA-1-SST", chargeType: "tenancy_agreement_fee", status: "draft",
+        parentChargeId: "ta-base", sstRate: { toString: () => "0" },
+      },
+    ]);
+
+    const r = await voidInvoiceService(txCtx, INVOICE_ID, ISO, "cancelled before issue");
+
+    expect(r).toMatchObject({ ok: true, status: 200 });
+    expect(mockChargeUpdate).toHaveBeenCalledTimes(2);
+    expect(mockChargeUpdate.mock.calls.map((call) => call[0].where.id)).toEqual(["ta-base", "ta-tax"]);
+    expect(detachChargeTx).not.toHaveBeenCalled();
+  });
+
+  it("refuses an approved/live inclusive TA pair so its document cannot be orphaned", async () => {
+    mockChargeFindMany.mockResolvedValue([
+      {
+        id: "ta-base", chargeNumber: "TA-1", chargeType: "tenancy_agreement_fee", status: "posted",
+        parentChargeId: null, sstRate: { toString: () => "8" },
+      },
+      {
+        id: "ta-tax", chargeNumber: "TA-1-SST", chargeType: "tenancy_agreement_fee", status: "posted",
+        parentChargeId: "ta-base", sstRate: { toString: () => "0" },
+      },
+    ]);
+
+    const r = await voidInvoiceService(txCtx, INVOICE_ID, ISO, "wrong amount");
+
+    expect(r).toEqual({
+      ok: false,
+      status: 409,
+      error: "PAIRED_TA_REQUIRES_ACCOUNTING_CORRECTION",
+    });
+    expect(mockChargeUpdate).not.toHaveBeenCalled();
+    expect(detachChargeTx).not.toHaveBeenCalled();
+  });
+
   it("returns 409 when withStaleCheck yields null (wrong state e.g. sent/paid) and does NOT touch charges", async () => {
     mockWithStaleCheck.mockResolvedValue(null);
     const r = await voidInvoiceService(txCtx, INVOICE_ID, ISO);
@@ -940,6 +983,28 @@ describe("editDraftChargeAmountService", () => {
     });
     expect(r.ok).toBe(false);
     expect(r.status).toBe(409);
+    expect(mockChargeUpdate).not.toHaveBeenCalled();
+  });
+
+  it("refuses a manual amount edit on an inclusive TA pair", async () => {
+    mockInvoiceFindFirst.mockResolvedValue({ id: INVOICE_ID, status: "draft", updatedAt: new Date(ISO) });
+    mockChargeFindFirst.mockResolvedValue({
+      id: "ta-base",
+      invoiceId: INVOICE_ID,
+      status: "draft",
+      amount: { toString: () => "462.96" },
+      chargeNumber: "TA-1",
+      chargeType: "tenancy_agreement_fee",
+      parentChargeId: null,
+      sstRate: { toString: () => "8" },
+    });
+
+    const r = await editDraftChargeAmountService(txCtx, INVOICE_ID, "ta-base", {
+      amount: 500,
+      expectedUpdatedAt: ISO,
+    });
+
+    expect(r).toEqual({ ok: false, status: 409, error: "PAIRED_TA_EDIT_FROM_TENANCY" });
     expect(mockChargeUpdate).not.toHaveBeenCalled();
   });
 });

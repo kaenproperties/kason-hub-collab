@@ -2,7 +2,7 @@
  * §4 informational rows — the letting-commission explanation line.
  *
  * owner-ledger.sync.ts books the first month's rent as an `informational` row
- * ("First month rent retained by KAEN as letting commission") specifically so a
+ * ("First month rental retained by KAEN as Admin Fee") specifically so a
  * commission month does not read as a blank statement. §4 previously filtered the
  * ledger to direction "income"/"expense" only, so that row reached no surface: the
  * owner saw RM 0.00 income beside an unexplained owner-borne SST deduction.
@@ -77,7 +77,7 @@ function lettingCommissionRow(amount = "3000.00") {
     amount: dec(amount),
     includeInPayout: false,
     paymentStatus: "paid",
-    description: "First month rent retained by KAEN as letting commission",
+    description: "First month rental retained by KAEN as Admin Fee",
     sourceType: "letting_commission",
   });
 }
@@ -175,7 +175,7 @@ describe("assembleYannieStatement — informational (letting commission) rows", 
 
     expect(rows).toHaveLength(1);
     expect(rows[0]!.isInformational).toBe(true);
-    expect(rows[0]!.incomeType).toBe("Letting Commission");
+    expect(rows[0]!.incomeType).toBe("Admin Fee (First Month Rental)");
     expect(rows[0]!.amount).toBe("3000.00");
   });
 
@@ -184,7 +184,7 @@ describe("assembleYannieStatement — informational (letting commission) rows", 
 
     const result = await assembleYannieStatement(ctx, STMT_ID);
     expect(result!.incomeBreakdown.rows[0]!.detail).toBe(
-      "First month rent retained by KAEN as letting commission",
+      "First month rental retained by KAEN as Admin Fee",
     );
   });
 

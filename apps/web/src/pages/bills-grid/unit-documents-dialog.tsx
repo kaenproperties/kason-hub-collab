@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import { Download, Eye, FileText, Loader2, ReceiptText } from "lucide-react";
 import type { BillingDocumentListItem } from "@kason/shared";
 import { useBillingDocuments, fetchBillingDocumentPdfUrl } from "@/api/billing-documents";
@@ -15,15 +15,30 @@ function displayDate(value: string): string {
   return new Intl.DateTimeFormat("en-MY", { day: "2-digit", month: "short", year: "numeric" }).format(new Date(value));
 }
 
-export function UnitDocumentsDialog({ row, onClose }: { row: GridRow | null; onClose: () => void }) {
+function displayMonth(value: string): string {
+  if (!/^\d{4}-\d{2}$/.test(value)) return "Selected month";
+  return new Intl.DateTimeFormat("en-MY", { month: "long", year: "numeric", timeZone: "UTC" }).format(
+    new Date(`${value}-01T00:00:00.000Z`),
+  );
+}
+
+type UnitDocumentsDialogProps = {
+  row: GridRow | null;
+  billingMonth: string;
+  onClose: () => void;
+};
+
+export function UnitDocumentsDialog({ row, billingMonth, onClose }: UnitDocumentsDialogProps) {
   const [selectedDoc, setSelectedDoc] = useState<BillingDocumentListItem | null>(null);
   const [downloadingId, setDownloadingId] = useState<string | null>(null);
   const [page, setPage] = useState(1);
-  useEffect(() => { setPage(1); }, [row?.apartmentId]);
+  const [periodMode, setPeriodMode] = useState<"month" | "all">("month");
+  const [selectedMonth, setSelectedMonth] = useState(billingMonth);
   const query = useBillingDocuments(row ? {
     apartmentId: row.apartmentId,
     counterpartyType: "tenant",
     docTypes: ["invoice", "debit_note", "proforma", "receipt", "credit_note", "refund_note"],
+    ...(periodMode === "month" && selectedMonth ? { month: selectedMonth } : {}),
     page,
     pageSize: 50,
   } : undefined);
@@ -52,16 +67,60 @@ export function UnitDocumentsDialog({ row, onClose }: { row: GridRow | null; onC
               <FileText className="h-6 w-6 text-[var(--gold)]" />
               Tenant invoices & receipts
             </DialogTitle>
-            <p className="text-base text-muted-foreground">{row ? `${row.propertyName} ${row.unitCode}` : ""} · all tenant-facing documents</p>
+            <p className="text-base text-muted-foreground">
+              {row ? `${row.propertyName} ${row.unitCode}` : ""} · {periodMode === "all" ? "all tenant-facing documents" : `${displayMonth(selectedMonth)} tenant-facing documents`}
+            </p>
           </DialogHeader>
 
           <div className="px-6 pb-2">
+            <div className="mb-4 flex flex-wrap items-end justify-between gap-3 rounded-xl border border-[var(--border)] bg-[var(--page-bg)] px-4 py-3">
+              <div>
+                <p className="font-semibold text-[var(--navy)]">Document period</p>
+                <p className="text-sm text-muted-foreground">Choose a billing month, or show this tenant's complete document history.</p>
+              </div>
+              <div className="flex items-end gap-2">
+                <label className="grid gap-1 text-sm font-semibold text-[var(--navy)]">
+                  Month
+                  <input
+                    aria-label="Filter documents by month"
+                    type="month"
+                    value={selectedMonth}
+                    onClick={() => {
+                      setPeriodMode("month");
+                      setPage(1);
+                    }}
+                    onChange={(event) => {
+                      setSelectedMonth(event.target.value);
+                      setPeriodMode("month");
+                      setPage(1);
+                    }}
+                    className={`h-10 min-w-44 rounded-lg border bg-white px-3 text-base font-medium text-[var(--navy)] outline-none focus:ring-2 focus:ring-[var(--gold)] ${periodMode === "month" ? "border-[var(--gold)] shadow-sm" : "border-[var(--border)]"}`}
+                  />
+                </label>
+                <Button
+                  type="button"
+                  variant={periodMode === "all" ? "default" : "outline"}
+                  aria-pressed={periodMode === "all"}
+                  className="h-10 px-5"
+                  onClick={() => {
+                    setPeriodMode("all");
+                    setPage(1);
+                  }}
+                >
+                  All
+                </Button>
+              </div>
+            </div>
             {query.isLoading ? (
               <div className="flex min-h-48 items-center justify-center gap-2 text-muted-foreground"><Loader2 className="h-5 w-5 animate-spin" />Loading documents…</div>
             ) : query.isError ? (
               <div className="my-6 rounded-lg border border-red-300 bg-red-50 p-5 text-red-700">Couldn't load this unit's invoices and receipts.</div>
             ) : documents.length === 0 ? (
-              <div className="my-6 rounded-lg border border-dashed border-[var(--border)] p-10 text-center text-muted-foreground">No invoices or receipts have been issued for this tenant/unit yet.</div>
+              <div className="my-6 rounded-lg border border-dashed border-[var(--border)] p-10 text-center text-muted-foreground">
+                {periodMode === "all"
+                  ? "No invoices or receipts have been issued for this tenant/unit yet."
+                  : `No invoices or receipts were issued for ${displayMonth(selectedMonth)}.`}
+              </div>
             ) : (
               <div className="max-h-[62vh] overflow-y-auto rounded-xl border border-[var(--border)]">
                 <table className="w-full table-fixed border-collapse text-[16px]">

@@ -9,6 +9,7 @@ import { FirstMonthPreviewCard } from "../tenancy/first-month-preview";
 import { isPhase2FlagEnabled } from "@/lib/feature-flags";
 import { Button } from "@/components/ui/button";
 import { CreateTenantDialog } from "@/pages/parties/tenants-action-dialogs";
+import { usePermission } from "@/components/permission-gate";
 
 export function FieldError({ text }: { text?: string }) {
   if (!text) return null;
@@ -184,6 +185,7 @@ export function OccupancyFields(props: {
   onChange: (patch: Partial<{ moveInDate: string; moveOutDate: string; monthlyRent: string }>) => void;
   errors: OccupancyFieldErrors;
 }) {
+  const canCreateParty = usePermission("party.create");
   const rentNum = Number(props.monthlyRent);
   // The first-month rent-preview is a Phase-2 surface tied to the same
   // reservation-gating flag as the rent input it reads. Gate the query (and the
@@ -249,7 +251,7 @@ export function OccupancyFields(props: {
         <p className="text-xs font-medium uppercase tracking-wide text-amber-800">
           Tenancy details
         </p>
-        {!props.tenantPartyId && (
+        {canCreateParty && !props.tenantPartyId && (
           <CreateTenantDialog
             onCreated={(tenant) =>
               props.onSelectTenant({
@@ -365,14 +367,14 @@ export function OccupancyFields(props: {
       {props.occupancyStatus === "occupied" && !isSameTenantInPlaceEdit && (
         <div className="grid gap-3 sm:grid-cols-2 rounded-lg border border-amber-200 bg-amber-50 p-3">
           <label className="block">
-            <span className="block text-sm font-medium text-slate-700">Tenant agreement fee (RM)</span>
+            <span className="block text-sm font-medium text-slate-700">TA (WITH SST) amount (RM)</span>
             <TextInput
               type="number" min={0} step="0.01"
               value={props.tenancyAgreementFeeAmount ?? ""}
               onChange={(e) => props.onAgreementFeeChange?.({ tenancyAgreementFeeAmount: e.target.value })}
               placeholder="0.00"
             />
-            <p className="mt-1 text-xs text-slate-500">Separate tenant invoice; not part of the booking rent.</p>
+            <p className="mt-1 text-xs text-slate-500">This is the final SST-inclusive amount on a separate tenant invoice.</p>
           </label>
           <label className="block">
             <span className="block text-sm font-medium text-slate-700">Agreement fee due date</span>
@@ -381,7 +383,7 @@ export function OccupancyFields(props: {
               value={props.tenancyAgreementFeeDueDate ?? ""}
               onChange={(e) => props.onAgreementFeeChange?.({ tenancyAgreementFeeDueDate: e.target.value })}
             />
-            <p className="mt-1 text-xs text-slate-500">Blank uses the move-in date.</p>
+            <p className="mt-1 text-xs text-slate-500">Blank uses the tenancy start date.</p>
           </label>
         </div>
       )}

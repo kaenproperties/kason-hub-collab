@@ -22,7 +22,7 @@ import type { ZodError } from "zod";
 import { getDb } from "@kason/db";
 import type { SessionPayload } from "../../../lib/auth";
 import type { AdminRole } from "../../../lib/rbac";
-import { requireRole } from "../../../middleware/require-role";
+import { requirePermission } from "../../../middleware/require-permission";
 import { getActorHeaders } from "../../../lib/actor-ctx";
 import { formatZodError } from "../../../lib/zod-error-mapper";
 import type { OwnerLedgerActorCtx } from "../owner-ledger.types";
@@ -60,7 +60,7 @@ const runBody = z.object({
   month: z.string().regex(monthRe, "month must match YYYY-MM").optional(),
 });
 
-reconciliationRoutes.post("/reconciliation-runs", requireRole("admin"), async (c) => {
+reconciliationRoutes.post("/reconciliation-runs", requirePermission("owner_report.generate"), async (c) => {
   const raw = await c.req.json().catch(() => ({}));
   const parsed = runBody.safeParse(raw ?? {});
   if (!parsed.success) return zerr(c, parsed.error);
@@ -82,7 +82,7 @@ const runsQuery = z.object({
   limit: z.coerce.number().int().min(1).max(200).default(50),
 });
 
-reconciliationRoutes.get("/reconciliation-runs", requireRole("admin"), async (c) => {
+reconciliationRoutes.get("/reconciliation-runs", requirePermission("owner_report.view"), async (c) => {
   const parsed = runsQuery.safeParse(c.req.query());
   if (!parsed.success) return zerr(c, parsed.error);
   const { type, status, limit } = parsed.data;
@@ -108,7 +108,7 @@ const findingsQuery = z.object({
   limit: z.coerce.number().int().min(1).max(500).default(100),
 });
 
-reconciliationRoutes.get("/reconciliation-findings", requireRole("admin"), async (c) => {
+reconciliationRoutes.get("/reconciliation-findings", requirePermission("owner_report.view"), async (c) => {
   const parsed = findingsQuery.safeParse(c.req.query());
   if (!parsed.success) return zerr(c, parsed.error);
   const { checkKind, status, severity, ownerPartyId, month, limit } = parsed.data;
@@ -129,7 +129,7 @@ reconciliationRoutes.get("/reconciliation-findings", requireRole("admin"), async
 
 // ─── POST /reconciliation-findings/:id/acknowledge — admin triage ─────────────────
 // Org-scoped lookup first (tenant isolation) → 404 if not this org's finding.
-reconciliationRoutes.post("/reconciliation-findings/:id/acknowledge", requireRole("admin"), async (c) => {
+reconciliationRoutes.post("/reconciliation-findings/:id/acknowledge", requirePermission("owner_report.reopen"), async (c) => {
   const id = c.req.param("id");
   const a = actor(c);
   const existing = await getDb().ownerLedgerReconciliationFinding.findFirst({
@@ -147,7 +147,7 @@ reconciliationRoutes.post("/reconciliation-findings/:id/acknowledge", requireRol
 // ─── POST /reconciliation-findings/:id/ignore — reason REQUIRED (no resolve-without-repair) ─
 const ignoreBody = z.object({ reason: z.string().trim().min(1, "reason is required") });
 
-reconciliationRoutes.post("/reconciliation-findings/:id/ignore", requireRole("admin"), async (c) => {
+reconciliationRoutes.post("/reconciliation-findings/:id/ignore", requirePermission("owner_report.reopen"), async (c) => {
   // Validate the reason BEFORE the resource lookup: an ignore without a reason is a 400
   // regardless of whether the finding exists (spec: ignore requires a reason).
   const raw = await c.req.json().catch(() => ({}));
@@ -171,7 +171,7 @@ reconciliationRoutes.post("/reconciliation-findings/:id/ignore", requireRole("ad
 // READ-ONLY and flag-INDEPENDENT (inherits this router's distinct-prefix escape from
 // ownerLedgerFlagGate): it MUST be answerable BEFORE ENABLE_PHASE2_OWNER_STATEMENT_LIVE_
 // LEDGER is turned on, since it is what decides whether turning it on is safe.
-reconciliationRoutes.get("/enablement-preflight", requireRole("admin"), async (c) => {
+reconciliationRoutes.get("/enablement-preflight", requirePermission("owner_report.view"), async (c) => {
   const result = await runEnablementPreflight({ orgId: actor(c).orgId });
   return c.json({ data: result });
 });

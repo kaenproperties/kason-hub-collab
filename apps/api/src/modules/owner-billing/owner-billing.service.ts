@@ -5,8 +5,8 @@ import {
   ACTIVE_ADJUSTMENT_NOTE_STATUSES,
   centsToString,
   computeManagementFee,
+  computeManagementFeeRentBase,
   isInFreePeriod,
-  shouldChargeMgmtFee,
   toCents,
 } from "@kason/shared";
 import { recordAudit } from "../../lib/audit";
@@ -119,6 +119,9 @@ function mapConfig(row: DbManagementFeeConfig): ManagementFeeConfigRow {
     sstPercent: row.sstPercent.toString(),
     freePeriodStart: row.freePeriodStart?.toISOString() ?? null,
     freePeriodEnd: row.freePeriodEnd?.toISOString() ?? null,
+    firstChargeMonth: row.firstChargeMonth?.toISOString() ?? null,
+    firstChargeBaseAmount: row.firstChargeBaseAmount?.toString() ?? null,
+    paxDeductionPerPerson: row.paxDeductionPerPerson?.toString() ?? null,
     isActive: row.isActive,
     effectiveFrom: row.effectiveFrom?.toISOString() ?? null,
     effectiveTo: row.effectiveTo?.toISOString() ?? null,
@@ -162,9 +165,15 @@ export async function createFeeConfigService(
       feeType: input.feeType,
       feeValue: input.feeValue,
       capAmount: input.capAmount ?? null,
-      sstPercent: input.sstPercent,
+      // Management services are always subject to the current 8% SST rule.
+      // Keep this server-side so an old UI or direct API call cannot save a
+      // different tax rate and create accounting drift.
+      sstPercent: "8",
       freePeriodStart: input.freePeriodStart ? new Date(input.freePeriodStart) : null,
       freePeriodEnd: input.freePeriodEnd ? new Date(input.freePeriodEnd) : null,
+      firstChargeMonth: input.firstChargeMonth ? new Date(input.firstChargeMonth) : null,
+      firstChargeBaseAmount: input.firstChargeBaseAmount ?? null,
+      paxDeductionPerPerson: input.paxDeductionPerPerson ?? null,
       isActive: input.isActive,
       effectiveFrom: input.effectiveFrom ? new Date(input.effectiveFrom) : null,
       effectiveTo: input.effectiveTo ? new Date(input.effectiveTo) : null,
@@ -291,12 +300,23 @@ export async function updateFeeConfigService(
     ...(fields.feeType !== undefined ? { feeType: fields.feeType } : {}),
     ...(fields.feeValue !== undefined ? { feeValue: fields.feeValue } : {}),
     ...(fields.capAmount !== undefined ? { capAmount: fields.capAmount } : {}),
-    ...(fields.sstPercent !== undefined ? { sstPercent: fields.sstPercent } : {}),
+    // Management service is always taxable at 8%; never preserve a legacy or
+    // client-supplied alternative when this rule is edited.
+    sstPercent: "8",
     ...(fields.freePeriodStart !== undefined
       ? { freePeriodStart: fields.freePeriodStart ? new Date(fields.freePeriodStart) : null }
       : {}),
     ...(fields.freePeriodEnd !== undefined
       ? { freePeriodEnd: fields.freePeriodEnd ? new Date(fields.freePeriodEnd) : null }
+      : {}),
+    ...(fields.firstChargeMonth !== undefined
+      ? { firstChargeMonth: fields.firstChargeMonth ? new Date(fields.firstChargeMonth) : null }
+      : {}),
+    ...(fields.firstChargeBaseAmount !== undefined
+      ? { firstChargeBaseAmount: fields.firstChargeBaseAmount }
+      : {}),
+    ...(fields.paxDeductionPerPerson !== undefined
+      ? { paxDeductionPerPerson: fields.paxDeductionPerPerson }
       : {}),
     ...(fields.isActive !== undefined ? { isActive: fields.isActive } : {}),
     ...(fields.effectiveFrom !== undefined
@@ -408,6 +428,74 @@ function compactMonth(billingMonth: string): string {
  */
 function money2dp(value: { toString(): string }): string {
   return centsToString(toCents(value.toString(), "mapStatement"));
+}
+
+function sameUtcMonth(a: Date, b: Date): boolean {
+  return a.getUTCFullYear() === b.getUTCFullYear() && a.getUTCMonth() === b.getUTCMonth();
+}
+
+/**
+ * One source of truth for the management fee that may actually be charged.
+ * The fee agreement is intentionally fully configurable: percentage/fixed/cap,
+ * optional per-person deduction, optional free period and an optional first
+ * charge override. Listing mode never hard-codes any of those choices.
+ *
+ * Management fee is company revenue but only becomes chargeable after the
+ * owner's ordinary rent for the month has been fully collected. Letting-
+ * commission rent is not owner income and is excluded from the rent base.
+ */
+function chargeableManagementFee(
+  config: DbManagementFeeConfig,
+  unit: OwnerUnitForMonth,
+  firstOfMonth: Date,
+  billingMonth: string,
+): ReturnType<typeof computeManagementFee> | null {
+  if (
+    config.firstChargeMonth != null &&
+    firstOfMonth.getTime() < new Date(Date.UTC(
+      config.firstChargeMonth.getUTCFullYear(),
+      config.firstChargeMonth.getUTCMonth(),
+      1,
+    )).getTime()
+  ) {
+    return null;
+  }
+
+  const inFreePeriod = isInFreePeriod(billingMonth, {
+    freePeriodStart: config.freePeriodStart?.toISOString() ?? null,
+    freePeriodEnd: config.freePeriodEnd?.toISOString() ?? null,
+  });
+  if (inFreePeriod) return null;
+
+  const rent = computeManagementFeeRentBase(
+    unit.managementFeeRentComponents,
+    config.paxDeductionPerPerson?.toString() ?? null,
+  );
+  if (!rent.fullyCollected || toCents(rent.eligibleRentBase, "managementFee.rentBase") <= 0) {
+    return null;
+  }
+
+  const useFirstChargeOverride =
+    config.firstChargeMonth != null &&
+    config.firstChargeBaseAmount != null &&
+    sameUtcMonth(config.firstChargeMonth, firstOfMonth);
+
+  return computeManagementFee(
+    useFirstChargeOverride
+      ? {
+          feeType: "fixed",
+          feeValue: config.firstChargeBaseAmount!.toString(),
+          capAmount: null,
+          sstPercent: "8",
+        }
+      : {
+          feeType: config.feeType as "percent" | "fixed" | "cap",
+          feeValue: config.feeValue.toString(),
+          capAmount: config.capAmount === null ? null : config.capAmount.toString(),
+          sstPercent: "8",
+        },
+    rent.eligibleRentBase,
+  );
 }
 
 /** Serialise an Invoice + its line Charges to the read DTO (Decimals → 2dp strings). */
@@ -574,30 +662,12 @@ export async function generateStatementService(
   // Plan the lines (pure, pre-tx). The no-double-bill probe + writes happen in-tx.
   const plannedLines: PlannedLine[] = [];
 
-  // 5) MGMT FEE — per UNIT/room: only when occupied AND not in the free period.
+  // 5) MGMT FEE — per UNIT/room, only after ordinary owner rent is collected.
   for (const unit of scopedUnits) {
     const config = resolveConfigForUnit(configs, unit, firstOfMonth);
     if (!config) continue; // no applicable config → no mgmt-fee line for this unit
-
-    const inFreePeriod = isInFreePeriod(input.billingMonth, {
-      freePeriodStart: config.freePeriodStart?.toISOString() ?? null,
-      freePeriodEnd: config.freePeriodEnd?.toISOString() ?? null,
-    });
-    if (shouldChargeMgmtFee({ hasActiveTenancy: unit.occupied, inFreePeriod })) {
-      const fee = computeManagementFee(
-        {
-          feeType: config.feeType as "percent" | "fixed" | "cap",
-          feeValue: config.feeValue.toString(),
-          capAmount: config.capAmount === null ? null : config.capAmount.toString(),
-          sstPercent: config.sstPercent.toString(),
-        },
-        // ⚠️ MONEY — the fee base is the rent BILLED for this month, never the
-        // contracted `rentBase`. A mid-month tenancy pays prorated rent; billing
-        // a full month's fee on it over-charged the owner AND disagreed with the
-        // §5 payout deduction, which takes its fee off collected income. See the
-        // ⚠️ MONEY note on resolveOwnerUnitsForMonth.
-        unit.rentBaseForMonth,
-      );
+    const fee = chargeableManagementFee(config, unit, firstOfMonth, input.billingMonth);
+    if (fee) {
       // ⚠️ MONEY. A zero fee is NOT a line. `findUnvoidedChargeForUnitMonth`
       // treats any existing management_fee charge for this unit+month as
       // already-billed, so a RM 0.00 row would permanently occupy the slot: the
@@ -832,6 +902,16 @@ export async function generateStatementService(
           currency: "MYR",
           invoiceId: invoice.id,
           attachmentKeys: [],
+          // A management fee is KAEN's service revenue (the Charge amount is
+          // the pre-SST fee base).  Keep the economic treatment on the source
+          // charge so profitability never has to infer it from the document
+          // title or from an owner-ledger presentation row.
+          nature: "profit",
+          fundedBy: "owner",
+          revenueRecognition: "manager_revenue",
+          settlementRecipient: "manager",
+          commercialPurpose: "MANAGEMENT_FEE",
+          taxTreatment: "taxable_service",
         });
         createdChargeIds.push(charge.id);
         // invoiceId is set on create above; attach is also explicit so a future
@@ -874,7 +954,7 @@ export async function generateStatementService(
           partyId: input.ownerPartyId,
           chargeType: line.chargeType,
           status: "draft",
-          description: "Letting commission (first month rent)",
+          description: "Admin Fee (First Month Rental)",
           dueDate: firstOfMonth,
           billingMonth: firstOfMonth,
           amount: line.amount,
@@ -882,6 +962,15 @@ export async function generateStatementService(
           currency: "MYR",
           invoiceId: invoice.id,
           attachmentKeys: [],
+          // The tenant still pays first-month rent on the tenant side.  This
+          // separate owner-facing charge is KAEN's letting commission and is
+          // therefore company revenue (SST remains its own non-profit line).
+          nature: "profit",
+          fundedBy: "owner",
+          revenueRecognition: "manager_revenue",
+          settlementRecipient: "manager",
+          commercialPurpose: "SERVICE",
+          taxTreatment: "taxable_service",
         });
         createdChargeIds.push(charge.id);
         await attachChargeToInvoice(tx, ctx.orgId, charge.id, invoice.id);
@@ -897,7 +986,7 @@ export async function generateStatementService(
           partyId: input.ownerPartyId,
           chargeType: line.chargeType,
           status: "draft",
-          description: "Letting commission SST (owner-borne)",
+          description: "SST on Admin Fee (First Month Rental)",
           dueDate: firstOfMonth,
           billingMonth: firstOfMonth,
           amount: line.amount,
@@ -1009,17 +1098,8 @@ function recomputeSstForLines(
     if (!unit) continue;
     const config = resolveConfigForUnit(configs, unit, firstOfMonth);
     if (!config) continue;
-    const fee = computeManagementFee(
-      {
-        feeType: config.feeType as "percent" | "fixed" | "cap",
-        feeValue: config.feeValue.toString(),
-        capAmount: config.capAmount === null ? null : config.capAmount.toString(),
-        sstPercent: config.sstPercent.toString(),
-      },
-      // MUST be the same base the pre-tx plan used, or the recomputed SST
-      // disagrees with the fee it is the SST *on*. See ⚠️ MONEY above.
-      unit.rentBaseForMonth,
-    );
+    const fee = chargeableManagementFee(config, unit, firstOfMonth, billingMonth);
+    if (!fee) continue;
     cents += toCents(fee.sst, "generateStatement");
   }
   return cents;
@@ -1659,18 +1739,21 @@ async function buildStatementApprovalPreflight(
     blocks: "approve",
   });
 
-  const netPayout = moneyNumber(sections.payoutSummary.netPayoutToOwner);
-  checks.push(netPayout >= 0 ? {
+  const totalPayoutToOwner = sections.payoutSummary.lines.find(
+    (line) => line.label === "Total Payout to Owner",
+  )?.amount ?? sections.payoutSummary.netPayoutToOwner;
+  const totalPayout = moneyNumber(totalPayoutToOwner);
+  checks.push(totalPayout >= 0 ? {
     code: "non_negative_payout",
     label: "Payout amount",
     status: "pass",
-    detail: `Cash-basis Owner Payout is RM ${sections.payoutSummary.netPayoutToOwner}.`,
+    detail: `Total cash payout to the owner is RM ${totalPayoutToOwner}, including any deposit collected for onward transfer.`,
     blocks: null,
   } : {
     code: "non_negative_payout",
     label: "Payout amount",
     status: "block",
-    detail: `Owner Payout is negative (RM ${sections.payoutSummary.netPayoutToOwner}). Review charges and deductions.`,
+    detail: `Owner Payout is negative (RM ${totalPayoutToOwner}). Review charges and deductions.`,
     blocks: "both",
   });
 
@@ -1728,7 +1811,14 @@ async function buildStatementApprovalPreflight(
   return {
     ok: true as const,
     status: 200,
-    data: { statementId: id, canFirstCheck, canApprove, netPayoutToOwner: sections.payoutSummary.netPayoutToOwner, checks },
+    data: {
+      statementId: id,
+      canFirstCheck,
+      canApprove,
+      totalPayoutToOwner,
+      netPayoutToOwner: sections.payoutSummary.netPayoutToOwner,
+      checks,
+    },
   };
 }
 

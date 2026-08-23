@@ -6,13 +6,17 @@ import { getDefaultLogoDataUrl } from "./default-logo";
 import * as repo from "./repository";
 import type { DocType, ResolvedTemplate } from "./types";
 import { DEFAULT_HEADER_FIELDS } from "./types";
+import {
+  LEGAL_DOCUMENT_PROFILE,
+  withLegalDocumentDefaults,
+} from "./legal-document-profile";
 
 const DEFAULT_TITLE: Record<DocType, string> = {
   reservation_form: "Unit Reservation Form",
   rental_commission_claim: "Rental Commission Claim Form",
   invoice: "Invoice",
   renovation_claim: "Renovation Claim Form",
-  owner_statement: "Owner Statement",
+  owner_statement: "Owner Payout Report",
   credit_note: "Credit Note",
   refund_note: "Refund Note",
   tenancy_agreement: "Tenancy Agreement",
@@ -20,7 +24,7 @@ const DEFAULT_TITLE: Record<DocType, string> = {
 };
 
 /** Legal entity printed on every financial/customer document. */
-export const LEGAL_DOCUMENT_ORG_NAME = "KAEN PROPERTIES MANAGEMENT SDN BHD";
+export const LEGAL_DOCUMENT_ORG_NAME = LEGAL_DOCUMENT_PROFILE.organizationName;
 
 async function resolveLogoUrl(effectiveLogoKey: string | null): Promise<string | null> {
   return effectiveLogoKey
@@ -99,10 +103,11 @@ export async function getTemplateForOrgDocType(
   // <br>). Keep mixed-case here; CSS handles the uppercase transform.
   const titleOverrides: Partial<Record<DocType, string>> = {
     rental_commission_claim: "Rental Commission\nClaim Form",
+    owner_statement: "Owner Payout Report",
   };
   const effectiveTitle = titleOverrides[docType] ?? row.title;
 
-  return {
+  return withLegalDocumentDefaults({
     id: row.id,
     organizationId: row.organizationId,
     docType: row.docType as DocType,
@@ -121,5 +126,5 @@ export async function getTemplateForOrgDocType(
     orgContact: row.orgContact,
     logoUrl,
     bodyTemplate: row.bodyTemplate,
-  };
+  });
 }

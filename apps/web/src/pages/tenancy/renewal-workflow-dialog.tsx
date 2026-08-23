@@ -142,7 +142,7 @@ export function RenewalWorkflowDialog({
 
           <section className={`rounded-xl border p-5 ${decision === "renew" && reviewSaved ? "border-emerald-300 bg-emerald-50" : "border-[var(--border)] bg-[var(--page-bg)] opacity-70"}`}>
             <h3 className="flex items-center gap-2 text-lg font-bold text-[var(--navy)]"><CheckCircle2 className="h-5 w-5" />Step 2 · Create renewed tenancy</h3>
-            <p className="mt-1 text-sm text-[var(--text-secondary)]">Available after “Tenant wants to renew” is saved. Entering a fee automatically creates the renewal TA charge.</p>
+            <p className="mt-1 text-sm text-[var(--text-secondary)]">Available after “Tenant wants to renew” is saved. Enter the final SST-inclusive amount to create the renewal TA charge.</p>
             <fieldset disabled={decision !== "renew" || !reviewSaved || renew.isPending} className="mt-4 grid gap-3 disabled:opacity-60">
               <label className="text-sm font-semibold">New tenancy code<Input className="mt-1" value={newCode} onChange={(event) => setNewCode(event.target.value)} /></label>
               <div className="grid grid-cols-2 gap-3">
@@ -151,7 +151,7 @@ export function RenewalWorkflowDialog({
               </div>
               <label className="text-sm font-semibold">New monthly rent (RM)<Input className="mt-1" type="number" min="0.01" step="0.01" value={rent} onChange={(event) => setRent(event.target.value)} /></label>
               <div className="grid grid-cols-2 gap-3">
-                <label className="text-sm font-semibold">TA renewal fee (RM)<Input className="mt-1" type="number" min="0" step="0.01" value={fee} onChange={(event) => setFee(event.target.value)} /></label>
+                <label className="text-sm font-semibold">Renewal TA (WITH SST) amount (RM)<Input className="mt-1" type="number" min="0" step="0.01" value={fee} onChange={(event) => setFee(event.target.value)} /></label>
                 <label className="text-sm font-semibold">TA fee due date<Input className="mt-1" type="date" value={feeDueDate} onChange={(event) => setFeeDueDate(event.target.value)} /></label>
               </div>
               <Button className="mt-1 w-full" onClick={() => renew.mutate()} disabled={!newCode || !newStart || !rent || renew.isPending}>{renew.isPending ? "Creating renewal…" : "Create renewal & TA fee"}</Button>

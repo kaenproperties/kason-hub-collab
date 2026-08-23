@@ -186,7 +186,14 @@ describe("StaffPage", () => {
     // Super Admin: shown.
     (globalThis as { __testRole?: string }).__testRole = "admin";
     mockUseAuth.mockReturnValue({
-      user: { id: "current-user", fullName: "Current User", role: "admin", email: "current@example.com", orgId: "org1" },
+      user: {
+        id: "current-user",
+        fullName: "Current User",
+        role: "admin",
+        email: "current@example.com",
+        orgId: "org1",
+        permissions: ["roles.manage", "user.disable", "user.reset_password"],
+      },
       setAuth: vi.fn(),
       clearAuth: vi.fn(),
       isAuthenticated: true,
@@ -195,10 +202,17 @@ describe("StaffPage", () => {
     await waitFor(() => expect(screen.getByRole("button", { name: /\+ add user/i })).toBeInTheDocument());
   });
 
-  it("does not render an action menu on admin-tier rows (managed out-of-band)", async () => {
-    (globalThis as { __testRole?: string }).__testRole = "manager";
+  it("only renders action menus for users below the current hierarchy level", async () => {
+    (globalThis as { __testRole?: string }).__testRole = "admin";
     mockUseAuth.mockReturnValue({
-      user: { id: "current-user", fullName: "Current User", role: "manager", email: "current@example.com", orgId: "org1" },
+      user: {
+        id: "current-user",
+        fullName: "Current User",
+        role: "admin",
+        email: "current@example.com",
+        orgId: "org1",
+        permissions: ["roles.manage", "user.disable", "user.reset_password"],
+      },
       setAuth: vi.fn(),
       clearAuth: vi.fn(),
       isAuthenticated: true,
@@ -215,7 +229,14 @@ describe("StaffPage", () => {
   it("+ Add user drawer offers the five assignable roles", async () => {
     (globalThis as { __testRole?: string }).__testRole = "admin";
     mockUseAuth.mockReturnValue({
-      user: { id: "current-user", fullName: "Current User", role: "admin", email: "current@example.com", orgId: "org1" },
+      user: {
+        id: "current-user",
+        fullName: "Current User",
+        role: "admin",
+        email: "current@example.com",
+        orgId: "org1",
+        permissions: ["roles.manage", "user.disable", "user.reset_password"],
+      },
       setAuth: vi.fn(),
       clearAuth: vi.fn(),
       isAuthenticated: true,

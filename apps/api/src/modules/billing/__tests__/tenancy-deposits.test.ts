@@ -275,3 +275,32 @@ describe("GATE — flag, owner, renewal, and once-per-tenancy", () => {
     expect(mockChargeCreate).not.toHaveBeenCalled();
   });
 });
+
+describe("draft deposit synchronisation after editing a unit", () => {
+  it("adds a newly entered utilities deposit to the existing unissued draft", async () => {
+    mockTenancyFindFirst.mockResolvedValue(tenancyRow());
+    mockInvoiceFindFirst.mockResolvedValue({ id: "invoice-1", status: "draft" });
+    mockChargeFindMany.mockResolvedValue([
+      { id: "rental-charge", chargeNumber: "DEPRENT-tenancy-1", status: "draft" },
+    ]);
+
+    const out = await createTenancyDepositsForTenancy(CTX, "tenancy-1", NOW);
+
+    expect(out).toMatchObject({
+      created: true,
+      invoiceId: "invoice-1",
+      chargeNumbers: ["DEPRENT-tenancy-1", "DEPUTIL-tenancy-1"],
+    });
+    expect(mockChargeUpdate).toHaveBeenCalledWith(expect.objectContaining({
+      where: { id: "rental-charge", organizationId: "org-1" },
+      data: expect.objectContaining({ amount: "10.00", status: "draft" }),
+    }));
+    expect(mockChargeCreate).toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({
+        chargeNumber: "DEPUTIL-tenancy-1",
+        amount: "2.50",
+        invoiceId: "invoice-1",
+      }),
+    }));
+  });
+});

@@ -105,6 +105,7 @@ export const PERMISSION_GROUPS = [
 const allCodes = PERMISSION_GROUPS.flatMap((g) => g.items.map((i) => i[0]));
 const FINANCE_ONLY = new Set<PermissionCode>(["bank.import", "bank.manage_accounts", "bank.export"]);
 const SENIOR_FINANCE_ONLY = new Set<PermissionCode>(["claim.approve", "claim.reimburse"]);
+const DIRECTOR_ONLY = new Set<PermissionCode>(["owner_report.final_approve"]);
 const SUPER_ADMIN_ONLY = new Set<PermissionCode>(["settings.manage", "important_record.delete"]);
 const OPERATIONS: PermissionCode[] = ["portfolio.view","portfolio.create","portfolio.edit","party.view","party.create","party.edit","tenancy.view","tenancy.create","tenancy.edit","tenancy.move","tenancy.renew","agreement.view","agreement.generate","agreement.edit","agreement.download","billing.view","billing.charge.edit","billing.save","billing.bill","billing.document_manage","claim.create","owner_report.view","owner_report.download","bank.read","bank.categorize","bank.allocate_credit","bank.allocate_debit","bank.internal_transfer","accounting.view","settings.view"];
 // Managers can run the full department except final owner-payout approval.
@@ -118,6 +119,7 @@ const DEFAULTS: Record<string, ReadonlySet<PermissionCode>> = {
 export function roleHasPermission(role: string, code: PermissionCode): boolean { return DEFAULTS[role]?.has(code) ?? false; }
 export function permissionCanBeGrantedToRole(role: string, code: PermissionCode): boolean {
   if (SUPER_ADMIN_ONLY.has(code)) return role === "admin";
+  if (DIRECTOR_ONLY.has(code)) return role === "admin" || role === "director";
   if (FINANCE_ONLY.has(code)) return role === "admin" || role === "accountant";
   if (SENIOR_FINANCE_ONLY.has(code)) return role === "admin" || role === "accountant" || role === "director";
   return true;
@@ -125,4 +127,11 @@ export function permissionCanBeGrantedToRole(role: string, code: PermissionCode)
 export function effectivePermission(role: string, overrides: PermissionOverrides, code: PermissionCode): boolean {
   if (!permissionCanBeGrantedToRole(role, code)) return false;
   return overrides[code] ?? roleHasPermission(role, code);
+}
+
+const ROLE_TIER: Record<string, number> = { admin: 5, director: 4, manager: 3, accountant: 3, editor: 2, viewer: 1 };
+export function canManageRole(actorRole: string | undefined, targetRole: string | undefined): boolean {
+  const actorTier = actorRole ? ROLE_TIER[actorRole] : undefined;
+  const targetTier = targetRole ? ROLE_TIER[targetRole] : undefined;
+  return Number.isFinite(actorTier) && Number.isFinite(targetTier) && (actorTier as number) > (targetTier as number);
 }

@@ -1,5 +1,6 @@
 import type { LucideIcon } from "lucide-react";
 import { isPhase2FlagEnabled } from "@/lib/feature-flags";
+import type { PermissionCode } from "@/lib/permissions";
 import {
   BarChart3,
   BellDot,
@@ -40,6 +41,8 @@ export type NavItem = {
   icon: LucideIcon;
   minRole?: MinRole;
   workspace?: NavWorkspace;
+  /** Exact capability required once the authenticated session has permissions. */
+  permission?: PermissionCode;
 };
 
 export type NavSection = {
@@ -66,6 +69,11 @@ export function canSeeNavItem(role: string | undefined, item: NavItem): boolean 
  * everything else falls back to the rank gate (canSeeNavItem).
  */
 export function canSeeNavItemFor(role: string | undefined, item: NavItem, permissions?: readonly string[]): boolean {
+  // The effective permission list already includes role defaults plus per-user
+  // grants and blocks. Permission-bound items fail closed while a stale local
+  // session is waiting for /auth/me; otherwise a removed permission could
+  // remain visible through the old role fallback until the refresh completes.
+  if (item.permission) return permissions?.includes(item.permission) ?? false;
   if (item.href === "/accounting/profitability" && permissions?.includes("profit.view")) return true;
   if (role === "accountant") return item.workspace === "accounting" || item.workspace === "neutral";
   // Operations Admin participates in bank categorisation but does not gain the
@@ -97,11 +105,11 @@ export const navSections: NavSection[] = [
   {
     label: "Portfolio",
     items: [
-      { title: "Inventory",  href: "/inventory",            icon: Building2 },
+      { title: "Inventory",  href: "/inventory", icon: Building2, permission: "portfolio.view" },
       // Inventory Settings is now a section inside /settings (left-rail).
-      { title: "Tenants & Owners", href: "/parties", icon: Users },
-      { title: "Tenancy Agreements", href: "/tenancy/tenancies", icon: FileSignature },
-      { title: "Management Agreements", href: "/portfolio/property-management-agreements", icon: FileText },
+      { title: "Tenants & Owners", href: "/parties", icon: Users, permission: "party.view" },
+      { title: "Tenancy Agreements", href: "/tenancy/tenancies", icon: FileSignature, permission: "tenancy.view" },
+      { title: "Management Agreements", href: "/portfolio/property-management-agreements", icon: FileText, permission: "agreement.view" },
     ],
   },
   // Phase-2 Operations — Tasks board (M7) + Unit Analytics (Spec 2), placed
@@ -138,6 +146,7 @@ export const navSections: NavSection[] = [
                     href: "/billing/tenant-owner-billing",
                     icon: Table2,
                     minRole: "editor" as const,
+                    permission: "billing.view" as const,
                   },
                 ]
               : []),
@@ -148,6 +157,7 @@ export const navSections: NavSection[] = [
                     href: "/billing/draft-approvals",
                     icon: FileCheck,
                     minRole: "editor" as const,
+                    permission: "billing.view" as const,
                   },
                 ]
               : []),
@@ -159,6 +169,7 @@ export const navSections: NavSection[] = [
                     icon: FileText,
                     minRole: "manager" as const,
                     workspace: "accounting" as const,
+                    permission: "accounting.view" as const,
                   },
                 ]
               : []),
@@ -183,15 +194,15 @@ export const navSections: NavSection[] = [
           items: [
             ...(isPhase2FlagEnabled("ENABLE_PHASE2_BILLING_DOCS")
               ? [
-                  { title: "Bank Reconciliation", href: "/accounting/bank-reconciliation", icon: Landmark, minRole: "editor" as const, workspace: "accounting" as const },
-                  { title: "Invoices", href: "/accounting/invoices", icon: FileText, minRole: "manager" as const, workspace: "accounting" as const },
-                  { title: "Receipts", href: "/accounting/receipts", icon: ReceiptText, minRole: "manager" as const, workspace: "accounting" as const },
-                  { title: "Employee Claims", href: "/accounting/employee-expense-claims", icon: ClipboardList, minRole: "manager" as const, workspace: "accounting" as const },
+                  { title: "Bank Reconciliation", href: "/accounting/bank-reconciliation", icon: Landmark, minRole: "editor" as const, workspace: "accounting" as const, permission: "bank.read" as const },
+                  { title: "Invoices", href: "/accounting/invoices", icon: FileText, minRole: "manager" as const, workspace: "accounting" as const, permission: "accounting.view" as const },
+                  { title: "Receipts", href: "/accounting/receipts", icon: ReceiptText, minRole: "manager" as const, workspace: "accounting" as const, permission: "accounting.view" as const },
+                  { title: "Employee Claims", href: "/accounting/employee-expense-claims", icon: ClipboardList, minRole: "manager" as const, workspace: "accounting" as const, permission: "claim.create" as const },
                   ...(isPhase2FlagEnabled("ENABLE_PHASE2_OWNER_BILLING")
-                    ? [{ title: "Owner Ledger", href: "/tenancy/owner-ledger", icon: BookOpen, minRole: "manager" as const, workspace: "accounting" as const }]
+                    ? [{ title: "Owner Ledger", href: "/tenancy/owner-ledger", icon: BookOpen, minRole: "manager" as const, workspace: "accounting" as const, permission: "owner_report.view" as const }]
                     : []),
-                  { title: "Owner & Tenant Profitability", href: "/accounting/profitability", icon: TrendingUp, minRole: "admin" as const, workspace: "accounting" as const },
-                  { title: "Month-End Control", href: "/accounting/month-end-control", icon: CalendarCheck2, minRole: "admin" as const, workspace: "accounting" as const },
+                  { title: "Owner & Tenant Profitability", href: "/accounting/profitability", icon: TrendingUp, minRole: "admin" as const, workspace: "accounting" as const, permission: "profit.view" as const },
+                  { title: "Month-End Control", href: "/accounting/month-end-control", icon: CalendarCheck2, minRole: "admin" as const, workspace: "accounting" as const, permission: "accounting.view" as const },
                 ]
               : [
                   ...(isPhase2FlagEnabled("ENABLE_PHASE2_OWNER_BILLING")
@@ -205,7 +216,7 @@ export const navSections: NavSection[] = [
   {
     label: "Audit",
     items: [
-      { title: "Audit", href: "/audit", icon: ShieldCheck, minRole: "manager" },
+      { title: "Audit", href: "/audit", icon: ShieldCheck, minRole: "manager", permission: "audit.view" },
     ],
   },
   {
@@ -214,8 +225,8 @@ export const navSections: NavSection[] = [
     // routes stay intact so existing bookmarks and data flows are unaffected.
     label: "Settings",
     items: [
-      { title: "Roles", href: "/organization/staff", icon: Users, workspace: "neutral" },
-      { title: "Settings", href: "/settings", icon: SlidersHorizontal, workspace: "neutral" },
+      { title: "Roles", href: "/organization/staff", icon: Users, workspace: "neutral", permission: "roles.manage" },
+      { title: "Settings", href: "/settings", icon: SlidersHorizontal, workspace: "neutral", permission: "settings.view" },
     ],
   },
   // Operations section relocated above Tenancy (Tasks + Unit Analytics).

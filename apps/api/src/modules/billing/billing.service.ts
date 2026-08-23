@@ -76,6 +76,66 @@ function monthStartUtc(d: Date): Date {
   return new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), 1));
 }
 
+const isAgreementFeeType = (chargeType: string) =>
+  chargeType === "tenancy_agreement_fee" || chargeType === "renewal_fee";
+
+class AgreementFeePairPostError extends Error {
+  readonly code = "TA_TAX_PAIR_POST_REQUIRES_COMPLETE_DRAFT_PAIR";
+}
+
+async function agreementFeePostMembersTx(
+  tx: Prisma.TransactionClient,
+  organizationId: string,
+  requested: {
+    id: string;
+    chargeNumber: string;
+    chargeType: string;
+    parentChargeId: string | null;
+    sstRate: { toString(): string } | null;
+  },
+) {
+  const requestedIsTaxChild = requested.parentChargeId !== null && requested.chargeNumber.endsWith("-SST");
+  const rootId = requestedIsTaxChild ? requested.parentChargeId! : requested.id;
+  const members = await tx.charge.findMany({
+    where: {
+      organizationId,
+      OR: [{ id: rootId }, { parentChargeId: rootId }],
+    },
+    select: {
+      id: true,
+      chargeNumber: true,
+      chargeType: true,
+      status: true,
+      parentChargeId: true,
+      invoiceId: true,
+      sstRate: true,
+    },
+  });
+  const parent = members.find((member) => member.id === rootId);
+  if (!parent || !isAgreementFeeType(parent.chargeType) || parent.parentChargeId !== null) {
+    throw new AgreementFeePairPostError("TA_TAX_PAIR_POST_REQUIRES_COMPLETE_DRAFT_PAIR");
+  }
+  const children = members.filter((member) =>
+    member.parentChargeId === parent.id
+    && member.chargeNumber === `${parent.chargeNumber}-SST`
+    && member.chargeType === parent.chargeType,
+  );
+  const parentRate = parent.sstRate === null ? Number.NaN : Number(parent.sstRate.toString());
+  if (children.length === 0 && parentRate === 0 && !requestedIsTaxChild) return [parent];
+  if (
+    children.length !== 1
+    || parentRate !== 8
+    || Number(children[0]!.sstRate?.toString() ?? "NaN") !== 0
+    || parent.invoiceId === null
+    || children[0]!.invoiceId !== parent.invoiceId
+    || parent.status !== "draft"
+    || children[0]!.status !== "draft"
+  ) {
+    throw new AgreementFeePairPostError("TA_TAX_PAIR_POST_REQUIRES_COMPLETE_DRAFT_PAIR");
+  }
+  return [parent, children[0]!];
+}
+
 /** Month-scoped header metrics for the charges v2 page (spec §3.1). */
 export async function getChargesSummaryService(session: BillingSession, input: { month: string }) {
   const { monthStart, monthEnd } = monthWindow(input.month);
@@ -421,30 +481,52 @@ export async function postChargeService(
         scope: { kind: "listing", listingId: existing.unitId },
         asOf: existing.billingMonth ?? monthStartUtc(existing.dueDate),
       });
-      await tx.charge.update({
-        where: { id: input.chargeId },
-        data: { status: "posted", postedAt: new Date() },
-      });
-      await tx.chargeEvent.create({
-        data: {
-          organizationId: session.orgId,
-          chargeId: input.chargeId,
-          eventType: "charge_posted",
-          eventAt: new Date(),
-          actorUserId: session.userId,
-          payloadJson: {
-            previousStatus: existing.status,
-            nextStatus: "posted",
+      const postMembers = isAgreementFeeType(existing.chargeType)
+        ? await agreementFeePostMembersTx(tx, session.orgId, existing)
+        : [existing];
+      if (postMembers.length === 1) {
+        await tx.charge.update({
+          where: { id: input.chargeId },
+          data: { status: "posted", postedAt: new Date() },
+        });
+      } else {
+        const posted = await tx.charge.updateMany({
+          where: {
+            organizationId: session.orgId,
+            id: { in: postMembers.map((member) => member.id) },
+            status: "draft",
           },
-        },
-      });
+          data: { status: "posted", postedAt: new Date() },
+        });
+        if (posted.count !== postMembers.length) {
+          throw new AgreementFeePairPostError("TA_TAX_PAIR_POST_REQUIRES_COMPLETE_DRAFT_PAIR");
+        }
+      }
+      for (const member of postMembers) {
+        await tx.chargeEvent.create({
+          data: {
+            organizationId: session.orgId,
+            chargeId: member.id,
+            eventType: "charge_posted",
+            eventAt: new Date(),
+            actorUserId: session.userId,
+            payloadJson: {
+              previousStatus: member.status,
+              nextStatus: "posted",
+            },
+          },
+        });
+      }
       if (isPhase2FlagEnabled("ENABLE_PHASE2_BILLING_DOCS")) {
-        await issueDocumentsForChargesTx(tx, [input.chargeId], session.userId);
+        await issueDocumentsForChargesTx(tx, postMembers.map((member) => member.id), session.userId);
       }
     });
   } catch (err) {
     if (err instanceof OwnerBillingNotReadyError) {
       return { ok: false as const, status: err.status, error: err.code };
+    }
+    if (err instanceof AgreementFeePairPostError) {
+      return { ok: false as const, status: 409, error: err.code };
     }
     throw err;
   }

@@ -1,10 +1,10 @@
 import { describe, it, expect } from "vitest";
 import { OWNER_LEDGER_CATEGORIES } from "../schemas/owner-ledger";
-import { SEED_CHARGE_CATEGORIES, SEED_DOCUMENT_SERIES } from "../constants/seed-categories";
+import { CLEANING_SST_RATE, SEED_CHARGE_CATEGORIES, SEED_DOCUMENT_SERIES, TENANCY_AGREEMENT_SST_RATE } from "../constants/seed-categories";
 
 describe("SEED_DOCUMENT_SERIES", () => {
-  it("seeds exactly IVTEN, IVOWN, RB, DEP, CN, DN, RN, RCPT, EXP, EB, OST, REM (DN added redesign P0; EXP added redesign P3 internal Expense doc; EB added redesign P4 tenant Expense Bill; OST/REM added redesign P1 owner-doc display numbering)", () => {
-    expect(SEED_DOCUMENT_SERIES.map((s) => s.code)).toEqual(["IVTEN", "IVOWN", "RB", "DEP", "CN", "DN", "RN", "RCPT", "EXP", "EB", "OST", "REM", "OEA", "DEPO"]);
+  it("seeds the complete supported accounting-document series", () => {
+    expect(SEED_DOCUMENT_SERIES.map((s) => s.code)).toEqual(["IVTEN", "IVOWN", "RB", "DEP", "CN", "DN", "RN", "RCPT", "EXP", "EB", "OST", "REM", "OEA", "DEPO", "PI"]);
   });
 });
 
@@ -53,11 +53,22 @@ describe("SEED_CHARGE_CATEGORIES", () => {
     }
   });
 
-  it("management_fee carries SST 8 + ledger management_fee; cleaning_owner maps to ledger cleaning", () => {
+  it("management and both Cleaning categories carry 8% SST; WiFi pass-through stays 0%", () => {
     const mgmt = SEED_CHARGE_CATEGORIES.find((c) => c.code === "management_fee");
     expect(mgmt).toMatchObject({ family: "owner_income", defaultSstRate: "8", ledgerCategory: "management_fee", isSystem: true });
-    const cleaning = SEED_CHARGE_CATEGORIES.find((c) => c.code === "cleaning_owner");
-    expect(cleaning).toMatchObject({ family: "owner_income", ledgerCategory: "cleaning", isSystem: true });
+    const byCode = new Map(SEED_CHARGE_CATEGORIES.map((category) => [category.code, category]));
+    expect(CLEANING_SST_RATE).toBe("8");
+    expect(byCode.get("cleaning_tenant")?.defaultSstRate).toBe("8");
+    expect(byCode.get("cleaning_owner")).toMatchObject({ family: "owner_income", defaultSstRate: "8", ledgerCategory: "cleaning", isSystem: true });
+    expect(byCode.get("wifi_tenant")?.defaultSstRate).toBe("0");
+    expect(byCode.get("wifi_owner")?.defaultSstRate).toBe("0");
+  });
+
+  it("uses the statutory rate to split SST-inclusive initial and renewal TA amounts", () => {
+    const byCode = new Map(SEED_CHARGE_CATEGORIES.map((category) => [category.code, category]));
+    expect(TENANCY_AGREEMENT_SST_RATE).toBe("8");
+    expect(byCode.get("tenancy_agreement_fee")?.defaultSstRate).toBe("8");
+    expect(byCode.get("renewal_fee")?.defaultSstRate).toBe("8");
   });
 
   it("utility ledger mappings use the REAL enum spellings (utilities_tnb/water/wifi/indah_water)", () => {

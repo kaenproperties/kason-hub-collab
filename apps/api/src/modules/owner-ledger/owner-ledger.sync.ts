@@ -774,7 +774,7 @@ export async function syncMonthService(
         amount: collectedString(c.amount, c.outstandingAmount, rentFamilyNetAdj.get(c.id) ?? 0),
         sstAmount: null,
         ...syncDefaults(commissionCategory),
-        description: "First month rent retained by KAEN as letting commission",
+        description: "First month rental retained by KAEN as Admin Fee",
         paymentStatus: chargeStatusToPaymentStatus(c.status),
         // NON-NEGOTIABLE: the owner never receives this rent. Hardcoded rather than
         // inherited so a later edit to the category defaults cannot start paying it out.

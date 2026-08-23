@@ -7,6 +7,13 @@ export type SessionPayload = {
   role: string;
   userType?: string;
   partyId?: string;
+  /**
+   * Server-resolved permission state. These fields are never minted into the
+   * JWT; authMiddleware adds them after reloading the current operator record
+   * from the database on every request.
+   */
+  permissionOverrides?: Record<string, boolean>;
+  permissionsResolved?: boolean;
   iat?: number;
   absoluteExp?: number;
 };

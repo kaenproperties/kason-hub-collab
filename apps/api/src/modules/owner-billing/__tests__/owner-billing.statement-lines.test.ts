@@ -143,7 +143,22 @@ function feeConfig(sstPercent: string): DbManagementFeeConfig {
 
 /** A resolved owner unit (only unitId + propertyId matter for the SST-rate map). */
 function ownerUnit(unitId: string): OwnerUnitForMonth {
-  return { unitId, apartmentId: `apt-${unitId}`, unitCode: "A-1", propertyId: "prop-1", occupied: true, rentBase: "2000", rentBaseForMonth: "2000" };
+  return {
+    unitId,
+    apartmentId: `apt-${unitId}`,
+    unitCode: "A-1",
+    propertyId: "prop-1",
+    occupied: true,
+    rentBase: "2000",
+    rentBaseForMonth: "2000",
+    managementFeeRentComponents: [{
+      billedRent: "2000",
+      fullMonthRent: "2000",
+      numberOfPax: null,
+      isCommissionMonth: false,
+      fullyCollected: true,
+    }],
+  };
 }
 
 // A statement Invoice with line Charges. `status` defaults to "draft" so adds /

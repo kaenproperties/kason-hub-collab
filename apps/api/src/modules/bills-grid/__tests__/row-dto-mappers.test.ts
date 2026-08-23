@@ -7,7 +7,7 @@
 // get a REAL Decimal instance without instantiating a Prisma client.
 import { describe, expect, it } from "vitest";
 import { Prisma } from "@prisma/client";
-import { toAttachmentBriefs, toBearerConfigDto, toEntryDto, toExpensesDto, toGridRowDto } from "../service";
+import { toAttachmentBriefs, toBearerConfigDto, toEntryDto, toExpensesDto, toGridRowDto, toPendingTenancyChargeDto, toRecurringDto } from "../service";
 
 describe("toEntryDto", () => {
   it("returns null for a null entry (never-materialised apartment-month)", () => {
@@ -106,16 +106,35 @@ describe("toExpensesDto", () => {
       { bearer: "owner", amount: new Prisma.Decimal("15.50"), withSST: false },
     ]);
     expect(dto).toEqual({
-      tenant: { total: "80.00", withSstTotal: "50.00", count: 2, nonSstCount: 1, withSstCount: 1, nonSstActionRequiredCount: 1, withSstActionRequiredCount: 1, nonSstGrossMargin: "30.00", withSstGrossMargin: "50.00" },
-      owner: { total: "35.50", withSstTotal: "20.00", count: 2, nonSstCount: 1, withSstCount: 1, nonSstActionRequiredCount: 1, withSstActionRequiredCount: 1, nonSstGrossMargin: "15.50", withSstGrossMargin: "20.00" },
+      tenant: { total: "80.00", withSstTotal: "50.00", sstTotal: "4.00", count: 2, items: [], nonSstCount: 1, withSstCount: 1, nonSstActionRequiredCount: 1, withSstActionRequiredCount: 1, nonSstGrossMargin: "30.00", withSstGrossMargin: "50.00" },
+      owner: { total: "35.50", withSstTotal: "20.00", sstTotal: "1.60", count: 2, items: [], nonSstCount: 1, withSstCount: 1, nonSstActionRequiredCount: 1, withSstActionRequiredCount: 1, nonSstGrossMargin: "15.50", withSstGrossMargin: "20.00" },
     });
   });
 
   it("an empty array maps to all '0.00' totals", () => {
     expect(toExpensesDto([])).toEqual({
-      tenant: { total: "0.00", withSstTotal: "0.00", count: 0, nonSstCount: 0, withSstCount: 0, nonSstActionRequiredCount: 0, withSstActionRequiredCount: 0, nonSstGrossMargin: "0.00", withSstGrossMargin: "0.00" },
-      owner: { total: "0.00", withSstTotal: "0.00", count: 0, nonSstCount: 0, withSstCount: 0, nonSstActionRequiredCount: 0, withSstActionRequiredCount: 0, nonSstGrossMargin: "0.00", withSstGrossMargin: "0.00" },
+      tenant: { total: "0.00", withSstTotal: "0.00", sstTotal: "0.00", count: 0, items: [], nonSstCount: 0, withSstCount: 0, nonSstActionRequiredCount: 0, withSstActionRequiredCount: 0, nonSstGrossMargin: "0.00", withSstGrossMargin: "0.00" },
+      owner: { total: "0.00", withSstTotal: "0.00", sstTotal: "0.00", count: 0, items: [], nonSstCount: 0, withSstCount: 0, nonSstActionRequiredCount: 0, withSstActionRequiredCount: 0, nonSstGrossMargin: "0.00", withSstGrossMargin: "0.00" },
     });
+  });
+
+  it("itemizes named expenses and sums SST after rounding each line to cents", () => {
+    const dto = toExpensesDto([
+      { id: "expense-a", description: "Key copy", bearer: "tenant", amount: new Prisma.Decimal("0.07"), withSST: true },
+      { id: "expense-b", description: "Access card", bearer: "tenant", amount: new Prisma.Decimal("0.07"), withSST: true },
+      { id: "expense-c", description: "Owner repair", bearer: "owner", amount: new Prisma.Decimal("10.00"), withSST: false },
+    ]);
+
+    // RM0.07 × 8% rounds to RM0.01 per invoice line. Summing the two rounded
+    // lines yields RM0.02 (different from taxing their RM0.14 aggregate).
+    expect(dto.tenant.sstTotal).toBe("0.02");
+    expect(dto.tenant.items).toEqual([
+      { id: "expense-a", description: "Key copy", amount: "0.07", sst: "0.01", total: "0.08", withSST: true },
+      { id: "expense-b", description: "Access card", amount: "0.07", sst: "0.01", total: "0.08", withSST: true },
+    ]);
+    expect(dto.owner.items).toEqual([
+      { id: "expense-c", description: "Owner repair", amount: "10.00", sst: "0.00", total: "10.00", withSST: false },
+    ]);
   });
 
   it("counts cost actions independently per SST cell and clears completed Paid costs including RM0", () => {
@@ -135,6 +154,165 @@ describe("toExpensesDto", () => {
     ]);
     expect(dto.tenant.nonSstGrossMargin).toBe("20.00");
     expect(dto.tenant.withSstGrossMargin).toBe("-30.00");
+  });
+});
+
+describe("toRecurringDto", () => {
+  it("always emits item arrays while accepting legacy totals that do not provide them", () => {
+    expect(toRecurringDto({ ownerTotal: 20, ownerCount: 1, tenantTotal: 0, tenantCount: 0 })).toEqual({
+      owner: { total: "20.00", count: 1, items: [] },
+      tenant: { total: "0.00", count: 0, items: [] },
+    });
+
+    expect(toRecurringDto({
+      ownerTotal: 80,
+      ownerCount: 1,
+      ownerItems: [{ id: "definition-1", name: "Gardener", amount: "80.00" }],
+      tenantTotal: 30,
+      tenantCount: 1,
+      tenantItems: [{ id: "line-2", name: "Laundry", amount: "30.00" }],
+    })).toEqual({
+      owner: { total: "80.00", count: 1, items: [{ id: "definition-1", name: "Gardener", amount: "80.00" }] },
+      tenant: { total: "30.00", count: 1, items: [{ id: "line-2", name: "Laundry", amount: "30.00" }] },
+    });
+  });
+});
+
+describe("toPendingTenancyChargeDto", () => {
+  it("maps every supported draft charge kind without changing zero-rated amounts", () => {
+    const cases = [
+      ["rent", "tenant_rental", "rental", "Rental"],
+      ["letting_commission", "tenant_rental", "rental", "Rental"],
+      ["security_deposit", "tenant_deposit", "deposit", "Deposit"],
+      ["utility_deposit", "tenant_deposit", "deposit", "Deposit"],
+      ["tenancy_agreement_fee", "tenant_agreement_fee", "agreement_fee", "TA (WITH SST)"],
+      ["renewal_fee", "tenant_renewal", "renewal_fee", "Renewal TA (WITH SST)"],
+    ] as const;
+
+    for (const [chargeType, invoiceType, kind, fallbackDescription] of cases) {
+      expect(toPendingTenancyChargeDto({
+        id: `charge-${chargeType}`,
+        description: null,
+        chargeType,
+        chargeStatus: "draft",
+        amount: new Prisma.Decimal("0.07"),
+        sstRate: new Prisma.Decimal("0"),
+        invoiceStatus: "draft",
+        invoiceType,
+        payer: "tenant",
+        tenantName: "Ali bin Ahmad",
+      })).toEqual({
+        id: `charge-${chargeType}`,
+        description: fallbackDescription,
+        kind,
+        payer: "tenant",
+        baseAmount: "0.07",
+        sst: "0.00",
+        total: "0.07",
+        tenantName: "Ali bin Ahmad",
+      });
+    }
+  });
+
+  it("includes carpark and arbitrary attached charges because approval posts the whole draft invoice", () => {
+    expect(toPendingTenancyChargeDto({
+      id: "carpark-1",
+      description: null,
+      chargeType: "carpark",
+      chargeStatus: "draft",
+      amount: new Prisma.Decimal("180.00"),
+      sstRate: null,
+      categoryName: "Carpark",
+      categorySstRate: new Prisma.Decimal("0"),
+      invoiceType: "tenant_rental",
+      invoiceStatus: "draft",
+      payer: "tenant",
+      tenantName: "Ali bin Ahmad",
+    })).toEqual({
+      id: "carpark-1",
+      description: "Carpark",
+      kind: "carpark",
+      payer: "tenant",
+      baseAmount: "180.00",
+      sst: "0.00",
+      total: "180.00",
+      tenantName: "Ali bin Ahmad",
+    });
+
+    // Charge type does not need to match the containing invoice type: the canonical
+    // attach flow permits extras and bulk approval posts every attached draft line.
+    expect(toPendingTenancyChargeDto({
+      id: "extra-1",
+      description: null,
+      chargeType: "custom_owner_service",
+      chargeStatus: "draft",
+      amount: new Prisma.Decimal("50.00"),
+      sstRate: null,
+      categoryName: "Owner inspection",
+      categorySstRate: new Prisma.Decimal("8"),
+      invoiceType: "tenant_rental",
+      invoiceStatus: "draft",
+      payer: "owner",
+      tenantName: "Owner Sdn Bhd",
+    })).toEqual({
+      id: "extra-1",
+      description: "Owner inspection",
+      kind: "other",
+      payer: "owner",
+      baseAmount: "50.00",
+      sst: "4.00",
+      total: "54.00",
+      tenantName: "Owner Sdn Bhd",
+    });
+  });
+
+  it("previews an SST-inclusive TA as its backend base plus exact linked SST", () => {
+    expect(toPendingTenancyChargeDto({
+      id: "ta-inclusive",
+      description: "Tenancy agreement fee",
+      chargeType: "tenancy_agreement_fee",
+      chargeStatus: "draft",
+      amount: new Prisma.Decimal("462.96"),
+      sstRate: new Prisma.Decimal("8"),
+      categorySstRate: new Prisma.Decimal("8"),
+      exactSstAmount: new Prisma.Decimal("37.04"),
+      invoiceType: "tenant_agreement_fee",
+      invoiceStatus: "draft",
+      payer: "tenant",
+      tenantName: "Ali bin Ahmad",
+    })).toMatchObject({ description: "TA (WITH SST)", baseAmount: "462.96", sst: "37.04", total: "500.00" });
+
+    expect(toPendingTenancyChargeDto({
+      id: "ta-rate-fallback",
+      description: "Tenancy agreement fee",
+      chargeType: "tenancy_agreement_fee",
+      chargeStatus: "draft",
+      amount: new Prisma.Decimal("462.96"),
+      sstRate: null,
+      categorySstRate: new Prisma.Decimal("8"),
+      invoiceType: "tenant_agreement_fee",
+      invoiceStatus: "draft",
+      payer: "tenant",
+      tenantName: "Ali bin Ahmad",
+    })).toMatchObject({ description: "TA (WITH SST)", baseAmount: "462.96", sst: "37.04", total: "500.00" });
+  });
+
+  it("excludes issued/detached invoices, disallowed invoice types, and non-draft charges", () => {
+    const charge = {
+      id: "charge-1",
+      description: "Monthly rental",
+      chargeType: "rent",
+      chargeStatus: "draft",
+      amount: new Prisma.Decimal("1200"),
+      sstRate: null,
+      invoiceType: "tenant_rental",
+      payer: "tenant" as const,
+      tenantName: null,
+    };
+    expect(toPendingTenancyChargeDto({ ...charge, invoiceStatus: "issued" })).toBeNull();
+    expect(toPendingTenancyChargeDto({ ...charge, invoiceStatus: null })).toBeNull();
+    expect(toPendingTenancyChargeDto({ ...charge, invoiceType: "owner_statement", invoiceStatus: "draft" })).toBeNull();
+    expect(toPendingTenancyChargeDto({ ...charge, chargeStatus: "posted", invoiceStatus: "draft" })).toBeNull();
   });
 });
 
@@ -170,16 +348,14 @@ describe("toExpensesDto — active expense count (R8)", () => {
 });
 
 describe("toBearerConfigDto", () => {
-  // A WHOLE unit is one tenant taking the whole package, so cleaning + WiFi start
-  // TENANT-borne. This is the half that changed: before unit-type defaults, a whole
-  // unit started owner-borne on both and its tenant was silently never billed for
-  // either unless an admin remembered to flip them.
+  // Cleaning and WiFi are owner-only grid costs for every listing mode. Exceptional
+  // tenant recoveries are entered as Tenant Expenses instead of a permanent column.
   it("returns the exact getBearerConfigService defaults when no config row exists — WHOLE", () => {
     expect(toBearerConfigDto(null, "WHOLE")).toEqual({
       tnbPattern: "recharged",
       airPattern: "recharged",
-      cleaningBearer: "tenant",
-      wifiBearer: "tenant",
+      cleaningBearer: "owner",
+      wifiBearer: "owner",
       maintenanceFeeBearer: "owner",
       // 2026-08-17: was "100.00". A never-configured unit must NOT start with a phantom
       // recurring cleaning amount — getOrCreateEntry freezes this seed onto the month's
@@ -232,10 +408,9 @@ describe("toBearerConfigDto", () => {
     }
   });
 
-  // An unrecognised mode must not throw and must not silently take PARTITIONED's
-  // owner-borne defaults (which would leave a tenant unbilled with nothing to notice).
+  // An unrecognised mode must not throw and takes the same owner-only defaults.
   it("falls back to WHOLE for an unresolved listing mode", () => {
-    expect(toBearerConfigDto(null, "").cleaningBearer).toBe("tenant");
+    expect(toBearerConfigDto(null, "").cleaningBearer).toBe("owner");
   });
 
   it("carries the caller's governance overlay through, for EVERY scalar kind", () => {
@@ -356,10 +531,10 @@ describe("toGridRowDto", () => {
   // (db = {}), so `entry: null` (subRowsFor short-circuits before touching
   // prisma) and `priors: []` (priorStripsFor's loop never runs) keep this a
   // TRUE pure-mapper test with zero real DB calls.
-  it("emits propertyName from the apartment's property relation — the Categorize filter needs a display name, not a raw propertyId UUID", async () => {
+  it("emits both the property display name and business short form from the apartment's property relation", async () => {
     const dto = await toGridRowDto(
       "org1",
-      { id: "apt1", unitCode: "A-1-1", propertyId: "prop1", propertyName: "Sunway Vista", listingMode: "WHOLE" },
+      { id: "apt1", unitCode: "A-1-1", propertyId: "prop1", propertyName: "Sunway Vista", propertyCode: "SV", listingMode: "WHOLE" },
       [],
       null,
       null,
@@ -369,11 +544,24 @@ describe("toGridRowDto", () => {
       null,
     );
     expect(dto.propertyName).toBe("Sunway Vista");
+    expect(dto.propertyCode).toBe("SV");
     expect(dto.propertyId).toBe("prop1");
     expect(dto.unitCode).toBe("A-1-1");
     // Task 8: an unsaved (entry: null) row is never invoiced and never paid.
     expect(dto.invoicedAt).toBeNull();
     expect(dto.hasPaidInvoice).toBe(false);
+    expect(dto.pendingTenancyCharges).toEqual([]);
+    expect(dto.billUtilityPlan).toEqual({
+      status: "not_applicable",
+      mode: null,
+      subsidyPerPax: "0.00",
+      subsidyPolicy: null,
+      tnbSubsidyCap: null,
+      tnbSubsidyBreakdown: null,
+      lines: [],
+      blockedTenancyIds: [],
+      errorCode: null,
+    });
   });
 
   // The fix: a unit shows its real rooms + tenant names IMMEDIATELY, before any
@@ -382,7 +570,7 @@ describe("toGridRowDto", () => {
   it("surfaces the apartment's real rooms as sub-rows with tenant names + rate/rental even with no readings saved", async () => {
     const dto = await toGridRowDto(
       "org1",
-      { id: "apt1", unitCode: "A-1-1", propertyId: "prop1", propertyName: "Sunway Vista", listingMode: "PARTITIONED" },
+      { id: "apt1", unitCode: "A-1-1", propertyId: "prop1", propertyName: "Sunway Vista", propertyCode: "SV", listingMode: "PARTITIONED" },
       [
         { listingId: "L1", tenancyId: "T1", partyName: "Ali bin Ahmad", partyPhone: "012-3456789", ratePerKwh: "0.5500", rateConfigured: true, rental: "1800.00", numberOfPax: null },
         { listingId: "L2", tenancyId: null, partyName: null, partyPhone: null, ratePerKwh: "0.6000", rateConfigured: false, rental: null, numberOfPax: null }, // vacant room
@@ -404,7 +592,7 @@ describe("toGridRowDto", () => {
   // Billing contacts: the unit owner's NAME rides on the row (display + search). Owner phone
   // is intentionally not surfaced.
   it("surfaces the owner name on the row when resolved, null otherwise", async () => {
-    const apt = { id: "apt1", unitCode: "A-1-1", propertyId: "prop1", propertyName: "Sunway Vista", listingMode: "PARTITIONED" };
+    const apt = { id: "apt1", unitCode: "A-1-1", propertyId: "prop1", propertyName: "Sunway Vista", propertyCode: "SV", listingMode: "PARTITIONED" };
     const withOwner = await toGridRowDto(
       "org1", apt, [], null, null, null, [], [], null,
       undefined, undefined, undefined, undefined, undefined,
@@ -421,7 +609,7 @@ describe("toGridRowDto", () => {
   it("(Task 5) isWholeUnit is true when apt.listingMode is WHOLE", async () => {
     const dto = await toGridRowDto(
       "org1",
-      { id: "apt1", unitCode: "A-1-1", propertyId: "prop1", propertyName: "Sunway Vista", listingMode: "WHOLE" },
+      { id: "apt1", unitCode: "A-1-1", propertyId: "prop1", propertyName: "Sunway Vista", propertyCode: "SV", listingMode: "WHOLE" },
       [],
       null,
       null,
@@ -436,7 +624,7 @@ describe("toGridRowDto", () => {
   it("(Task 5) isWholeUnit is false when apt.listingMode is PARTITIONED", async () => {
     const dto = await toGridRowDto(
       "org1",
-      { id: "apt1", unitCode: "A-1-1", propertyId: "prop1", propertyName: "Sunway Vista", listingMode: "PARTITIONED" },
+      { id: "apt1", unitCode: "A-1-1", propertyId: "prop1", propertyName: "Sunway Vista", propertyCode: "SV", listingMode: "PARTITIONED" },
       [],
       null,
       null,
@@ -454,7 +642,7 @@ describe("toGridRowDto", () => {
   it("(Task 5) an apartment with zero listings still computes isWholeUnit and yields empty subRows, no crash", async () => {
     const dto = await toGridRowDto(
       "org1",
-      { id: "apt1", unitCode: "A-1-1", propertyId: "prop1", propertyName: "Sunway Vista", listingMode: "WHOLE" },
+      { id: "apt1", unitCode: "A-1-1", propertyId: "prop1", propertyName: "Sunway Vista", propertyCode: "SV", listingMode: "WHOLE" },
       [], // zero rooms
       null,
       null,
@@ -473,7 +661,7 @@ describe("toGridRowDto", () => {
   it("(Task 5) an orphan-reading sub-row defaults ratePerKwh/rateConfigured/rental (no batched room to draw from)", async () => {
     const dto = await toGridRowDto(
       "org1",
-      { id: "apt1", unitCode: "A-1-1", propertyId: "prop1", propertyName: "Sunway Vista", listingMode: "PARTITIONED" },
+      { id: "apt1", unitCode: "A-1-1", propertyId: "prop1", propertyName: "Sunway Vista", propertyCode: "SV", listingMode: "PARTITIONED" },
       [], // no current rooms — the reading below is an orphan
       {
         id: "entry1",
@@ -516,7 +704,7 @@ describe("toGridRowDto", () => {
   it("(pax-per-room) surfaces each room's numberOfPax on its sub-row — occupied → tenancy pax, vacant → null", async () => {
     const dto = await toGridRowDto(
       "org1",
-      { id: "apt1", unitCode: "A-1-1", propertyId: "prop1", propertyName: "Sunway Vista", listingMode: "PARTITIONED" },
+      { id: "apt1", unitCode: "A-1-1", propertyId: "prop1", propertyName: "Sunway Vista", propertyCode: "SV", listingMode: "PARTITIONED" },
       [
         { listingId: "L1", tenancyId: "T1", partyName: "Ali bin Ahmad", partyPhone: "011-2223333", ratePerKwh: "0.5500", rateConfigured: true, rental: "1800.00", numberOfPax: 3 },
         { listingId: "L2", tenancyId: null, partyName: null, partyPhone: null, ratePerKwh: "0.6000", rateConfigured: false, rental: null, numberOfPax: null }, // vacant room
@@ -542,7 +730,7 @@ describe("toGridRowDto", () => {
   it("(pax-per-room, Finding 1) a room whose reading snapshots a DIFFERENT tenancy reports numberOfPax null, not the active tenancy's pax", async () => {
     const dto = await toGridRowDto(
       "org1",
-      { id: "apt1", unitCode: "A-1-1", propertyId: "prop1", propertyName: "PV", listingMode: "PARTITIONED" },
+      { id: "apt1", unitCode: "A-1-1", propertyId: "prop1", propertyName: "PV", propertyCode: "PV", listingMode: "PARTITIONED" },
       [{ listingId: "L1", tenancyId: "T-ACTIVE", partyName: "New Tenant", partyPhone: null, ratePerKwh: "0.6000", rateConfigured: false, rental: null, numberOfPax: 5 }],
       {
         id: "entry1", cleaning: null, tnbTotalRaw: null, airSelangorRaw: null, wifi: null, maintenanceFee: null,

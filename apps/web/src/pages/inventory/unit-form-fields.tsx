@@ -34,12 +34,17 @@ import { isPhase2FlagEnabled } from "@/lib/feature-flags";
 import { Button } from "@/components/ui/button";
 import { CreateOwnerDialog } from "@/pages/parties/owners-action-dialogs";
 import { AgentFormDrawer } from "@/pages/parties/agent-form-drawer";
+import { usePermission } from "@/components/permission-gate";
 
 /** Occupancy errors plus the two apartment-scoped fields the create modal owns.
  *  Structurally a superset of OccupancyFieldErrors, so it still passes straight
  *  through to <OccupancyFields errors=…>. */
 export type UnitFormErrors = OccupancyFieldErrors &
-  Partial<{ ownerPartyId: string; partitionBillingMode: string }>;
+  Partial<{
+    ownerPartyId: string;
+    partitionBillingMode: string;
+    tnbSubsidyCapMonthly: string;
+  }>;
 
 export type UnitFormState = {
   unitCode: string;
@@ -102,6 +107,9 @@ export type UnitFormState = {
   // apartment inherits that apartment's mode instead of tripping the server's
   // 409 APARTMENT_BILLING_MODE_CONFLICT.
   partitionBillingMode: string;
+  // Optional per-apartment monthly TNB owner subsidy cap in RM. Blank defers
+  // to the apartment's selected/current legacy partition billing mode.
+  tnbSubsidyCapMonthly: string;
   // Apartment-scoped, EDIT-only. Whether KAEN is currently the billing agent
   // for this apartment. Create default is `true` (managed); the toggle only
   // ever renders on the Edit path (showUnderManagement).
@@ -205,6 +213,7 @@ export function blankUnitFormState(): UnitFormState {
     ownerName: "",
     ownerPhone: null,
     partitionBillingMode: "",
+    tnbSubsidyCapMonthly: "",
     underManagement: true,
     tenantPartyId: null,
     tenantName: "",
@@ -934,6 +943,7 @@ export function UnitFormBody({
   showSectionNav?: boolean;
   errors?: UnitFormErrors;
 }) {
+  const canCreateParty = usePermission("party.create");
   const set = (patch: Partial<UnitFormState>) => setState({ ...state, ...patch });
 
   // Fetch active room types so the Unit Type dropdown reflects what super-admin
@@ -1024,11 +1034,11 @@ export function UnitFormBody({
   // is always false, so all of these are present.
   const navItems = useMemo<SectionNavItem[]>(() => {
     const items: SectionNavItem[] = [{ id: "unitsec-basic", label: "Basics" }];
+    if (showOwner || showBillingModel || showUnderManagement)
+      items.push({ id: "unitsec-owner", label: "Ownership" });
     if (!hidePartitionOrphanFields) items.push({ id: "unitsec-listing", label: "Listing" });
     items.push({ id: "unitsec-assign", label: "Assignment" });
     if (!hidePartitionOrphanFields) items.push({ id: "unitsec-visibility", label: "Visibility" });
-    if (showOwner || showBillingModel || showUnderManagement)
-      items.push({ id: "unitsec-owner", label: "Ownership" });
     if (!hidePerRoomFields) items.push({ id: "unitsec-deposits", label: "Deposits" });
     items.push({ id: "unitsec-desc", label: "Description" });
     return items;
@@ -1195,6 +1205,147 @@ export function UnitFormBody({
           </FormField>
         )}
       </FormSection>
+
+      {/* People are intentionally ordered Owner → Tenant → Agent on Create Unit.
+          The owner is the apartment-level commercial principal, the tenant is
+          assigned next, and the sourcing/in-charge agent follows after that.
+          Keeping this as real DOM order also makes keyboard Tab navigation match
+          the visible workflow instead of merely reordering the cards with CSS. */}
+      {(showOwner || showBillingModel || showUnderManagement) && (
+      <FormSection
+        title="Ownership & billing"
+        tone="gold"
+        id="unitsec-owner"
+        icon={<KeyRound className="h-3.5 w-3.5" />}
+      >
+        {/* Owner — apartment-scoped. Editable on create (the payload carries it
+            and an occupied create is refused without one); read-only on the
+            per-room edit dialog, where owner is re-pointed only through the
+            audited fan-out in "Edit shared details". */}
+        {showOwner && (
+          <FormField
+            label="Owner"
+            action={
+              canCreateParty && ownerEditable && !state.ownerPartyId ? (
+                <CreateOwnerDialog
+                  onCreated={(owner) =>
+                    set({
+                      ownerPartyId: owner.id,
+                      ownerName: owner.displayName,
+                      ownerPhone: owner.primaryPhone ?? null,
+                    })
+                  }
+                  trigger={
+                    <Button type="button" variant="outline" size="sm">
+                      <Plus className="h-4 w-4" />
+                      Create Owner
+                    </Button>
+                  }
+                />
+              ) : null
+            }
+            hint={
+              ownerEditable
+                ? "Owner of the whole apartment — applies to every room. Required before a room may be marked Occupied. Drives management fee and owner statements."
+                : 'Set for the whole unit in "Edit shared details". Drives management fee and owner statements.'
+            }
+          >
+            {ownerEditable ? (
+              state.ownerPartyId ? (
+                <OwnerConfirmCard
+                  ownerId={state.ownerPartyId}
+                  ownerName={state.ownerName}
+                  ownerPhone={state.ownerPhone}
+                  onChange={() => set({ ownerPartyId: null, ownerName: "", ownerPhone: null })}
+                />
+              ) : (
+                <OwnerSelect
+                  value={state.ownerPartyId}
+                  displayName={state.ownerName}
+                  onSelect={(o) =>
+                    set({
+                      ownerPartyId: o.id,
+                      ownerName: o.displayName,
+                      ownerPhone: o.formattedPhone ?? o.primaryPhone,
+                    })
+                  }
+                  onClear={() => set({ ownerPartyId: null, ownerName: "", ownerPhone: null })}
+                />
+              )
+            ) : state.ownerPartyId ? (
+              <div className="rounded-lg border border-border/50 bg-background/40 px-3 py-2.5">
+                <p className="text-sm font-medium text-foreground">{state.ownerName}</p>
+                {state.ownerPhone && (
+                  <p className="mt-0.5 text-xs font-mono text-muted-foreground">{state.ownerPhone}</p>
+                )}
+              </div>
+            ) : (
+              <p className="text-sm italic text-muted-foreground">
+                No owner assigned — set it in "Edit shared details".
+              </p>
+            )}
+            <FieldError text={errors?.ownerPartyId} />
+          </FormField>
+        )}
+        {/* Billing model — apartment-scoped and money-adjacent. The blank option
+            is the default: it omits the key from the payload so an added room
+            inherits the apartment's existing mode rather than colliding with it
+            (409 APARTMENT_BILLING_MODE_CONFLICT). */}
+        {showBillingModel && (
+          <>
+            <FormField
+              label="Billing model"
+              hint="Applies to the whole apartment. An entered TNB cap takes priority for residual TNB. With a blank cap, Subsidy uses legacy per-pax and No subsidy provides none."
+            >
+              <SelectInput
+                value={state.partitionBillingMode}
+                onChange={(e) => set({ partitionBillingMode: e.target.value })}
+              >
+                <option value="">Use the apartment&apos;s current setting</option>
+                <option value="NO_SUBSIDY">No subsidy</option>
+                <option value="SUBSIDY">Subsidy</option>
+              </SelectInput>
+              <FieldError text={errors?.partitionBillingMode} />
+            </FormField>
+            <FormField
+              label="Monthly TNB owner subsidy cap (RM)"
+              hint="Optional, per unit and per month. An entered cap overrides the billing model for residual TNB. Blank uses the selected/current model: Subsidy = legacy per-pax; No subsidy = none. Applies after private-meter charges."
+            >
+              <TextInput
+                type="number"
+                min="0"
+                step="0.01"
+                inputMode="decimal"
+                value={state.tnbSubsidyCapMonthly}
+                onChange={(e) => set({ tnbSubsidyCapMonthly: e.target.value })}
+                placeholder="e.g. 200.00"
+              />
+              <FieldError text={errors?.tnbSubsidyCapMonthly} />
+            </FormField>
+          </>
+        )}
+        {/* Under management — EDIT-only. Dedicated showUnderManagement gate
+            (never showBillingModel): the create dialog passes showBillingModel
+            bare, so reusing it here would leak this apartment-scoped toggle
+            onto the create form, which has no such concept yet. */}
+        {showUnderManagement && (
+          <FormField
+            label="Under management"
+            hint="When off, KAEN stops acting as the billing agent for this apartment: no management-fee charges, no auto cleaning bills, and it drops from the owner's statements and portal financials. Existing records are unchanged."
+          >
+            <label className="flex items-center gap-2 cursor-pointer">
+              <input
+                type="checkbox"
+                checked={state.underManagement}
+                onChange={(e) => set({ underManagement: e.target.checked })}
+                className="h-4 w-4 rounded border-[var(--input-border)] accent-[var(--primary)]"
+              />
+              <span className="text-sm text-foreground">This apartment is under KAEN management</span>
+            </label>
+          </FormField>
+        )}
+      </FormSection>
+      )}
 
       {/* Section: Listing status + tenancy. Gated to !hidePartitionOrphanFields
           — Partition-create hides these (the batch endpoint has nowhere to put
@@ -1465,128 +1616,6 @@ export function UnitFormBody({
         )}
       </FormSection>
       )}
-      {/* Section: Ownership & billing — apartment-scoped, money-adjacent. Shown
-          whenever any of its controls is enabled by the host (owner on create,
-          all three on the per-apartment edit). */}
-      {(showOwner || showBillingModel || showUnderManagement) && (
-      <FormSection
-        title="Ownership & billing"
-        tone="gold"
-        id="unitsec-owner"
-        icon={<KeyRound className="h-3.5 w-3.5" />}
-      >
-        {/* Owner — apartment-scoped. Editable on create (the payload carries it
-            and an occupied create is refused without one); read-only on the
-            per-room edit dialog, where owner is re-pointed only through the
-            audited fan-out in "Edit shared details". */}
-        {showOwner && (
-          <FormField
-            label="Owner"
-            action={
-              ownerEditable && !state.ownerPartyId ? (
-                <CreateOwnerDialog
-                  onCreated={(owner) =>
-                    set({
-                      ownerPartyId: owner.id,
-                      ownerName: owner.displayName,
-                      ownerPhone: owner.primaryPhone ?? null,
-                    })
-                  }
-                  trigger={
-                    <Button type="button" variant="outline" size="sm">
-                      <Plus className="h-4 w-4" />
-                      Create Owner
-                    </Button>
-                  }
-                />
-              ) : null
-            }
-            hint={
-              ownerEditable
-                ? "Owner of the whole apartment — applies to every room. Required before a room may be marked Occupied. Drives management fee and owner statements."
-                : 'Set for the whole unit in "Edit shared details". Drives management fee and owner statements.'
-            }
-          >
-            {ownerEditable ? (
-              state.ownerPartyId ? (
-                <OwnerConfirmCard
-                  ownerId={state.ownerPartyId}
-                  ownerName={state.ownerName}
-                  ownerPhone={state.ownerPhone}
-                  onChange={() => set({ ownerPartyId: null, ownerName: "", ownerPhone: null })}
-                />
-              ) : (
-                <OwnerSelect
-                  value={state.ownerPartyId}
-                  displayName={state.ownerName}
-                  onSelect={(o) =>
-                    set({
-                      ownerPartyId: o.id,
-                      ownerName: o.displayName,
-                      ownerPhone: o.formattedPhone ?? o.primaryPhone,
-                    })
-                  }
-                  onClear={() => set({ ownerPartyId: null, ownerName: "", ownerPhone: null })}
-                />
-              )
-            ) : state.ownerPartyId ? (
-              <div className="rounded-lg border border-border/50 bg-background/40 px-3 py-2.5">
-                <p className="text-sm font-medium text-foreground">{state.ownerName}</p>
-                {state.ownerPhone && (
-                  <p className="mt-0.5 text-xs font-mono text-muted-foreground">{state.ownerPhone}</p>
-                )}
-              </div>
-            ) : (
-              <p className="text-sm italic text-muted-foreground">
-                No owner assigned — set it in "Edit shared details".
-              </p>
-            )}
-            <FieldError text={errors?.ownerPartyId} />
-          </FormField>
-        )}
-        {/* Billing model — apartment-scoped and money-adjacent. The blank option
-            is the default: it omits the key from the payload so an added room
-            inherits the apartment's existing mode rather than colliding with it
-            (409 APARTMENT_BILLING_MODE_CONFLICT). */}
-        {showBillingModel && (
-          <FormField
-            label="Billing model"
-            hint="Applies to the whole apartment. Subsidy: the owner subsidy is deducted per pax from each tenant's shared-utility share. No subsidy: tenants pay their full share."
-          >
-            <SelectInput
-              value={state.partitionBillingMode}
-              onChange={(e) => set({ partitionBillingMode: e.target.value })}
-            >
-              <option value="">Use the apartment&apos;s current setting</option>
-              <option value="NO_SUBSIDY">No subsidy</option>
-              <option value="SUBSIDY">Subsidy</option>
-            </SelectInput>
-            <FieldError text={errors?.partitionBillingMode} />
-          </FormField>
-        )}
-        {/* Under management — EDIT-only. Dedicated showUnderManagement gate
-            (never showBillingModel): the create dialog passes showBillingModel
-            bare, so reusing it here would leak this apartment-scoped toggle
-            onto the create form, which has no such concept yet. */}
-        {showUnderManagement && (
-          <FormField
-            label="Under management"
-            hint="When off, KAEN stops acting as the billing agent for this apartment: no management-fee charges, no auto cleaning bills, and it drops from the owner's statements and portal financials. Existing records are unchanged."
-          >
-            <label className="flex items-center gap-2 cursor-pointer">
-              <input
-                type="checkbox"
-                checked={state.underManagement}
-                onChange={(e) => set({ underManagement: e.target.checked })}
-                className="h-4 w-4 rounded border-[var(--input-border)] accent-[var(--primary)]"
-              />
-              <span className="text-sm text-foreground">This apartment is under KAEN management</span>
-            </label>
-          </FormField>
-        )}
-      </FormSection>
-      )}
-
       {/* Section: Pax deduction — hidden on the Partition create path; the
           batch endpoint has no per-room pax-deduction field. */}
       {!hidePartitionOrphanFields && (
@@ -1760,6 +1789,7 @@ export function UnitFormBody({
 export type UnitFormPayloadOptions = {
   includeOwner?: boolean;
   includeBillingMode?: boolean;
+  includeTnbSubsidyCap?: boolean;
   includeRent?: boolean;
 };
 
@@ -1864,6 +1894,14 @@ export function unitFormToApiPayload(
     ...(options.includeOwner ? { ownerPartyId: state.ownerPartyId ?? undefined } : {}),
     ...(options.includeBillingMode && state.partitionBillingMode
       ? { partitionBillingMode: state.partitionBillingMode }
+      : {}),
+    ...(options.includeTnbSubsidyCap
+      ? {
+          tnbSubsidyCapMonthly:
+            state.tnbSubsidyCapMonthly.trim() === ""
+              ? null
+              : num(state.tnbSubsidyCapMonthly),
+        }
       : {}),
   };
 }

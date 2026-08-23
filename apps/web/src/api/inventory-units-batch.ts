@@ -24,6 +24,19 @@ export type CreateUnitsBatchSharedFields = {
   // here and puts the apartment owner on `shared`.
   ownerPartyId?: string;
   partitionBillingMode?: "SUBSIDY" | "NO_SUBSIDY" | null;
+  /** Null defers to partitionBillingMode; a value takes priority for residual TNB. */
+  tnbSubsidyCapMonthly?: number | null;
+  managementFeeConfig?: {
+    feeType: "percent" | "fixed" | "cap";
+    feeValue: string;
+    capAmount?: string | null;
+    sstPercent: "8";
+    freePeriodStart?: string | null;
+    freePeriodEnd?: string | null;
+    firstChargeMonth?: string | null;
+    firstChargeBaseAmount?: string | null;
+    paxDeductionPerPerson?: string | null;
+  };
 };
 
 export type CreateUnitsBatchRoom = {
@@ -72,6 +85,7 @@ export async function updateApartmentShared(
   apartmentId: string,
   body: {
     partitionBillingMode?: "SUBSIDY" | "NO_SUBSIDY";
+    tnbSubsidyCapMonthly?: number | null;
     ownerPartyId?: string | null;
     underManagement?: boolean;
   },
@@ -116,6 +130,8 @@ export type ApartmentSummary = {
   hasDrift: boolean;
   listingMode: "WHOLE" | "PARTITIONED" | "MIXED" | null;
   partitionBillingMode?: "SUBSIDY" | "NO_SUBSIDY" | null;
+  /** Null defers to partitionBillingMode; a value takes priority for residual TNB. */
+  tnbSubsidyCapMonthly?: number | null;
   // invariant: present whenever the apartment has an assigned owner — null = no owner yet
   ownerPartyId: string | null;
   ownerName: string | null;

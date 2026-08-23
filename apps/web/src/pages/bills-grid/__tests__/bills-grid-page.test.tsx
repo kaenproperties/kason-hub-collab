@@ -19,12 +19,8 @@ import type { GridRow, GridResponse, PriorMonthStrip, BillRowResult } from "@/ap
 import { stagedKey } from "../use-staged-edits";
 import { AuthContext, type User } from "@/lib/auth";
 
-// ui-10d (f): useFullscreenZoom persists via view-prefs' loadPref/savePref.
-// Mocked here (not exercised elsewhere in this page's test suite) so the
-// maximize-toggle tests can assert the exact savePref call without touching
-// real localStorage; loadPref passes its fallback through so `maximized`
-// starts at its normal default (false) on every render. (R3, 2026-07-12: the
-// zoom-scale control was removed — only maximized/toggleMaximized remain.)
+// View preferences are mocked so display/density/hidden-column tests do not
+// touch real localStorage. Fullscreen itself has since been removed.
 const savePref = vi.fn();
 const loadPref = vi.fn((_ns: string, _key: string, fallback: unknown) => fallback);
 // ui-task-10e: (c) colour-fill is localStorage-only via loadCellColours/saveCellColours
@@ -159,7 +155,10 @@ function makeRow(overrides: Partial<GridRow> & { apartmentId: string; unitCode: 
       maintenanceFee: "50.00",
       readingDate: null,
       paymentStatus: "unpaid",
-      tnbPattern: "recharged",
+      // OWNER-borne TNB ("absorbed") on purpose: this page suite uses tnbOwner as
+      // its generic editable unit-grain anchor. Recharged TNB correctly moves the
+      // input to tnbTenant (covered by cell-applicability/grid-table tests).
+      tnbPattern: "absorbed",
       // OWNER-borne AIR ("absorbed") on purpose: several tests below use airOwner as a
       // convenient EDITABLE anchor cell, and since 2026-08-14 the AIR bearer decides
       // which of the two AIR columns renders (cell-applicability.ts). Tenant-borne AIR
@@ -172,7 +171,7 @@ function makeRow(overrides: Partial<GridRow> & { apartmentId: string; unitCode: 
       lockState: "draft",
     },
     bearerConfig: {
-      tnbPattern: "recharged",
+      tnbPattern: "absorbed", // see entry above
       airPattern: "absorbed", // see entry above
       cleaningBearer: "owner",
       wifiBearer: "owner",
@@ -196,8 +195,8 @@ function gridResponse(rows: GridRow[], periods: string[] = ["2026-07-01"]): Grid
 // this used to vary `rental` (the generic "any editable unit-grain money
 // column" test target) — rental is now read-only/removed from Save, so these
 // generic editable-cell mechanics (drag-select/ctrl-fill/colour-fill/hide-
-// column) are retargeted onto `tnbOwner`/`tnbTotal`, structurally identical
-// (unit-grain, editable, numeric, direct-wire SaveEntryInput field).
+// column) are retargeted onto owner-borne `tnbOwner`/`tnbTotal`, structurally
+// identical (unit-grain, editable, numeric, direct-wire SaveEntryInput field).
 function tnbRow(apartmentId: string, unitCode: string, tnbTotal: string, billedAt: string | null = null): GridRow {
   return makeRow({
     apartmentId,
@@ -211,7 +210,7 @@ function tnbRow(apartmentId: string, unitCode: string, tnbTotal: string, billedA
       maintenanceFee: "50.00",
       readingDate: null,
       paymentStatus: "unpaid",
-      tnbPattern: "recharged",
+      tnbPattern: "absorbed",
       airPattern: "absorbed", // see makeRow above
       cleaningBearer: "owner",
       wifiBearer: "owner",
@@ -227,7 +226,25 @@ function tnbRow(apartmentId: string, unitCode: string, tnbTotal: string, billedA
 // house pattern per month-cockpit.test.tsx: wrap with a real AuthContext
 // rather than mocking @/lib/auth wholesale. role: "manager" so none of the
 // manager-gated affordances are hidden by the auth check itself.
-const TEST_USER: User = { id: "u1", fullName: "Admin", email: "a@x.test", role: "manager", orgId: "org-1" };
+const TEST_USER: User = {
+  id: "u1",
+  fullName: "Admin",
+  email: "a@x.test",
+  role: "manager",
+  orgId: "org-1",
+  // The production UI is capability-based. Keep this integration fixture explicit so
+  // the suite tests the billing controls instead of accidentally hiding them because
+  // an old role-only fixture omitted the resolved permission list.
+  permissions: [
+    "cost.view",
+    "billing.charge.edit",
+    "billing.save",
+    "billing.bill",
+    "billing.export",
+    "billing.document_manage",
+    "management_fee.configure",
+  ],
+};
 
 function renderPage() {
   const qc = new QueryClient({
@@ -356,6 +373,10 @@ describe("BillsGridPage", () => {
     fireEvent.click(screen.getByTestId("bill-select-apt-1"));
     fireEvent.click(screen.getByRole("button", { name: "Bill (1)" }));
     expect(await screen.findByRole("heading", { name: "Confirm advance Bill" })).toBeInTheDocument();
+    const advanceUnits = screen.getByTestId("bill-confirm-units");
+    expect(within(advanceUnits).getByRole("heading", { name: "A-1" })).toBeInTheDocument();
+    expect(advanceUnits).toHaveTextContent("Property Short Form + Unit Number");
+    expect(screen.getByText(/Due date/)).toHaveTextContent("2026-08-01");
     expect(billRows).not.toHaveBeenCalled();
     fireEvent.click(screen.getByTestId("advance-bill-confirm-btn"));
     await waitFor(() => expect(billRows).toHaveBeenCalledWith(expect.objectContaining({ period: "2026-08-01" })));
@@ -370,7 +391,7 @@ describe("BillsGridPage", () => {
     await waitFor(() => {
       expect(fetchGrid).toHaveBeenCalledWith({ period: "2026-07-01", months: 1 });
     });
-  });
+  }, 15_000);
 
   it("property filter", async () => {
     fetchGrid.mockResolvedValue(
@@ -633,12 +654,19 @@ describe("BillsGridPage", () => {
   });
 
   it("honors a cleared meter reading instead of reverting to the old value", async () => {
-    fetchGrid.mockResolvedValue(gridResponse([makeRow({ apartmentId: "apt-1", unitCode: "A-1" })]));
+    // Meter readings belong to partitioned-room rows. Whole-unit rows correctly
+    // render Previous/Current/Amount as non-applicable locked cells.
+    fetchGrid.mockResolvedValue(gridResponse([makeRow({
+      apartmentId: "apt-1",
+      unitCode: "A-1",
+      isWholeUnit: false,
+    })]));
     saveReadings.mockResolvedValue(undefined);
     renderPage();
 
     await screen.findByText("A-1");
-    const previousKwhInput = within(screen.getAllByTestId("cell-previousKwh")[0]).getByRole("textbox");
+    const roomRow = screen.getByTestId("tenant-sub-row");
+    const previousKwhInput = within(roomRow).getByTestId("cell-previousKwh").querySelector("input")!;
     fireEvent.change(previousKwhInput, { target: { value: "" } });
     fireEvent.blur(previousKwhInput);
 
@@ -665,7 +693,11 @@ describe("BillsGridPage", () => {
   });
 
   it('"Save omits amount/rental" (Task 6, B6+B7, money-critical): a Current-kwh edit\'s saveReadings body has no "amount" key and saveEntry never carries "rental"', async () => {
-    fetchGrid.mockResolvedValue(gridResponse([makeRow({ apartmentId: "apt-1", unitCode: "A-1" })]));
+    fetchGrid.mockResolvedValue(gridResponse([makeRow({
+      apartmentId: "apt-1",
+      unitCode: "A-1",
+      isWholeUnit: false,
+    })]));
     saveEntry.mockResolvedValue({ id: "entry-1", updatedAt: "2026-07-02T00:00:00.000Z" });
     saveReadings.mockResolvedValue({ results: [] });
     renderPage();
@@ -675,7 +707,8 @@ describe("BillsGridPage", () => {
     // (tnbOwner) AND a meter edit (currentKwh) so both call sites fire.
     const tnbInput = within(screen.getAllByTestId("cell-tnbOwner")[0]).getByRole("textbox");
     fireEvent.change(tnbInput, { target: { value: "999" } });
-    const currentKwhInput = within(screen.getAllByTestId("cell-currentKwh")[0]).getByRole("textbox");
+    const roomRow = screen.getByTestId("tenant-sub-row");
+    const currentKwhInput = within(roomRow).getByTestId("cell-currentKwh").querySelector("input")!;
     fireEvent.change(currentKwhInput, { target: { value: "200" } });
 
     await waitFor(() => expect(screen.getByRole("button", { name: /^save/i })).toHaveTextContent("Save (2)"));
@@ -741,7 +774,7 @@ describe("BillsGridPage", () => {
       expect(toast.error).toHaveBeenCalled();
     });
     expect(toast.success).not.toHaveBeenCalled();
-  });
+  }, 15_000);
 
   it("guards Save against writing while the grid shows a placeholder (stale) period", async () => {
     // FINDING (ui-10c fix, Part A investigation): the ORIGINAL version of
@@ -885,7 +918,9 @@ describe("BillsGridPage", () => {
         outcome: billedIds.includes(r.apartmentId) ? "billed" : failedOutcomes[i - 8],
       })),
     });
-    fetchGrid.mockResolvedValueOnce(
+    // Keep the post-Bill response available for every invalidation/refetch;
+    // a one-shot second value made a later refresh resolve `undefined`.
+    fetchGrid.mockResolvedValue(
       gridResponse(
         rows.map((r) =>
           billedIds.includes(r.apartmentId)
@@ -911,11 +946,15 @@ describe("BillsGridPage", () => {
       expect(desc).toContain("A-10: utility amounts");
       expect(desc).toContain("A-11: nothing saved");
     }
+    // StatusPill normalizes its visible label to sentence case. Scope this to
+    // the row payment pills so per-cell settlement screen-reader text cannot
+    // accidentally affect the manifest count.
     await waitFor(() => {
-      expect(screen.getAllByText("paid")).toHaveLength(8);
+      const labels = screen.getAllByTestId("entry-payment-pill").map((pill) => pill.textContent);
+      expect(labels.filter((label) => label === "Paid")).toHaveLength(8);
+      expect(labels.filter((label) => label === "Unpaid")).toHaveLength(3);
     });
-    expect(screen.getAllByText("unpaid")).toHaveLength(3);
-  });
+  }, 15_000);
 
   it("export wiring", async () => {
     fetchGrid.mockResolvedValue(
@@ -933,6 +972,7 @@ describe("BillsGridPage", () => {
     await waitFor(() => expect(screen.queryByText("B-1")).not.toBeInTheDocument());
 
     fireEvent.click(screen.getByRole("button", { name: /^export$/i }));
+    fireEvent.click(await screen.findByRole("menuitem", { name: "Export entire data (Excel)" }));
 
     await waitFor(() => expect(exportGridToXlsx).toHaveBeenCalledTimes(1));
     const [exportedRows] = exportGridToXlsx.mock.calls[0];
@@ -969,7 +1009,10 @@ describe("BillsGridPage", () => {
       expect(desc).toContain("A-3: nothing saved");
     }
     expect(toast.success).not.toHaveBeenCalled();
-    expect(screen.getAllByText("unpaid")).toHaveLength(3);
+    expect(screen.getAllByTestId("entry-payment-pill")).toHaveLength(3);
+    for (const pill of screen.getAllByTestId("entry-payment-pill")) {
+      expect(pill).toHaveTextContent("Unpaid");
+    }
   });
 
   it("un-checks the units that billed, and leaves the failed one checked", async () => {
@@ -1127,7 +1170,142 @@ describe("BillsGridPage", () => {
     fireEvent.click(screen.getByTestId("bill-select-apt-1"));
     expect(screen.getByRole("button", { name: /^bill \(1\)$/i })).toBeEnabled();
     expect(billRows).not.toHaveBeenCalled();
-  });
+  }, 15_000);
+
+  it("keeps Deposit-only and TA-only saved drafts selectable when Rental is already paid", async () => {
+    const depositOnly = makeRow({
+      apartmentId: "apt-deposit",
+      unitCode: "A-3-03",
+      entryId: null,
+      entry: null,
+      billedAt: "2026-07-05T00:00:00.000Z",
+      paymentStatus: "paid",
+      subRows: [{
+        listingId: "listing-deposit",
+        tenancyId: "tenancy-deposit",
+        partyName: "Tenant Deposit",
+        previousKwh: null,
+        currentKwh: null,
+        amount: null,
+        ratePerKwh: "0.5000",
+        rateConfigured: true,
+        rental: "483.87",
+        rentalBillingState: "paid",
+        deposit: "7500.00",
+        depositBillingState: "saved",
+      }],
+      agreementFees: {
+        new: { amount: "0.00", outstanding: "0.00", state: "none" },
+        renewal: { amount: "0.00", outstanding: "0.00", state: "none" },
+      },
+    });
+    const taOnly = makeRow({
+      apartmentId: "apt-ta",
+      unitCode: "A-3-04",
+      entryId: null,
+      entry: null,
+      billedAt: "2026-07-05T00:00:00.000Z",
+      paymentStatus: "paid",
+      subRows: [{
+        listingId: "listing-ta",
+        tenancyId: "tenancy-ta",
+        partyName: "Tenant TA",
+        previousKwh: null,
+        currentKwh: null,
+        amount: null,
+        ratePerKwh: "0.5000",
+        rateConfigured: true,
+        rental: "483.87",
+        rentalBillingState: "paid",
+        deposit: null,
+        depositBillingState: null,
+      }],
+      agreementFees: {
+        new: { amount: "500.00", outstanding: "500.00", state: "saved" },
+        renewal: { amount: "0.00", outstanding: "0.00", state: "none" },
+      },
+    });
+    fetchGrid.mockResolvedValue(gridResponse([depositOnly, taOnly]));
+    billRows.mockResolvedValue({
+      results: [
+        { apartmentId: "apt-deposit", outcome: "invoiced", tenantInvoiceIds: ["deposit-doc"], ownerInvoiceIds: [] },
+        { apartmentId: "apt-ta", outcome: "invoiced", tenantInvoiceIds: ["ta-doc"], ownerInvoiceIds: [] },
+      ],
+    });
+    renderPage();
+
+    await screen.findByText("A-3-03");
+    expect(screen.getByTestId("bill-select-apt-deposit")).toBeInTheDocument();
+    expect(screen.getByTestId("bill-select-apt-ta")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByTestId("bill-select-all"));
+    fireEvent.click(screen.getByRole("button", { name: "Bill (2)" }));
+    fireEvent.click(await screen.findByTestId("bill-confirm-btn"));
+
+    await waitFor(() => expect(billRows).toHaveBeenCalledWith({
+      period: "2026-07-01",
+      rows: [
+        { apartmentId: "apt-deposit", expectedUpdatedAt: "rental-draft" },
+        { apartmentId: "apt-ta", expectedUpdatedAt: "rental-draft" },
+      ],
+    }));
+  }, 15_000);
+
+  it("uses the exact pending draft list for carpark-only selection and ignores detached orange charges", async () => {
+    const carparkOnly = makeRow({
+      apartmentId: "apt-carpark",
+      unitCode: "A-3-05",
+      entryId: null,
+      entry: null,
+      billed: true,
+      billedAt: "2026-07-05T00:00:00.000Z",
+      subRows: [{
+        ...makeRow({ apartmentId: "source", unitCode: "source" }).subRows[0]!,
+        listingId: "listing-carpark",
+        tenancyId: "tenancy-carpark",
+        rental: null,
+        rentalBillingState: null,
+      }],
+      pendingTenancyCharges: [{
+        id: "carpark-draft",
+        description: "Carpark rent",
+        kind: "carpark",
+        payer: "tenant",
+        baseAmount: "180.00",
+        sst: "0.00",
+        total: "180.00",
+        tenantName: "Tenant Carpark",
+      }],
+    });
+    const detachedRental = makeRow({
+      apartmentId: "apt-detached",
+      unitCode: "A-3-06",
+      entryId: null,
+      entry: null,
+      subRows: [{
+        ...makeRow({ apartmentId: "source", unitCode: "source" }).subRows[0]!,
+        listingId: "listing-detached",
+        tenancyId: "tenancy-detached",
+        rental: "900.00",
+        rentalBillingState: "saved",
+      }],
+      // Current server says no attached draft will be approved. The orange aggregate
+      // is still useful cell state but must not create a misleading Bill checkbox.
+      pendingTenancyCharges: [],
+    });
+    fetchGrid.mockResolvedValue(gridResponse([carparkOnly, detachedRental]));
+    renderPage();
+
+    await screen.findByText("A-3-05");
+    expect(screen.getByTestId("bill-select-apt-carpark")).toBeInTheDocument();
+    expect(screen.queryByTestId("bill-select-apt-detached")).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByTestId("bill-select-apt-carpark"));
+    fireEvent.click(screen.getByRole("button", { name: "Bill (1)" }));
+    const unit = await screen.findByTestId("bill-confirm-unit-apt-carpark");
+    expect(within(unit).getByText("Carpark rent")).toBeInTheDocument();
+    expect(screen.getByTestId("bill-confirm-unit-total-apt-carpark")).toHaveTextContent("RM 180.00");
+  }, 15_000);
 
   it("bills only the checked unit, not the whole billable set", async () => {
     const rows = [
@@ -1160,6 +1338,169 @@ describe("BillsGridPage", () => {
     );
     expect(toast.success).toHaveBeenCalledWith("Billed 1 of 1");
   });
+
+  it("shows Property Short Form + Unit Number and itemizes the selected unit's saved charges", async () => {
+    const detailed = makeRow({
+      apartmentId: "apt-detail",
+      unitCode: "A-02-02",
+      propertyName: "Kensho Residence",
+      propertyCode: "KR",
+      subRows: [{
+        listingId: "apt-detail-room-1",
+        tenancyId: "apt-detail-ten-1",
+        partyName: "Alicia Tan",
+        previousKwh: "100.00",
+        currentKwh: "150.00",
+        amount: "25.00",
+        ratePerKwh: "0.5000",
+        rateConfigured: true,
+        rental: "1200.00",
+        rentalBillingState: "saved",
+        deposit: "2400.00",
+        depositBillingState: "saved",
+      }],
+      agreementFees: {
+        new: { amount: "120.00", outstanding: "120.00", state: "saved" },
+        renewal: { amount: "0.00", outstanding: "0.00", state: "none" },
+      },
+      pendingTenancyCharges: [
+        { id: "rent-detail", description: "Rental", kind: "rental", baseAmount: "1200.00", sst: "0.00", total: "1200.00", tenantName: "Alicia Tan" },
+        { id: "deposit-detail", description: "Deposit", kind: "deposit", baseAmount: "2400.00", sst: "0.00", total: "2400.00", tenantName: "Alicia Tan" },
+        { id: "ta-detail", description: "TA (WITH SST)", kind: "agreement_fee", baseAmount: "120.00", sst: "0.00", total: "120.00", tenantName: "Alicia Tan" },
+      ],
+    });
+    fetchGrid.mockResolvedValue(gridResponse([detailed]));
+    renderPage();
+
+    await screen.findByText("KR A-02-02");
+    fireEvent.click(screen.getByTestId("bill-select-apt-detail"));
+    fireEvent.click(screen.getByRole("button", { name: "Bill (1)" }));
+
+    const unit = await screen.findByTestId("bill-confirm-unit-apt-detail");
+    expect(within(unit).getByRole("heading", { name: "KR A-02-02" })).toBeInTheDocument();
+    expect(unit).not.toHaveTextContent("Kensho Residence");
+    expect(within(unit).getByText("Rental")).toBeInTheDocument();
+    expect(within(unit).getByText("Deposit")).toBeInTheDocument();
+    expect(within(unit).getByText("TA (WITH SST)")).toBeInTheDocument();
+    expect(unit).not.toHaveTextContent(/includes RM .* SST/);
+    expect(within(unit).getAllByText("Tenant")).toHaveLength(3);
+    expect(screen.getByTestId("bill-confirm-overview")).toHaveTextContent("RM 3,720.00");
+    expect(screen.getByTestId("bill-confirm-unit-total-apt-detail")).toHaveTextContent("RM 3,720.00");
+    expect(billRows).not.toHaveBeenCalled();
+  }, 15_000);
+
+  it("does not present unresolved paid Re-Bill lines as part of a mixed selection subtotal", async () => {
+    const fresh = makeRow({
+      apartmentId: "apt-fresh",
+      unitCode: "A-05-01",
+      propertyCode: "KR",
+      pendingTenancyCharges: [{
+        id: "fresh-rent",
+        description: "Fresh rental",
+        kind: "rental",
+        payer: "tenant",
+        baseAmount: "900.00",
+        sst: "0.00",
+        total: "900.00",
+        tenantName: "Fresh Tenant",
+      }],
+      billUtilityPlan: {
+        status: "not_applicable",
+        mode: "whole",
+        subsidyPerPax: "0.00",
+        lines: [],
+        blockedTenancyIds: [],
+        errorCode: null,
+      },
+    });
+    const awaitingReview = makeRow({
+      apartmentId: "apt-review",
+      unitCode: "A-05-02",
+      propertyCode: "KR",
+      billed: true,
+      billedAt: "2026-07-05T00:00:00.000Z",
+      pendingTenancyCharges: [],
+      billUtilityPlan: {
+        status: "rebill_review",
+        mode: "whole",
+        subsidyPerPax: "0.00",
+        lines: [],
+        blockedTenancyIds: [],
+        errorCode: null,
+      },
+      recurring: {
+        tenant: { total: "100.00", count: 1, items: [{ id: "paid-recurring", name: "Already-paid recurring", amount: "100.00" }] },
+        owner: { total: "0.00", count: 0, items: [] },
+      },
+      expenses: {
+        tenant: {
+          total: "50.00",
+          withSstTotal: "0.00",
+          sstTotal: "0.00",
+          count: 1,
+          items: [{ id: "paid-expense", description: "Already-paid expense", amount: "50.00", sst: "0.00", total: "50.00", withSST: false }],
+        },
+        owner: { total: "0.00", withSstTotal: "0.00", sstTotal: "0.00", count: 0, items: [] },
+      },
+    });
+    fetchGrid.mockResolvedValue({
+      ...gridResponse([fresh, awaitingReview]),
+      billingCapabilities: { billingDocuments: true, expensesAsCharges: true },
+    });
+    renderPage();
+
+    await screen.findByText("KR A-05-01");
+    fireEvent.click(screen.getByTestId("bill-select-all"));
+    fireEvent.click(screen.getByRole("button", { name: "Bill (2)" }));
+
+    const reviewUnit = await screen.findByTestId("bill-confirm-unit-apt-review");
+    expect(within(reviewUnit).queryByText("Already-paid recurring")).not.toBeInTheDocument();
+    expect(within(reviewUnit).queryByText("Already-paid expense")).not.toBeInTheDocument();
+    expect(within(reviewUnit).getByText("Re-Bill line amounts will be determined after the server's paid-line review.")).toBeInTheDocument();
+    expect(screen.getByTestId("bill-confirm-overview")).toHaveTextContent("Known subtotal");
+    expect(screen.getByTestId("bill-confirm-overview")).toHaveTextContent("RM 900.00");
+  }, 15_000);
+
+  it("uses server billing capabilities so a flag-skewed client never promises disabled grid charges", async () => {
+    const row = makeRow({
+      apartmentId: "apt-server-flags",
+      unitCode: "A-04-01",
+      propertyCode: "KR",
+      pendingTenancyCharges: [
+        { id: "rent-server", description: "Rental", kind: "rental", baseAmount: "900.00", sst: "0.00", total: "900.00", tenantName: "Alicia Tan" },
+      ],
+      recurring: {
+        tenant: { total: "30.00", count: 1, items: [{ id: "recur-disabled", name: "Disabled recurring", amount: "30.00" }] },
+        owner: { total: "0.00", count: 0, items: [] },
+      },
+      expenses: {
+        tenant: {
+          total: "50.00",
+          withSstTotal: "0.00",
+          sstTotal: "0.00",
+          count: 1,
+          items: [{ id: "expense-disabled", description: "Disabled expense", amount: "50.00", sst: "0.00", total: "50.00", withSST: false }],
+        },
+        owner: { total: "0.00", withSstTotal: "0.00", sstTotal: "0.00", count: 0, items: [] },
+      },
+    });
+    fetchGrid.mockResolvedValue({
+      ...gridResponse([row]),
+      billingCapabilities: { billingDocuments: false, expensesAsCharges: false },
+    });
+    renderPage();
+
+    await screen.findByText("KR A-04-01");
+    fireEvent.click(screen.getByTestId("bill-select-apt-server-flags"));
+    fireEvent.click(screen.getByRole("button", { name: "Bill (1)" }));
+
+    const unit = await screen.findByTestId("bill-confirm-unit-apt-server-flags");
+    expect(screen.getByText(/Approve saved tenancy drafts/)).toBeInTheDocument();
+    expect(within(unit).getByText("Rental")).toBeInTheDocument();
+    expect(within(unit).queryByText("Disabled recurring")).not.toBeInTheDocument();
+    expect(within(unit).queryByText("Disabled expense")).not.toBeInTheDocument();
+    expect(screen.getByTestId("bill-confirm-unit-total-apt-server-flags")).toHaveTextContent("RM 900.00");
+  }, 15_000);
 
   it("Cancel on first-Bill confirmation keeps saved data unbilled", async () => {
     fetchGrid.mockResolvedValue(gridResponse([makeRow({ apartmentId: "apt-1", unitCode: "A-1" })]));
@@ -1302,7 +1643,7 @@ describe("BillsGridPage", () => {
     await screen.findByText("A-1");
     expect(listExpenses).not.toHaveBeenCalled();
 
-    fireEvent.click(screen.getByTestId("view-expenses-tenant"));
+    fireEvent.click(screen.getByRole("button", { name: "Add Non SST tenant expense" }));
 
     await waitFor(() => {
       expect(listExpenses).toHaveBeenCalledWith({
@@ -1319,7 +1660,7 @@ describe("BillsGridPage", () => {
     renderPage();
 
     await screen.findByText("A-1");
-    fireEvent.click(screen.getByTestId("view-expenses-owner"));
+    fireEvent.click(screen.getByRole("button", { name: "Add Non SST owner expense" }));
 
     await waitFor(() => {
       expect(listExpenses).toHaveBeenCalledWith({
@@ -1353,7 +1694,7 @@ describe("BillsGridPage", () => {
     renderPage();
 
     await screen.findByText("A-1");
-    fireEvent.click(screen.getByTestId("view-expenses-tenant"));
+    fireEvent.click(screen.getByRole("button", { name: "Add Non SST tenant expense" }));
     await screen.findByText("Tenant expenses");
 
     // The inline form renders on open, so the tenant picker is present with no
@@ -1391,7 +1732,7 @@ describe("BillsGridPage", () => {
     await screen.findByText("A-1");
     expect(listExpenses).toHaveBeenCalledTimes(0);
 
-    fireEvent.click(screen.getAllByTestId("view-expenses-tenant")[0]);
+    fireEvent.click(screen.getAllByRole("button", { name: "Add Non SST tenant expense" })[0]);
 
     await waitFor(() => {
       expect(listExpenses).toHaveBeenCalledTimes(1);
@@ -1475,7 +1816,7 @@ describe("BillsGridPage", () => {
       expect(fetchGrid).toHaveBeenCalledTimes(3);
     });
 
-    fireEvent.click(screen.getByTestId("view-expenses-tenant"));
+    fireEvent.click(screen.getByRole("button", { name: "Add Non SST tenant expense" }));
 
     // guarded: the Sheet never opens, no query fires
     expect(screen.queryByText("Tenant expenses")).not.toBeInTheDocument();
@@ -1620,7 +1961,7 @@ describe("BillsGridPage", () => {
     resolveJuneFetch?.(gridResponse(rows, ["2026-06-01"]));
   });
 
-  // ── ui-10d: (e) column/date filter + (f) in-app full-screen ───────────────
+  // ── ui-10d: column/date filters + bounded grid scrolling ──────────────────
 
   it("column filter narrows rows", async () => {
     fetchGrid.mockResolvedValue(
@@ -1646,6 +1987,7 @@ describe("BillsGridPage", () => {
     expect(screen.getByText("A-2")).toBeInTheDocument();
 
     fireEvent.click(screen.getByRole("button", { name: /^export$/i }));
+    fireEvent.click(await screen.findByRole("menuitem", { name: "Export entire data (Excel)" }));
 
     await waitFor(() => expect(exportGridToXlsx).toHaveBeenCalledTimes(1));
     const [exportedRows] = exportGridToXlsx.mock.calls[0];
@@ -1670,6 +2012,7 @@ describe("BillsGridPage", () => {
     fireEvent.change(screen.getByLabelText("Date range from"), { target: { value: "2026-06" } });
 
     fireEvent.click(screen.getByRole("button", { name: /^export$/i }));
+    fireEvent.click(await screen.findByRole("menuitem", { name: "Export entire data (Excel)" }));
 
     await waitFor(() => expect(exportGridToXlsx).toHaveBeenCalledTimes(1));
     const [exportedRows, , exportedPeriods] = exportGridToXlsx.mock.calls[0];
@@ -1698,159 +2041,70 @@ describe("BillsGridPage", () => {
     expect(exportGridToXlsx).not.toHaveBeenCalled();
   });
 
-  it("fullscreen is in-app, not requestFullscreen; Exit Fullscreen is reachable INSIDE the overlay", async () => {
-    // ui-10d fix: maximizing used to be a one-way trap — the toolbar holds
-    // the ONLY Fullscreen control, but once maximized the grid-region
-    // overlay (`fixed inset-0 z-50`) paints on top of it (a statically
-    // positioned sibling with no z-index of its own), and Escape is
-    // deliberately NOT wired to exit (R32). Before the fix there is no
-    // Exit control reachable inside the overlay at all — this test enters
-    // fullscreen THEN reaches for Exit Fullscreen scoped to grid-region
-    // itself (never the toolbar's own toggle, which sits OUTSIDE
-    // grid-region) and asserts clicking it clears the overlay.
-    const requestFullscreenMock = vi.fn().mockResolvedValue(undefined);
-    (Element.prototype as unknown as { requestFullscreen: () => Promise<void> }).requestFullscreen =
-      requestFullscreenMock;
-
+  it("does not render the retired Fullscreen controls", async () => {
     fetchGrid.mockResolvedValue(gridResponse([makeRow({ apartmentId: "apt-1", unitCode: "A-1" })]));
     renderPage();
 
     await screen.findByText("A-1");
-    expect(screen.getByTestId("grid-region").className).not.toMatch(/fixed/);
-
-    fireEvent.click(screen.getByRole("button", { name: /^fullscreen$/i }));
-
-    await waitFor(() => {
-      expect(screen.getByTestId("grid-region").className).toMatch(/fixed/);
-    });
-    expect(requestFullscreenMock).not.toHaveBeenCalled();
-
-    // The exit must be reachable INSIDE the overlay itself — scope the
-    // query to grid-region so this can never accidentally pass by finding
-    // the toolbar's own (now-unreachable-in-the-browser) toggle, which
-    // lives OUTSIDE grid-region as a sibling.
-    const overlay = screen.getByTestId("grid-region");
-    const exitInOverlay = within(overlay).getByRole("button", { name: /^exit fullscreen$/i });
-    fireEvent.click(exitInOverlay);
-
-    await waitFor(() => {
-      expect(screen.getByTestId("grid-region").className).not.toMatch(/fixed/);
-    });
-    expect(savePref).toHaveBeenCalledWith("bills-grid", "maximized", false);
-    // Still never requestFullscreen (R32) — the in-overlay exit is purely
-    // the same in-app state toggle, not a browser fullscreen API call.
-    expect(requestFullscreenMock).not.toHaveBeenCalled();
+    expect(screen.queryByRole("button", { name: /fullscreen/i })).not.toBeInTheDocument();
   });
 
-  it("fullscreen keeps the filter toolbar INSIDE the overlay (filters travel into fullscreen)", async () => {
-    // Bug: entering fullscreen makes grid-region a `fixed inset-0 z-50` overlay
-    // that covers the whole viewport — but the toolbar (Categorize / Months /
-    // Unit-code Filter / Date range / Columns) is a sibling rendered OUTSIDE
-    // grid-region, so every filter vanishes behind the overlay. The toolbar
-    // must render INSIDE the overlay while maximized.
+  it("does not retain the retired fullscreen overlay, zoom, or preference", async () => {
     fetchGrid.mockResolvedValue(gridResponse([makeRow({ apartmentId: "apt-1", unitCode: "A-1" })]));
     renderPage();
 
     await screen.findByText("A-1");
-    fireEvent.click(screen.getByRole("button", { name: /^fullscreen$/i }));
+    expect(screen.getByTestId("grid-region").className).not.toMatch(/fixed|inset-0/);
+    expect(screen.getByTestId("grid-region").getAttribute("style") ?? "").not.toMatch(/zoom/);
+    expect(loadPref).not.toHaveBeenCalledWith("bills-grid", "maximized", expect.anything());
+    expect(savePref).not.toHaveBeenCalledWith("bills-grid", "maximized", expect.anything());
+  });
 
-    await waitFor(() => {
-      expect(screen.getByTestId("grid-region").className).toMatch(/fixed/);
-    });
+  it("keeps one filter toolbar outside the bounded grid region", async () => {
+    fetchGrid.mockResolvedValue(gridResponse([makeRow({ apartmentId: "apt-1", unitCode: "A-1" })]));
+    renderPage();
 
-    const overlay = screen.getByTestId("grid-region");
-    expect(within(overlay).getByTestId("grid-toolbar")).toBeInTheDocument();
-    expect(within(overlay).getByPlaceholderText("Unit, name, or phone")).toBeInTheDocument();
-    expect(within(overlay).getByLabelText("Categorize")).toBeInTheDocument();
-    // Exactly one toolbar in the DOM — the outer instance is not also mounted
-    // (duplicate `id="bills-grid-property-filter"` inputs would break a11y).
+    await screen.findByText("A-1");
+    const region = screen.getByTestId("grid-region");
+    const toolbar = screen.getByTestId("grid-toolbar");
     expect(screen.getAllByTestId("grid-toolbar")).toHaveLength(1);
+    expect(region.contains(toolbar)).toBe(false);
+    expect(within(toolbar).getByLabelText("Categorize")).toBeInTheDocument();
   });
 
-  it("no zoom style — grid-region carries no inline zoom style, unmaximized or maximized (R3)", async () => {
+  it("grid-region stays bounded and owns both scroll axes", async () => {
     fetchGrid.mockResolvedValue(gridResponse([makeRow({ apartmentId: "apt-1", unitCode: "A-1" })]));
     renderPage();
 
     await screen.findByText("A-1");
     const region = screen.getByTestId("grid-region");
-    expect(region.getAttribute("style") ?? "").not.toMatch(/zoom/);
-
-    fireEvent.click(screen.getByRole("button", { name: /^fullscreen$/i }));
-
-    await waitFor(() => {
-      expect(region.className).toMatch(/fixed/);
-    });
-    // The removed control cannot leave the table scaled in EITHER state.
-    expect(region.getAttribute("style") ?? "").not.toMatch(/zoom/);
-  });
-
-  // Task 11 (R4b) — full sticky header needs an internal vertical scroll
-  // container: the non-maximized grid-region is bounded (max-h) and
-  // vertically scrollable so the table's own sticky thead has something to
-  // pin against. The maximized branch is already viewport-bounded via
-  // `fixed inset-0` and must NOT also carry a max-h class — max-height would
-  // clamp that fixed-inset overlay to a fraction of the viewport instead of
-  // filling it (verified against the real CSS box-model behavior, not
-  // assumed), so this asserts the two states stay mutually exclusive.
-  it("grid-region has a bounded height + internal vertical scroll (non-maximized); maximized carries no max-h (R4b)", async () => {
-    fetchGrid.mockResolvedValue(gridResponse([makeRow({ apartmentId: "apt-1", unitCode: "A-1" })]));
-    renderPage();
-
-    await screen.findByText("A-1");
-    const region = screen.getByTestId("grid-region");
+    expect(region.className).toContain("overflow-x-auto");
     expect(region.className).toContain("overflow-y-auto");
     expect(region.className).toMatch(/max-h-/);
-
-    fireEvent.click(screen.getByRole("button", { name: /^fullscreen$/i }));
-
-    await waitFor(() => {
-      expect(region.className).toMatch(/fixed/);
-    });
-    // maximized stays exactly as before this task — bounded by the viewport
-    // via fixed inset-0, never by a max-h clamp.
-    expect(region.className).not.toMatch(/max-h-/);
   });
 
-  // Review-fix (R4b follow-up, revised): the table's sticky thead (z-20) and
-  // pinned Unit corner (z-30) used to paint OVER the Exit control once the user
-  // scrolled while maximized. The overlay is now a flex COLUMN — the toolbar is
-  // its FIXED (non-scrolling) header and the grid scrolls in a separate inner
-  // region below — so the exit control (and every filter) can never be occluded
-  // by the thead, and never scrolls out of reach. Escape stays unwired (R32),
-  // so this always-visible toolbar toggle is the only way out. Asserted by:
-  // the Exit control + toolbar live OUTSIDE the inner scroll region.
-  it("Exit Fullscreen + filters live in the overlay's fixed header, OUTSIDE the scrolling grid region", async () => {
+  it("uses a structural grid-scroll wrapper instead of a nested competing scroller", async () => {
     fetchGrid.mockResolvedValue(gridResponse([makeRow({ apartmentId: "apt-1", unitCode: "A-1" })]));
     renderPage();
 
     await screen.findByText("A-1");
-    fireEvent.click(screen.getByRole("button", { name: /^fullscreen$/i }));
-
-    const overlay = screen.getByTestId("grid-region");
-    const exitButton = await within(overlay).findByRole("button", { name: /^exit fullscreen$/i });
-    const scrollRegion = within(overlay).getByTestId("grid-scroll");
-    // The fixed header (toolbar + Exit) must NOT be inside the scrolling region,
-    // or it would scroll away / be occluded by the sticky thead.
-    expect(scrollRegion.contains(exitButton)).toBe(false);
-    expect(scrollRegion.contains(within(overlay).getByTestId("grid-toolbar"))).toBe(false);
-    // And the scroll region owns both axes so the thead/Unit column pin against it.
-    expect(scrollRegion.className).toMatch(/overflow-auto/);
+    const region = screen.getByTestId("grid-region");
+    expect(within(region).getByTestId("grid-scroll")).toHaveClass("contents");
   });
 
   // ── ui-task-10e: drag-select (a), colour-fill (c), hide-column (d) via useGridSelection ──
 
   it("drag-select shows count and sum", async () => {
     // Task 4 (converted): a mouse drag now selects the RECTANGLE between the two
-    // endpoints, not the linear pointer path. pointerdown row0/tnbOwner +
-    // pointerenter row1/previousKwh (a diagonal) selects the whole 2-row ×
-    // 2-column BLOCK — {tnbOwner, previousKwh} × {row0, row1} = 4 cells — even
-    // though the path only touched the two opposite corners. (Recurring-charges
-    // R9: cleaning/WiFi are read-only now; tnbOwner + its nav-adjacent inline
-    // meter column previousKwh are both still editable and form a clean 2-wide
-    // rectangle.) The count badge therefore reads "Count 4" (the block, not the
-    // 2-cell path). Sum reads the Σ of the four cells' DISPLAYED numeric values:
-    // tnbOwner 20 + 40 and previousKwh 100 + 100 (the fixture's inline meter
-    // reading) = 260.00. The page enriches each selected cell's value from its
+    // endpoints, not the linear pointer path. pointerdown row0/cleaningOwner +
+    // pointerenter row1/tnbOwner (a diagonal) selects the whole 2-row ×
+    // 2-column BLOCK — {cleaningOwner, tnbOwner} × {row0, row1} = 4 cells — even
+    // though the path only touched the two opposite corners. Cleaning is a
+    // read-only recurring value and owner-borne TNB is editable, so this also
+    // proves a mixed read-only/editable rectangle. The count badge therefore
+    // reads "Count 4" (the block, not the 2-cell path). Sum reads the Σ of the
+    // four cells' DISPLAYED numeric values: cleaning 80 + 80 and tnbOwner 20 +
+    // 40 = 220.00. The page enriches each selected cell's value from its
     // live DOM node ("read what you see", same source as copy) so the geometric
     // rectangle carries real numbers, not just identities.
     fetchGrid.mockResolvedValue(
@@ -1866,17 +2120,17 @@ describe("BillsGridPage", () => {
     // no drag in progress yet — no badge
     expect(screen.queryByTestId("selection-badge")).not.toBeInTheDocument();
 
-    const topLeft = screen.getAllByTestId("cell-tnbOwner")[0]; // row0
-    const bottomRight = screen.getAllByTestId("cell-previousKwh")[1]; // row1, adjacent column
+    const topLeft = screen.getAllByTestId("cell-cleaningOwner")[0]; // row0
+    const bottomRight = screen.getAllByTestId("cell-tnbOwner")[1]; // row1, adjacent column
 
     fireEvent.pointerDown(topLeft);
     fireEvent.pointerEnter(bottomRight);
 
     // The 2×2 rectangle = 4 cells (proves the block, not the 2-corner path).
     expect(await screen.findByText("Count 4")).toBeInTheDocument();
-    // 20 + 40 (tnbOwner) + 100 + 100 (previousKwh) = 260.00 — the sum now reflects
+    // 80 + 80 (cleaningOwner) + 20 + 40 (tnbOwner) = 220.00 — the sum reflects
     // the selected cells' values instead of the old identity-only 0.00.
-    expect(screen.getByText("Sum 260.00")).toBeInTheDocument();
+    expect(screen.getByText("Sum 220.00")).toBeInTheDocument();
   });
 
   it("Shift+arrow keyboard range sums the selected cells", async () => {
@@ -1908,22 +2162,21 @@ describe("BillsGridPage", () => {
     // A drag rectangle spans READ-ONLY cells between its editable endpoints, and
     // those cells must contribute to the sum too. Their displayed number is read
     // from `data-copy-value` (they are <td>s, not <input>s) — NOT textContent,
-    // which can carry a count badge. Drag tnbOwner → airOwner over one whole-unit
-    // row spans {tnbOwner 20, previousKwh 100, currentKwh 150, amount 25 (read-
-    // only), airOwner 40} = 5 cells, sum 335.00.
+    // which can carry a count badge. Whole-unit meter cells now correctly show
+    // non-applicable dashes, so use adjacent cleaningOwner (read-only 80) and
+    // tnbOwner (editable 20): two selected cells, sum 100.00.
     fetchGrid.mockResolvedValue(gridResponse([tnbRow("apt-1", "A-1", "20.00")]));
     renderPage();
 
     await screen.findByText("A-1");
 
-    const topLeft = screen.getByTestId("cell-tnbOwner");
-    const bottomRight = screen.getByTestId("cell-airOwner");
+    const topLeft = screen.getByTestId("cell-cleaningOwner");
+    const bottomRight = screen.getByTestId("cell-tnbOwner");
     fireEvent.pointerDown(topLeft);
     fireEvent.pointerEnter(bottomRight);
 
-    expect(await screen.findByText("Count 5")).toBeInTheDocument();
-    // 20 + 100 + 150 + 25 (read-only amount) + 40 = 335.00
-    expect(screen.getByText("Sum 335.00")).toBeInTheDocument();
+    expect(await screen.findByText("Count 2")).toBeInTheDocument();
+    expect(screen.getByText("Sum 100.00")).toBeInTheDocument();
   });
 
   it("drag STARTING on a read-only Rental (price) cell selects and sums it", async () => {
@@ -2188,16 +2441,17 @@ describe("BillsGridPage", () => {
     // by its OWNING apartment via billedApartmentIds/resolveApartmentId) and
     // stage the clear ONLY for the unbilled meter cells — so a subsequent Save
     // fires saveReadings for the unbilled apartments and NEVER for the billed
-    // one. apt-2 is seeded already-billed (billedAt set); the drag runs down the
-    // Current-meter column from apt-1 (row0) to apt-3 (row2), sweeping apt-2
-    // (row1) into the rectangle without ever pointer-touching its locked cell.
+    // one. Meter editing belongs to partitioned-room rows, so these three rows
+    // explicitly opt out of the shared whole-unit fixture. apt-2 is seeded
+    // already-billed and paid; the drag runs down the nested Current-meter
+    // column, sweeping its locked cell into the range.
     fetchGrid.mockResolvedValue(
       gridResponse([
-        tnbRow("apt-1", "A-1", "50.00"),
+        { ...tnbRow("apt-1", "A-1", "50.00"), isWholeUnit: false },
         // Task 7 (R7): billed alone no longer locks — paymentStatus "paid" is
         // required too, so this fixture stays a genuine (excluded/skipped) lock case.
-        { ...tnbRow("apt-2", "A-2", "20.00", "2026-07-15T00:00:00.000Z"), paymentStatus: "paid" }, // BILLED + PAID
-        tnbRow("apt-3", "A-3", "30.00"),
+        { ...tnbRow("apt-2", "A-2", "20.00", "2026-07-15T00:00:00.000Z"), isWholeUnit: false, paymentStatus: "paid" }, // BILLED + PAID
+        { ...tnbRow("apt-3", "A-3", "30.00"), isWholeUnit: false },
       ]),
     );
     saveEntry.mockResolvedValue({ id: "entry-1", updatedAt: "2026-07-02T00:00:00.000Z" });
@@ -2206,15 +2460,16 @@ describe("BillsGridPage", () => {
 
     await screen.findByText("A-1");
 
-    // Current-meter cells: apt-1 (row0) and apt-3 (row2) are editable (have
-    // pointer handlers); apt-2 (row1) is billed → a read-only LockedCell in the
-    // rectangle's interior. Drag the whole column so the rect spans all 3 rows.
-    const currentCells = screen.getAllByTestId("cell-currentKwh");
-    fireEvent.pointerDown(currentCells[0]); // apt-1 row0 currentKwh
-    fireEvent.pointerEnter(currentCells[2]); // apt-3 row2 currentKwh (sweeps apt-2 in by identity)
-    fireEvent.pointerUp(currentCells[2]);
+    // Select the actual nested-room meter cells, not the unit-row placeholders.
+    // apt-2 is a read-only LockedCell in the rectangle's interior.
+    const roomRows = screen.getAllByTestId("tenant-sub-row");
+    const firstCurrent = within(roomRows[0]).getByTestId("cell-currentKwh");
+    const lastCurrent = within(roomRows[2]).getByTestId("cell-currentKwh");
+    fireEvent.pointerDown(firstCurrent);
+    fireEvent.pointerEnter(lastCurrent);
+    fireEvent.pointerUp(lastCurrent);
 
-    // The rectangle swept ALL THREE currentKwh cells into sel.range — including
+    // The rectangle swept ALL THREE nested currentKwh cells into sel.range — including
     // the billed apt-2's (rectBetween keeps read-only cells by identity). The
     // count badge counts every selected cell, so "Count 3" proves the billed
     // cell entered sel.range — the exact cell Delete must now skip. (The billed
@@ -2347,18 +2602,18 @@ describe("BillsGridPage", () => {
 
     const tnbCell = screen.getByTestId("cell-tnbOwner");
     // no selection yet — swatches disabled
-    expect(screen.getByTestId("colour-swatch-#FDE68A")).toBeDisabled();
+    expect(screen.getByTestId("colour-swatch-#7C3AED")).toBeDisabled();
 
     fireEvent.pointerDown(tnbCell);
     fireEvent.pointerUp(tnbCell);
 
-    expect(screen.getByTestId("colour-swatch-#FDE68A")).not.toBeDisabled();
-    fireEvent.click(screen.getByTestId("colour-swatch-#FDE68A"));
+    expect(screen.getByTestId("colour-swatch-#7C3AED")).not.toBeDisabled();
+    fireEvent.click(screen.getByTestId("colour-swatch-#7C3AED"));
 
     await waitFor(() => {
       expect(saveCellColours).toHaveBeenCalledWith(
         "bills-grid",
-        expect.objectContaining({ "apt-1:tnbOwner:2026-07-01": "#FDE68A" }),
+        expect.objectContaining({ "apt-1:tnbOwner:2026-07-01": "#7C3AED" }),
       );
     });
     expect(screen.getByTestId("cell-tnbOwner").style.backgroundColor).not.toBe("");

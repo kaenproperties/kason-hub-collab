@@ -17,7 +17,7 @@ import {
   assignCarparkSchema,
 } from "@kason/shared";
 import type { SessionPayload } from "../../lib/auth";
-import { requireRole } from "../../middleware/require-role";
+import { requirePermission } from "../../middleware/require-permission";
 import {
   registerCarparkService,
   listCarparksByApartmentService,
@@ -34,11 +34,9 @@ const carparkRoutes = new Hono<{ Variables: { session: SessionPayload } }>();
 
 // All carpark mutation/listing endpoints require at least manager role
 // (matches the listings and apartment modules' mutation gate).
-carparkRoutes.use("*", requireRole("manager"));
-
 // GET /api/carparks?apartmentId=…
 // List all bays for a given apartment.
-carparkRoutes.get("/", async (c) => {
+carparkRoutes.get("/", requirePermission("portfolio.view"), async (c) => {
   const session = c.get("session");
   const apartmentId = c.req.query("apartmentId") ?? "";
   if (!apartmentId) {
@@ -57,7 +55,7 @@ carparkRoutes.get("/", async (c) => {
 // GET /api/carparks/available?propertyId=…
 // List available bays across a property (used when assigning to a new tenancy).
 // Registered BEFORE /:id routes so "available" is not captured as a path param.
-carparkRoutes.get("/available", async (c) => {
+carparkRoutes.get("/available", requirePermission("portfolio.view"), async (c) => {
   const session = c.get("session");
   const propertyId = c.req.query("propertyId") ?? "";
   if (!propertyId) {
@@ -75,7 +73,7 @@ carparkRoutes.get("/available", async (c) => {
 
 // POST /api/carparks
 // Register a new carpark bay under a given apartment.
-carparkRoutes.post("/", async (c) => {
+carparkRoutes.post("/", requirePermission("portfolio.create"), async (c) => {
   const session = c.get("session");
   const raw = await c.req.json().catch(() => null);
   if (!raw || typeof raw !== "object") {
@@ -98,7 +96,7 @@ carparkRoutes.post("/", async (c) => {
 // POST /api/carparks/assign
 // Assign one or more bays to a tenancy.
 // Registered BEFORE /:id routes so "assign" is not captured as a path param.
-carparkRoutes.post("/assign", async (c) => {
+carparkRoutes.post("/assign", requirePermission("tenancy.move"), async (c) => {
   const session = c.get("session");
   const raw = await c.req.json().catch(() => null);
   if (!raw || typeof raw !== "object") {
@@ -120,7 +118,7 @@ carparkRoutes.post("/assign", async (c) => {
 
 // POST /api/carparks/assignments/:id/release
 // End a single active carpark assignment mid-tenancy (admin-initiated).
-carparkRoutes.post("/assignments/:id/release", async (c) => {
+carparkRoutes.post("/assignments/:id/release", requirePermission("tenancy.move"), async (c) => {
   const session = c.get("session");
   const assignmentId = c.req.param("id");
   const result = await releaseAssignmentService(
@@ -136,7 +134,7 @@ carparkRoutes.post("/assignments/:id/release", async (c) => {
 // PATCH /api/carparks/:id
 // Update a bay's label, monthly rate, status, or notes.
 // Merges path param as carparkId into the parsed body (tenancy.routes.ts:75 pattern).
-carparkRoutes.patch("/:id", async (c) => {
+carparkRoutes.patch("/:id", requirePermission("portfolio.edit"), async (c) => {
   const session = c.get("session");
   const id = c.req.param("id");
   const raw = await c.req.json().catch(() => ({}));
@@ -156,7 +154,7 @@ carparkRoutes.patch("/:id", async (c) => {
 
 // POST /api/carparks/:id/deactivate
 // Deactivate a bay. Blocked (409) if the bay has an active assignment.
-carparkRoutes.post("/:id/deactivate", async (c) => {
+carparkRoutes.post("/:id/deactivate", requirePermission("portfolio.delete"), async (c) => {
   const session = c.get("session");
   const carparkId = c.req.param("id");
   const result = await deactivateCarparkService(

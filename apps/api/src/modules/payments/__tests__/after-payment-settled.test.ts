@@ -19,6 +19,9 @@ vi.mock("../../owner-billing/mgmt-fee-on-payment.hook", () => ({ issueMgmtFeeFor
 const autoOffsetOwnerReceivablesForPaidRent = vi.hoisted(() => vi.fn());
 vi.mock("../../owner-billing/auto-offset-on-rent.hook", () => ({ autoOffsetOwnerReceivablesForPaidRent }));
 
+const recordDepositsPayableToOwnerForPaidCharges = vi.hoisted(() => vi.fn());
+vi.mock("../../owner-billing/deposit-held-on-payment.hook", () => ({ recordDepositsPayableToOwnerForPaidCharges }));
+
 import { afterPaymentSettled } from "../after-payment-settled";
 
 describe("afterPaymentSettled", () => {
@@ -31,16 +34,19 @@ describe("afterPaymentSettled", () => {
     issueMgmtFeeForPaidRent.mockImplementation(async () => {
       calls.push("fee");
     });
+    recordDepositsPayableToOwnerForPaidCharges.mockImplementation(async () => {
+      calls.push("deposit");
+    });
     autoOffsetOwnerReceivablesForPaidRent.mockImplementation(async () => {
       calls.push("offset");
     });
   });
 
-  it("runs sync -> fee -> offset, in that order", async () => {
+  it("runs sync -> fee -> deposit -> offset, in that order", async () => {
     await afterPaymentSettled("org-1", "user-1", "admin", ["ch-1"]);
     // offset LAST is load-bearing: it settles the IVOWN lines the fee step issues,
-    // against the payable the sync step refreshes. Any other order settles nothing.
-    expect(calls).toEqual(["sync", "fee", "offset"]);
+    // against rent plus the deposit payable projected immediately before it.
+    expect(calls).toEqual(["sync", "fee", "deposit", "offset"]);
   });
 
   it("passes the same org/user/role/chargeIds to both", async () => {
@@ -48,6 +54,7 @@ describe("afterPaymentSettled", () => {
     const args = ["org-1", "user-1", "admin", ["ch-1", "ch-2"]];
     expect(syncOwnerLedgerForCharges).toHaveBeenCalledWith(...args);
     expect(issueMgmtFeeForPaidRent).toHaveBeenCalledWith(...args);
+    expect(recordDepositsPayableToOwnerForPaidCharges).toHaveBeenCalledWith(...args);
     expect(autoOffsetOwnerReceivablesForPaidRent).toHaveBeenCalledWith(...args);
   });
 
@@ -55,6 +62,7 @@ describe("afterPaymentSettled", () => {
     await afterPaymentSettled("org-1", "user-1", "admin", []);
     expect(syncOwnerLedgerForCharges).toHaveBeenCalledWith("org-1", "user-1", "admin", []);
     expect(issueMgmtFeeForPaidRent).toHaveBeenCalledWith("org-1", "user-1", "admin", []);
+    expect(recordDepositsPayableToOwnerForPaidCharges).toHaveBeenCalledWith("org-1", "user-1", "admin", []);
     expect(autoOffsetOwnerReceivablesForPaidRent).toHaveBeenCalledWith("org-1", "user-1", "admin", []);
   });
 });

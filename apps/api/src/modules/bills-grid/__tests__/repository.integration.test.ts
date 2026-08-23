@@ -67,12 +67,12 @@ dn("bills-grid repository — get-or-create", () => {
   // The CREATE half of the unit-type defaults. Its READ twin is toBearerConfigDto /
   // getBearerConfigService (row-dto-mappers.test.ts) — if these two ever disagree, the
   // drawer shows an admin one bearer while the entry snapshot silently bills the other.
-  it("config from WHOLE defaults when absent — cleaning/WiFi start TENANT-borne", async () => {
+  it("config from WHOLE defaults when absent — cleaning/WiFi start OWNER-borne", async () => {
     const cfg = await db.$transaction((tx) => resolveBearerConfig(tx, { orgId: ORG, apartmentId: APT }));
     expect(cfg.tnbPattern).toBe("recharged");
     expect(cfg.airPattern).toBe("recharged");
-    expect(cfg.cleaningBearer).toBe("tenant");
-    expect(cfg.wifiBearer).toBe("tenant");
+    expect(cfg.cleaningBearer).toBe("owner");
+    expect(cfg.wifiBearer).toBe("owner");
     expect(cfg.maintenanceFeeBearer).toBe("owner");
     expect(String(cfg.cleaningRecurringAmount)).toBe("100");
   });
@@ -88,9 +88,8 @@ dn("bills-grid repository — get-or-create", () => {
     expect(cfg.airPattern).toBe("recharged");
   });
 
-  // Non-retroactive: a unit an admin has ALREADY configured keeps exactly what they
-  // chose. resolveBearerConfig must return the stored row untouched and never re-seed
-  // it from the listing mode — this is what keeps the default change safe to ship.
+  // Non-retroactive READ: a historical config is returned untouched. The explicit
+  // bearer-config SAVE path is what converts future/open snapshots to owner-only.
   it("an existing config is returned untouched — the listing-mode default never overwrites an admin's choice", async () => {
     await db.unitBillsBearerConfig.upsert({
       where: { organizationId_apartmentId: { organizationId: ORG, apartmentId: APT_PART } },
@@ -132,7 +131,7 @@ dn("bills-grid repository — get-or-create", () => {
     const e = await db.$transaction((tx) =>
       getOrCreateEntry(tx, { orgId: ORG, apartmentId: APT, periodMonth: period, actorUserId: ACTOR }),
     );
-    expect(e.cleaningBearer).toBe("owner"); // APT is WHOLE, whose default is "tenant"
+    expect(e.cleaningBearer).toBe("owner");
     expect(e.wifiBearer).toBe("owner");
   });
 

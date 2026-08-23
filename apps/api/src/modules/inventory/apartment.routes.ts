@@ -14,7 +14,7 @@
 import { Hono } from "hono";
 import { updateApartmentSharedSchema } from "@kason/shared";
 import type { SessionPayload } from "../../lib/auth";
-import { requireRole } from "../../middleware/require-role";
+import { requirePermission } from "../../middleware/require-permission";
 import {
   flipApartmentModeService,
   updateApartmentSharedService,
@@ -24,7 +24,7 @@ const apartmentRoutes = new Hono<{ Variables: { session: SessionPayload } }>();
 
 // Both flip-mode and shared-edit are manager+ ops (matches the listings
 // module's mutation gate).
-apartmentRoutes.use("*", requireRole("manager"));
+apartmentRoutes.use("*", requirePermission("portfolio.edit"));
 
 // POST /api/apartments/:id/flip-mode
 // Body: { targetMode: "WHOLE" | "PARTITIONED" }

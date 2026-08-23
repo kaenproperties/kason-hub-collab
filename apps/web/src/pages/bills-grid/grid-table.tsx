@@ -8,8 +8,8 @@
 // legitimate empty state, NOT a regression (§16). `row.bearerConfig` is
 // ALWAYS present (server sends defaults when no config row exists) — treating
 // it as possibly-absent here would itself be a contract regression.
-import { Fragment, useCallback, useEffect, useRef, useState } from "react";
-import { Building2, Paperclip, Eye, History, ReceiptText, ListPlus, FileText, Download } from "lucide-react";
+import { Fragment, useCallback, useEffect, useRef, useState, type PointerEvent as ReactPointerEvent } from "react";
+import { Building2, Paperclip, Eye, History, ReceiptText, ListPlus, FileText, Download, Settings2, CalendarClock } from "lucide-react";
 import type { GridRow, GridSubRow } from "@/api/bills-grid";
 import { visibleSubRows } from "./occupancy";
 import { DataTable, TableHead, StatusPill, EmptyRow } from "@/components/ui";
@@ -21,7 +21,7 @@ import { OwnerDetailPanel } from "@/pages/parties/owner-detail-panel";
 import { TenantDetailPanel } from "@/pages/parties/tenant-detail-panel";
 import { PHASE2_STATUS_TONES } from "@kason/shared";
 import type { StatusTone, SettlementState } from "@kason/shared";
-import { isCellLocked, isRowLocked, scalarGeneratedAmount, scalarSettingsLock, type GovernableScalarColumn } from "./row-lock";
+import { isCellLocked, scalarGeneratedAmount, scalarSettingsLock, type GovernableScalarColumn } from "./row-lock";
 import { cn } from "@/lib/utils";
 import type { ColumnId, GridColumn } from "./columns";
 import { settlementBucketForColumn } from "./columns";
@@ -76,7 +76,7 @@ function AuditIcon({ name, at, onClick, unitCode }: { name: string | null | unde
   return (
     <button
       type="button"
-      className="inline-flex h-9 w-9 items-center justify-center rounded-lg text-muted-foreground/70 transition hover:bg-muted hover:text-[var(--navy)]"
+      className="inline-flex h-9 w-9 items-center justify-center rounded-lg text-[var(--navy)] transition hover:bg-[var(--gold)]/15 hover:text-[var(--gold)]"
       title={title}
       aria-label={`View activity log for ${unitCode}`}
       data-testid="audit-icon"
@@ -122,8 +122,10 @@ export interface GridTableProps {
   columns: GridColumn[];
   displayMode?: GridDisplayMode;
   density?: "comfortable" | "compact";
+  canEdit?: boolean;
   onCellEdit?: CellEditHandler;
   onOpenSettings?: (apartmentId: string) => void; // R11 — per-unit bearer drawer
+  onConfigureManagementFee?: (apartmentId: string) => void;
   onViewExpenses?: (apartmentId: string, bearer: ExpenseBearer, withSST: boolean) => void;
   onViewRecurring?: (apartmentId: string, bearer: RecurringBearer) => void; // recurring-charges — recurring dialog trigger
   onOpenAttachments?: (apartmentId: string) => void; // attachments panel
@@ -483,9 +485,8 @@ function preferredColumnWidth(columnId: ColumnId): number {
     case "deposit":
       return 86;
     case "agreementFee":
-      // The visible heading is intentionally just "TA". Giving it the same 102px
-      // as Deposit created almost as much blank space as content.
-      return 72;
+      // Make the SST-inclusive contract explicit without clipping the heading.
+      return 116;
     case "amount":
       return 88;
     case "maintenanceFee":
@@ -620,7 +621,6 @@ function categoryDividerClass(columnId: ColumnId): string {
   return cn(
     CATEGORY_START_COLUMNS.has(columnId) && "border-l-2 border-l-[var(--navy)]",
     CATEGORY_END_COLUMNS.has(columnId) && "border-r-2 border-r-[var(--navy)]",
-    columnId === "ownerPayout" && "sticky right-0 z-10",
   );
 }
 
@@ -799,6 +799,7 @@ function EditableCell({
       )}
       style={Object.assign({}, billingStateStyle(billingState, value) ?? (colour ? { backgroundColor: colour } : undefined), selectionOutlineStyle(selectionEdges))}
       data-testid={`cell-${columnId}`}
+      data-copy-value={value}
       // The mark's tooltip: the cell is the hoverable element (the mark itself is
       // pointer-events-none, so a title there would never fire).
       title={tenantBorne ? TENANT_BORNE_LABEL : undefined}
@@ -990,6 +991,7 @@ function ReadOnlyCell({
   badgeCount,
   costActionRequired = false,
   costMargin,
+  managementFeeReady = false,
   warningText,
   active,
   selected,
@@ -1012,12 +1014,14 @@ function ReadOnlyCell({
   onSecondary?: () => void;
   viewLabel?: string;
   viewTestId?: string;
-  viewKind?: "view" | "expense" | "recurring" | "report";
+  viewKind?: "view" | "expense" | "recurring" | "report" | "configure";
   ownerReportStatus?: "draft" | "first_checked" | "approved";
   badgeCount?: number;
   costActionRequired?: boolean;
   /** Completed charged amount minus actual cost for this exact SST cell. */
   costMargin?: number | null;
+  /** Management fee becomes collectible only after the related owner rent is collected. */
+  managementFeeReady?: boolean;
   warningText?: string;
   // P4 Task 3: active-cell nav for the read-only expense totals. All optional
   // — absent ⇒ parity. The <td> is the registered/focused node; the inner
@@ -1041,6 +1045,8 @@ function ReadOnlyCell({
   documentCounts?: CellDocumentCounts;
 }) {
   const dashOnly = isDashDisplay(display);
+  const managementSetupOnly = viewKind === "configure" && Boolean(warningText) && Boolean(onView);
+  const usesLayeredLayout = Boolean(onView || warningText);
   return (
     <td
       ref={registerCell}
@@ -1069,6 +1075,9 @@ function ReadOnlyCell({
         ownerReportStatus ? {
           backgroundColor: ownerReportStatus === "draft" ? "#FF8C00" : ownerReportStatus === "first_checked" ? "#FFFF00" : "#00FF00",
           color: "#082B4F",
+        } : managementFeeReady && !dashOnly ? {
+          backgroundColor: "#00FF00",
+          color: "#082B4F",
         } : billingStateStyle(billingState, display, columnId),
         selectionOutlineStyle(selectionEdges),
       )}
@@ -1079,72 +1088,98 @@ function ReadOnlyCell({
       onClick={(e) => onActivate?.(e)}
       onContextMenu={onContextMenu}
     >
-      {onView ? (
-        <div className="flex min-w-0 max-w-full items-center justify-center gap-0.5">
-          <span className="flex min-w-0 max-w-full items-center justify-center gap-0.5">
-            <span className="min-w-0 overflow-hidden text-ellipsis whitespace-nowrap">{display}</span>
-            <span className="relative inline-flex min-w-0 shrink-0">
-            <Button
-              type="button"
-              variant="ghost"
-              size={viewKind === "view" ? "icon-xs" : "icon"}
-              aria-label={viewLabel}
-              data-testid={viewTestId}
-              // When the cell is nav-wired (onActivate present), stop the click
-              // from ALSO bubbling to the <td>'s onActivate — opening the
-              // expense drawer must not also move the active cell. Parity: when
-              // onActivate is absent this is exactly the old `onClick={onView}`.
-              onClick={onActivate ? (e) => { e.stopPropagation(); onView?.(); } : onView}
-              className={cn(
-                "text-muted-foreground hover:text-foreground",
-                viewKind !== "view" && "h-8 w-8 shrink-0 text-[var(--navy)] hover:bg-[var(--gold)]/15",
-              )}
-            >
-              {viewKind === "expense" ? <ReceiptText className="h-5 w-5" /> : viewKind === "recurring" ? <ListPlus className="h-5 w-5" /> : viewKind === "report" ? <FileText className="h-5 w-5" /> : <Eye />}
-            </Button>
-            {viewKind === "report" && onSecondary && (
-              <Button
-                type="button"
-                variant="ghost"
-                size="icon"
-                className="h-8 w-8 shrink-0 text-[var(--navy)] hover:bg-[var(--gold)]/15"
-                aria-label="Download owner income report PDF"
-                data-testid="owner-report-download-btn"
-                onClick={(e) => { e.stopPropagation(); onSecondary(); }}
+      {usesLayeredLayout ? (
+        <div data-testid="readonly-cell-stack" className="contents">
+          {/* The amount owns an independent layer covering the complete table
+              cell. Bottom actions can therefore never push it upward: it stays
+              mathematically centred both horizontally and vertically. */}
+          <span
+            data-testid="readonly-cell-amount"
+            className="pointer-events-none absolute inset-0 z-0 flex min-w-0 items-center justify-center overflow-hidden px-1 text-center tabular-nums"
+          >
+            <span className="max-w-full overflow-hidden text-ellipsis whitespace-nowrap">{display}</span>
+          </span>
+
+          {/* One shared bottom rail for every read-only action. The rail is
+              independent from the amount layer, centred, and pinned to the
+              bottom of the real <td> rather than following normal text flow. */}
+          <span
+            data-testid="readonly-cell-bottom-rail"
+            className="absolute inset-x-0 bottom-1 z-20 flex min-w-0 max-w-full flex-wrap items-end justify-center gap-0.5 px-1"
+          >
+            {onView && !managementSetupOnly && (
+              <span
+                data-testid="readonly-cell-actions"
+                className="relative inline-flex min-w-0 max-w-full items-center justify-center gap-0.5"
               >
-                <Download className="h-5 w-5" />
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="icon-xs"
+                  aria-label={viewLabel}
+                  data-testid={viewTestId}
+                  // When the cell is nav-wired (onActivate present), stop the click
+                  // from ALSO bubbling to the <td>'s onActivate — opening the
+                  // expense drawer must not also move the active cell. Parity: when
+                  // onActivate is absent this is exactly the old `onClick={onView}`.
+                  onClick={onActivate ? (e) => { e.stopPropagation(); onView?.(); } : onView}
+                  className="h-6 w-6 shrink-0 text-[var(--navy)] hover:bg-[var(--gold)]/15 hover:text-[var(--gold)]"
+                >
+                  {viewKind === "expense" ? <ReceiptText className="h-4 w-4" /> : viewKind === "recurring" ? <ListPlus className="h-4 w-4" /> : viewKind === "report" ? <FileText className="h-4 w-4" /> : viewKind === "configure" ? <Settings2 className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
+                </Button>
+                {viewKind === "report" && onSecondary && (
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="icon-xs"
+                    className="h-6 w-6 shrink-0 text-[var(--navy)] hover:bg-[var(--gold)]/15 hover:text-[var(--gold)]"
+                    aria-label="Download owner income report PDF"
+                    data-testid="owner-report-download-btn"
+                    onClick={(e) => { e.stopPropagation(); onSecondary(); }}
+                  >
+                    <Download className="h-4 w-4" />
+                  </Button>
+                )}
+                {badgeCount != null && <CountBadge count={badgeCount} testId={`${viewTestId}-badge`} />}
+              </span>
+            )}
+            {viewKind === "expense" && costActionRequired && (
+              <Button type="button" variant="outline" size="sm" className="h-6 max-w-full min-w-0 overflow-hidden border-orange-500 bg-orange-50 px-1 text-[clamp(9px,0.7vw,12px)] font-extrabold whitespace-nowrap text-orange-900 shadow-sm hover:bg-orange-100" onClick={onActivate ? (e) => { e.stopPropagation(); onView?.(); } : onView}>
+                Add Cost
               </Button>
             )}
-            {badgeCount != null && <CountBadge count={badgeCount} testId={`${viewTestId}-badge`} />}
-            </span>
+            {viewKind === "expense" && !costActionRequired && badgeCount != null && badgeCount > 0 && costMargin != null && (
+              <span
+                data-testid={`${viewTestId}-margin`}
+                className={cn(
+                  "pointer-events-none h-6 max-w-full min-w-0 overflow-hidden text-ellipsis whitespace-nowrap rounded-md border px-1 py-0.5 text-center text-[clamp(8px,0.65vw,12px)] font-extrabold shadow-sm",
+                  costMargin > 0 && "border-emerald-600 bg-emerald-50 text-emerald-800",
+                  costMargin < 0 && "border-red-600 bg-red-50 text-red-800",
+                  costMargin === 0 && "border-slate-500 bg-slate-50 text-slate-700",
+                )}
+              >
+                {costMargin > 0 ? "Profit" : costMargin < 0 ? "Loss" : "Break-even"} RM{Math.abs(costMargin).toFixed(2)}
+              </span>
+            )}
+            {warningText && (managementSetupOnly ? (
+              <button
+                type="button"
+                className="block h-6 w-fit max-w-full overflow-hidden text-ellipsis whitespace-nowrap rounded border border-red-500 bg-red-50 px-1.5 text-[11px] font-extrabold leading-tight text-red-800 hover:bg-red-100 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-[var(--gold)]"
+                onClick={(event) => {
+                  event.stopPropagation();
+                  onView?.();
+                }}
+              >
+                Set management fee
+              </button>
+            ) : (
+              <span className="block h-6 w-fit max-w-full overflow-hidden text-ellipsis whitespace-nowrap rounded border border-red-500 bg-red-50 px-1.5 py-0.5 text-[11px] font-extrabold leading-tight text-red-800">
+                {warningText}
+              </span>
+            ))}
           </span>
-          {viewKind === "expense" && costActionRequired && (
-            <Button type="button" variant="outline" size="sm" className="absolute bottom-2 left-1 right-1 h-7 min-w-0 overflow-hidden border-orange-500 bg-orange-50 px-1 text-[clamp(9px,0.7vw,12px)] font-extrabold whitespace-nowrap text-orange-900 shadow-sm hover:bg-orange-100" onClick={onActivate ? (e) => { e.stopPropagation(); onView?.(); } : onView}>
-              Add Cost
-            </Button>
-          )}
-          {viewKind === "expense" && !costActionRequired && badgeCount != null && badgeCount > 0 && costMargin != null && (
-            <span
-              data-testid={`${viewTestId}-margin`}
-              className={cn(
-                "pointer-events-none absolute bottom-2 left-1 right-1 h-7 min-w-0 overflow-hidden text-ellipsis whitespace-nowrap rounded-md border px-1 py-1 text-center text-[clamp(8px,0.65vw,12px)] font-extrabold shadow-sm",
-                costMargin > 0 && "border-emerald-600 bg-emerald-50 text-emerald-800",
-                costMargin < 0 && "border-red-600 bg-red-50 text-red-800",
-                costMargin === 0 && "border-slate-500 bg-slate-50 text-slate-700",
-              )}
-            >
-              {costMargin > 0 ? "Profit" : costMargin < 0 ? "Loss" : "Break-even"} RM{Math.abs(costMargin).toFixed(2)}
-            </span>
-          )}
         </div>
-      ) : (
-        display
-      )}
-      {warningText && (
-        <span className="mx-auto mt-1 block w-fit max-w-full overflow-hidden text-ellipsis whitespace-nowrap rounded border border-red-500 bg-red-50 px-1.5 py-0.5 text-[11px] font-extrabold leading-tight text-red-800">
-          {warningText}
-        </span>
-      )}
+      ) : display}
       {settlement && !dashOnly && <SettlementMarker state={settlement} />}
       <CellDocumentMarks counts={documentCounts} />
       <SelectionFillHandle edges={selectionEdges} />
@@ -1159,8 +1194,10 @@ export function GridTable({
   columns,
   displayMode = "easy-read",
   density = "comfortable",
+  canEdit = true,
   onCellEdit,
   onOpenSettings,
+  onConfigureManagementFee,
   onViewExpenses,
   onViewRecurring,
   onOpenAttachments,
@@ -1204,7 +1241,78 @@ export function GridTable({
     }, new Map<string, { key: string; name: string; rows: GridRow[] }>()),
   ).map(([, group]) => group);
   const dataColumns = columns.filter((c) => c.band); // everything except unitCode
-  const preferredDataWidth = dataColumns.reduce((sum, column) => sum + preferredColumnWidth(column.id), 0);
+  const gridSurfaceRef = useRef<HTMLDivElement | null>(null);
+  const automaticallyAutoFittedRef = useRef(false);
+  const [columnWidthOverrides, setColumnWidthOverrides] = useState<
+    Partial<Record<GridDisplayMode, Partial<Record<ColumnId, number>>>>
+  >({});
+
+  function columnWidth(columnId: ColumnId): number {
+    return columnWidthOverrides[displayMode]?.[columnId]
+      ?? initialColumnWidth(columnId, displayMode);
+  }
+
+  function setColumnWidth(columnId: ColumnId, width: number) {
+    setColumnWidthOverrides((previous) => ({
+      ...previous,
+      [displayMode]: {
+        ...previous[displayMode],
+        [columnId]: clampColumnWidth(columnId, width),
+      },
+    }));
+  }
+
+  const tablePixelWidth = columnWidth("unitCode")
+    + dataColumns.reduce((total, column) => total + columnWidth(column.id), 0);
+
+  function autoFitColumn(columnId: ColumnId) {
+    const surface = gridSurfaceRef.current;
+    if (!surface) return;
+    const width = autoFitWidthForColumn(surface, columnId, bandGroups, columnWidth);
+    setColumnWidth(columnId, width);
+  }
+
+  // Excel opens a sheet with every visible column fitted to its real content.
+  // Do the same once the first real billing rows have rendered. This is
+  // deliberately one-shot per page mount: subsequent Live refreshes must not
+  // overwrite widths that the user has manually dragged afterwards.
+  useEffect(() => {
+    if (displayMode !== "fit-all" || rows.length === 0 || automaticallyAutoFittedRef.current) return;
+
+    const frame = window.requestAnimationFrame(() => {
+      const surface = gridSurfaceRef.current;
+      if (!surface || automaticallyAutoFittedRef.current) return;
+
+      const groups = groupBands(columns);
+      const columnIds: ColumnId[] = [
+        "unitCode",
+        ...columns.filter((column) => column.band).map((column) => column.id),
+      ];
+      const currentWidths = columnWidthOverrides[displayMode] ?? {};
+      const widthFor = (columnId: ColumnId) => currentWidths[columnId]
+        ?? initialColumnWidth(columnId, displayMode);
+      const fittedWidths = Object.fromEntries(
+        columnIds.map((columnId) => [
+          columnId,
+          clampColumnWidth(
+            columnId,
+            autoFitWidthForColumn(surface, columnId, groups, widthFor),
+          ),
+        ]),
+      ) as Partial<Record<ColumnId, number>>;
+
+      automaticallyAutoFittedRef.current = true;
+      setColumnWidthOverrides((previous) => ({
+        ...previous,
+        [displayMode]: {
+          ...previous[displayMode],
+          ...fittedWidths,
+        },
+      }));
+    });
+
+    return () => window.cancelAnimationFrame(frame);
+  }, [columns, columnWidthOverrides, displayMode, rows.length]);
 
   // Per-cell keystroke-echo buffer: `${cellKey}:${columnId}` -> user-TYPED
   // value. This is GridTable's own internal state, kept separate from the
@@ -1213,6 +1321,7 @@ export function GridTable({
   const [internalStaged, setInternalStaged] = useState<Record<string, string>>({});
 
   function stageEdit(cellKey: string, columnId: ColumnId, value: string) {
+    if (!canEdit) return;
     setInternalStaged((prev) => ({ ...prev, [`${cellKey}:${columnId}`]: value }));
     onCellEdit?.(cellKey, columnId, value);
   }
@@ -1350,35 +1459,41 @@ export function GridTable({
     // (`select-text`, see EditableCell) so in-cell editing keeps a working caret
     // and text selection.
     <div
+      ref={gridSurfaceRef}
       data-density={density}
+      data-display-mode={displayMode}
       className={cn(
         "select-none rounded-lg border border-[var(--border)] bg-white dark:bg-card",
         density === "compact" && "[&_tbody_td]:py-1",
+        displayMode === "fit-all" && "[&_tbody_td]:px-1 [&_thead_th]:px-1",
       )}
     >
       <DataTable
         className={cn(
-          "billing-matrix w-full table-fixed",
+          "billing-matrix min-w-0 table-fixed",
           displayMode === "easy-read"
             ? "text-[18px]"
             : "text-[15px] [&_td]:text-[15px] [&_th]:text-[15px] [&_input]:text-[15px]",
         )}
-        {...(displayMode === "easy-read" ? { style: { minWidth: `${300 + preferredDataWidth}px` } } : {})}
+        style={{ width: `${tablePixelWidth}px`, minWidth: `${tablePixelWidth}px` }}
       >
         <colgroup>
-          <col style={displayMode === "easy-read" ? { width: "300px" } : { width: "13%" }} />
+          <col data-column-id="unitCode" style={{ width: `${columnWidth("unitCode")}px` }} />
           {dataColumns.map((column) => (
             <col
               key={column.id}
-              style={displayMode === "easy-read"
-                ? { width: `${preferredColumnWidth(column.id)}px` }
-                : { width: `${87 * preferredColumnWidth(column.id) / Math.max(preferredDataWidth, 1)}%` }}
+              data-column-id={column.id}
+              style={{ width: `${columnWidth(column.id)}px` }}
             />
           ))}
         </colgroup>
         <TableHead>
           <tr>
-              <th rowSpan={2} className="sticky left-0 top-0 z-30 select-text border-r-2 border-r-[var(--navy)] bg-[var(--page-bg)] px-3 py-1 text-center text-[18px] font-bold tracking-normal align-middle">
+              <th
+                rowSpan={2}
+                data-column-id="unitCode"
+                className="relative sticky left-0 top-0 z-30 select-text border-r-2 border-r-[var(--navy)] bg-[var(--page-bg)] px-3 py-1 text-center text-[18px] font-bold tracking-normal align-middle"
+              >
               <div className="flex items-center justify-center gap-2">
                 {/* Select-all: checks every BILLABLE unit at once (indeterminate
                     when only some are). §15 bulk-selection — toggles the visible
@@ -1397,12 +1512,20 @@ export function GridTable({
                 )}
                 <span>Unit</span>
               </div>
+              <ColumnResizeHandle
+                columnId="unitCode"
+                label="Unit"
+                width={columnWidth("unitCode")}
+                onResize={setColumnWidth}
+                onAutoFit={autoFitColumn}
+              />
             </th>
             {bandGroups.map((g) => (
               <th
                 key={g.band}
                 colSpan={g.columns.length}
                 data-testid="band-header"
+                data-band-name={g.band}
                 // Excel-Web V2: a band header selects EVERY sub-column under it
                 // (all rows). cursor-pointer + hover cue when interactive.
                 onClick={onSelectColumns ? (e) => { if (!hasNativeTextSelection()) onSelectColumns(g.columns.map((c) => c.id), resolveClickMods(e)); } : undefined}
@@ -1425,12 +1548,19 @@ export function GridTable({
                 onClick={onSelectColumns ? (e) => { if (!hasNativeTextSelection()) onSelectColumns([c.id], resolveClickMods(e)); } : undefined}
                 title={onSelectColumns ? "Select column" : undefined}
                 className={cn(
-                  "sticky top-10 z-20 h-10 select-text whitespace-nowrap bg-[var(--page-bg)] px-2 py-1 text-center text-[18px] font-bold leading-none tracking-normal align-middle border-l border-[var(--border)]",
+                  "relative sticky top-10 z-20 h-10 select-text whitespace-nowrap bg-[var(--page-bg)] px-2 py-1 text-center text-[18px] font-bold leading-none tracking-normal align-middle border-l border-[var(--border)]",
                   categoryDividerClass(c.id),
                   onSelectColumns && "cursor-pointer transition hover:bg-[var(--primary)]/10",
                 )}
               >
-                {c.header}
+                <span className="block overflow-hidden text-ellipsis whitespace-nowrap pr-3">{c.header}</span>
+                <ColumnResizeHandle
+                  columnId={c.id}
+                  label={c.header}
+                  width={columnWidth(c.id)}
+                  onResize={setColumnWidth}
+                  onAutoFit={autoFitColumn}
+                />
               </th>
             ))}
           </tr>
@@ -1448,11 +1578,13 @@ export function GridTable({
                 <GridUnitRowGroup
                   key={row.apartmentId}
                   row={row}
+                  canEdit={canEdit}
                   dataColumns={dataColumns}
                   stagedOrSeed={stagedOrSeed}
                   isStaged={isStaged}
                   stageEdit={stageEdit}
                   onOpenSettings={onOpenSettings}
+                  onConfigureManagementFee={onConfigureManagementFee}
                   onViewExpenses={onViewExpenses}
                   onViewRecurring={onViewRecurring}
                   onOpenAttachments={onOpenAttachments}
@@ -1503,35 +1635,380 @@ export function GridTable({
 
 // ── one apartment's row(s): unit row + optional nested tenant sub-rows + prior strip ──
 
-export function renewalSignalForRow(row: GridRow, now = new Date()): { tenancyId: string; label: string; urgent: boolean } | null {
-  const today = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
-  const candidate = row.subRows
-    .filter((sub): sub is GridSubRow & { tenancyId: string; tenancyEndDate: string } => !!sub.tenancyId && !!sub.tenancyEndDate)
-    .map((sub) => ({ sub, days: Math.ceil((new Date(`${sub.tenancyEndDate.slice(0, 10)}T00:00:00`).getTime() - today) / 86_400_000) }))
-    .filter(({ days }) => days <= 60)
-    .sort((a, b) => a.days - b.days)[0];
-  if (!candidate) return null;
+export type RenewalSignal = {
+  tenancyId: string;
+  label: string;
+  urgent: boolean;
+  tone: "warning" | "danger" | "success" | "neutral";
+  days: number;
+};
 
-  const decision = candidate.sub.renewalDecision ?? "pending";
-  const suffix = candidate.days >= 0 ? `${candidate.days}d left` : `${Math.abs(candidate.days)}d overdue`;
-  if (decision === "not_renew") return { tenancyId: candidate.sub.tenancyId, label: `Move-out planned · ${suffix}`, urgent: false };
-  if (decision === "contacted") return { tenancyId: candidate.sub.tenancyId, label: `Renewal answer pending · ${suffix}`, urgent: candidate.days <= 30 };
+function tenancyEndDays(endDate: string, now: Date): number | null {
+  const datePart = endDate.slice(0, 10);
+  const end = new Date(`${datePart}T00:00:00`);
+  if (Number.isNaN(end.getTime())) return null;
+  const today = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
+  return Math.ceil((end.getTime() - today) / 86_400_000);
+}
+
+/**
+ * The uploaded KAEN workbook uses genuinely narrow, content-led Excel columns
+ * (most money columns are only about 45–60px wide). Fit All mirrors that
+ * behaviour with real pixel columns instead of percentage columns that stretch
+ * to fill the browser and leave large empty gutters. Easy Read keeps the more
+ * generous legacy widths as an optional reading preset.
+ */
+function compactColumnWidth(columnId: ColumnId): number {
+  switch (columnId) {
+    case "unitCode":
+      return 218;
+    case "previousKwh":
+    case "currentKwh":
+      return 105;
+    case "ownerPayout":
+      return 84;
+    case "tenantExpNonSst":
+    case "tenantExpWithSst":
+    case "ownerExpNonSst":
+    case "ownerExpWithSst":
+      return 66;
+    case "rental":
+      return 60;
+    case "deposit":
+      return 64;
+    case "agreementFee":
+      return 116;
+    case "amount":
+      return 60;
+    case "maintenanceFee":
+      return 66;
+    case "managementFeeSst":
+      return 76;
+    default:
+      return 56;
+  }
+}
+
+function initialColumnWidth(columnId: ColumnId, displayMode: GridDisplayMode): number {
+  if (displayMode === "fit-all") return compactColumnWidth(columnId);
+  return columnId === "unitCode" ? 300 : preferredColumnWidth(columnId);
+}
+
+const MIN_COLUMN_WIDTH = 42;
+const MAX_COLUMN_WIDTH = 420;
+const MIN_UNIT_COLUMN_WIDTH = 180;
+const MAX_UNIT_COLUMN_WIDTH = 520;
+
+function clampColumnWidth(columnId: ColumnId, width: number): number {
+  const min = columnId === "unitCode" ? MIN_UNIT_COLUMN_WIDTH : MIN_COLUMN_WIDTH;
+  const max = columnId === "unitCode" ? MAX_UNIT_COLUMN_WIDTH : MAX_COLUMN_WIDTH;
+  return Math.max(min, Math.min(max, Math.round(width)));
+}
+
+function normalisedAutoFitText(value: string | null | undefined): string {
+  return (value ?? "").replace(/\s+/g, " ").trim();
+}
+
+function measuredTextWidth(element: Element, value?: string | null): number {
+  const text = normalisedAutoFitText(value ?? element.textContent);
+  if (!text) return 0;
+
+  const probe = document.createElement("span");
+  const computed = window.getComputedStyle(element);
+  Object.assign(probe.style, {
+    position: "fixed",
+    left: "-10000px",
+    top: "-10000px",
+    visibility: "hidden",
+    whiteSpace: "nowrap",
+    fontFamily: computed.fontFamily,
+    fontSize: computed.fontSize,
+    fontWeight: computed.fontWeight,
+    letterSpacing: computed.letterSpacing,
+    textTransform: computed.textTransform,
+  });
+  probe.textContent = text;
+  document.body.appendChild(probe);
+  const rendered = probe.getBoundingClientRect().width;
+  probe.remove();
+
+  // JSDOM has no layout engine. The deterministic fallback keeps the AutoFit
+  // interaction testable while real browsers use the exact rendered font.
+  return rendered > 0 ? rendered : text.length * 8;
+}
+
+function cssPixels(value: string | undefined): number {
+  const parsed = Number.parseFloat(value ?? "");
+  return Number.isFinite(parsed) ? parsed : 0;
+}
+
+function horizontalChromeWidth(element: Element, fallback: number): number {
+  const computed = window.getComputedStyle(element);
+  const measured = cssPixels(computed.paddingLeft)
+    + cssPixels(computed.paddingRight)
+    + cssPixels(computed.borderLeftWidth)
+    + cssPixels(computed.borderRightWidth);
+  return Math.max(fallback, measured);
+}
+
+/**
+ * Returns the OUTER width an Excel-style column needs in order to show its
+ * longest visible item without ellipsis. `data-copy-value` remains the clean
+ * clipboard value, but AutoFit must also consider controls living beside it
+ * (for example "Set management fee", Add Cost and document buttons).
+ */
+function measuredAutoFitWidth(element: Element): number {
+  const copyValue = normalisedAutoFitText(element.getAttribute("data-copy-value"));
+  const visibleText = normalisedAutoFitText(element.textContent);
+  const explicitContent = element.querySelectorAll('[data-autofit-content="true"]');
+  let contentWidth = Math.max(
+    measuredTextWidth(element, copyValue),
+    copyValue || explicitContent.length > 0 ? 0 : measuredTextWidth(element, visibleText),
+  );
+
+  const visibleControls = element.querySelectorAll(
+    'button:not([data-column-resize-handle="true"]), input, select, [data-autofit-content="true"]',
+  );
+  visibleControls.forEach((control) => {
+    let controlText = control.textContent;
+    if (control instanceof HTMLInputElement || control instanceof HTMLSelectElement) {
+      controlText = control.value;
+    }
+    const controlWidth = measuredTextWidth(control, controlText)
+      + horizontalChromeWidth(control, 12);
+    contentWidth = Math.max(contentWidth, controlWidth);
+  });
+
+  // The header divider sits over the right edge. Reserving its full hit area
+  // is what prevents short labels such as OWNER from still ending in "..."
+  // immediately after AutoFit.
+  const resizeHandleWidth = element.querySelector('[data-column-resize-handle="true"]')
+    ? 14
+    : 0;
+  const safetyPixel = 4;
+  return Math.ceil(contentWidth + horizontalChromeWidth(element, 10) + resizeHandleWidth + safetyPixel);
+}
+
+function autoFitWidthForColumn(
+  surface: HTMLElement,
+  columnId: ColumnId,
+  bandGroups: BandGroup[],
+  widthFor: (columnId: ColumnId) => number,
+): number {
+  const candidates = Array.from(surface.querySelectorAll(
+    columnId === "unitCode"
+      ? '[data-column-id="unitCode"]'
+      : `[data-testid="col-header-${columnId}"], [data-testid="cell-${columnId}"], [data-testid="total-${columnId}"]`,
+  ));
+  let longest = candidates.reduce(
+    (width, element) => Math.max(width, measuredAutoFitWidth(element)),
+    0,
+  );
+
+  // A merged Excel category header belongs to the combined width of its
+  // children. For one-column categories (Management Fee, Owner Payout, Maint
+  // Fee) the sub-column AutoFit must therefore also fit the category title.
+  // For multi-column categories, only add the shortfall left after the other
+  // child columns have contributed their current widths.
+  const group = bandGroups.find((candidate) =>
+    candidate.columns.some((column) => column.id === columnId));
+  if (group) {
+    const bandHeader = Array.from(surface.querySelectorAll<HTMLElement>('[data-band-name]'))
+      .find((element) => element.dataset.bandName === group.band);
+    if (bandHeader) {
+      const siblingWidth = group.columns
+        .filter((column) => column.id !== columnId)
+        .reduce((total, column) => total + widthFor(column.id), 0);
+      longest = Math.max(longest, measuredAutoFitWidth(bandHeader) - siblingWidth);
+    }
+  }
+
+  return longest;
+}
+
+type ColumnResizeHandleProps = {
+  columnId: ColumnId;
+  label: string;
+  width: number;
+  onResize: (columnId: ColumnId, width: number) => void;
+  onAutoFit: (columnId: ColumnId) => void;
+};
+
+function ColumnResizeHandle({
+  columnId,
+  label,
+  width,
+  onResize,
+  onAutoFit,
+}: ColumnResizeHandleProps) {
+  const drag = useRef<{ pointerId: number; startX: number; startWidth: number } | null>(null);
+
+  function finishDrag(event: ReactPointerEvent<HTMLButtonElement>) {
+    if (drag.current?.pointerId !== event.pointerId) return;
+    if (typeof event.currentTarget.hasPointerCapture === "function"
+      && event.currentTarget.hasPointerCapture(event.pointerId)) {
+      event.currentTarget.releasePointerCapture(event.pointerId);
+    }
+    drag.current = null;
+  }
+
+  return (
+    <button
+      type="button"
+      aria-label={`Resize ${label} column`}
+      title={`Drag to resize ${label}; double-click to AutoFit`}
+      data-testid={`column-resize-${columnId}`}
+      data-column-resize-handle="true"
+      className="absolute right-0 top-0 z-40 h-full w-3 cursor-col-resize touch-none border-0 bg-transparent p-0 hover:bg-[var(--gold)]/55 focus:bg-[var(--gold)]/55 focus:outline-none"
+      onClick={(event) => event.stopPropagation()}
+      onPointerDown={(event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        drag.current = { pointerId: event.pointerId, startX: event.clientX, startWidth: width };
+        if (typeof event.currentTarget.setPointerCapture === "function") {
+          event.currentTarget.setPointerCapture(event.pointerId);
+        }
+      }}
+      onPointerMove={(event) => {
+        const activeDrag = drag.current;
+        if (!activeDrag || activeDrag.pointerId !== event.pointerId) return;
+        event.preventDefault();
+        event.stopPropagation();
+        onResize(columnId, activeDrag.startWidth + event.clientX - activeDrag.startX);
+      }}
+      onPointerUp={finishDrag}
+      onPointerCancel={finishDrag}
+      onLostPointerCapture={() => { drag.current = null; }}
+      onDoubleClick={(event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        onAutoFit(columnId);
+      }}
+    />
+  );
+}
+
+export function formatTenancyEndDate(value: string | null | undefined): string | null {
+  if (!value) return null;
+  const [year, month, day] = value.slice(0, 10).split("-").map(Number);
+  if (!year || !month || !day) return null;
+  const date = new Date(Date.UTC(year, month - 1, day));
+  if (Number.isNaN(date.getTime())) return null;
+  return new Intl.DateTimeFormat("en-GB", {
+    day: "2-digit",
+    month: "short",
+    year: "numeric",
+    timeZone: "UTC",
+  }).format(date);
+}
+
+/** Compact business identity for the pinned Unit cell. Some legacy imports
+ * already stored the property short form at the start of `unitCode`; avoid
+ * producing labels such as "PV9 PV9 A-13-13" while newer records render the
+ * intended "Property Short Form + Unit Number" format. */
+export function formatUnitIdentity(propertyCode: string | null | undefined, unitCode: string): string {
+  const shortForm = propertyCode?.trim() ?? "";
+  const unit = unitCode.trim();
+  if (!shortForm) return unit;
+  const shortLower = shortForm.toLocaleLowerCase();
+  const unitLower = unit.toLocaleLowerCase();
+  if (
+    unitLower === shortLower
+    || unitLower.startsWith(`${shortLower} `)
+    || unitLower.startsWith(`${shortLower}-`)
+  ) return unit;
+  return `${shortForm} ${unit}`;
+}
+
+export function renewalSignalForSubRow(row: GridRow, subRow: GridSubRow, now = new Date()): RenewalSignal | null {
+  if (!subRow.tenancyId || !subRow.tenancyEndDate) return null;
+  const days = tenancyEndDays(subRow.tenancyEndDate, now);
+  if (days == null || days > 60) return null;
+
+  const decision = subRow.renewalDecision ?? "pending";
+  const suffix = days >= 0 ? `${days}d left` : `${Math.abs(days)}d overdue`;
+  if (decision === "not_renew") {
+    return { tenancyId: subRow.tenancyId, label: `Move-out planned · ${suffix}`, urgent: false, tone: "neutral", days };
+  }
+  if (decision === "contacted") {
+    const urgent = days <= 14;
+    return { tenancyId: subRow.tenancyId, label: `Renewal answer pending · ${suffix}`, urgent, tone: urgent ? "danger" : "warning", days };
+  }
   if (decision === "renew") {
     // RM0 is still an explicit TA fee decision and is deliberately visible for
     // correction; only the absence of a charge means Operations has not added it.
     const feeCreated = (row.agreementFees?.renewal.state ?? "none") !== "none";
-    return { tenancyId: candidate.sub.tenancyId, label: feeCreated ? "Renewal ready to complete" : "Renewal · add TA fee", urgent: !feeCreated };
+    return {
+      tenancyId: subRow.tenancyId,
+      label: feeCreated ? "Renewal ready to complete" : "Renewal confirmed · add TA fee",
+      urgent: !feeCreated,
+      tone: feeCreated ? "success" : "warning",
+      days,
+    };
   }
-  return { tenancyId: candidate.sub.tenancyId, label: `Ask tenant about renewal · ${suffix}`, urgent: true };
+  const urgent = days <= 30;
+  return {
+    tenancyId: subRow.tenancyId,
+    label: `Ask tenant about renewal · ${suffix}`,
+    urgent,
+    tone: urgent ? "danger" : "warning",
+    days,
+  };
+}
+
+export function renewalSignalForRow(row: GridRow, now = new Date()): RenewalSignal | null {
+  return row.subRows
+    .map((subRow) => renewalSignalForSubRow(row, subRow, now))
+    .filter((signal): signal is RenewalSignal => signal != null)
+    .sort((a, b) => a.days - b.days)[0] ?? null;
+}
+
+function TenancyEndControl({ row, subRow }: { row: GridRow; subRow: GridSubRow }) {
+  const endDate = formatTenancyEndDate(subRow.tenancyEndDate);
+  const signal = renewalSignalForSubRow(row, subRow);
+  if (!endDate && !signal) return null;
+
+  return (
+    <span className="inline-flex flex-wrap items-center gap-1.5 not-italic">
+      {endDate && (
+        <span
+          className="inline-flex items-center gap-1 whitespace-nowrap rounded-md border border-[var(--gold)]/60 bg-[var(--gold)]/10 px-1.5 py-0.5 text-[12px] font-semibold text-[var(--navy)]"
+          title={`Tenancy ends on ${endDate}`}
+          data-testid="tenancy-end-date"
+        >
+          <CalendarClock className="h-3.5 w-3.5 text-[var(--gold)]" aria-hidden="true" />
+          Ends {endDate}
+        </span>
+      )}
+      {signal && (
+        <a
+          href={`/tenancy/tenancies?renewal=${encodeURIComponent(signal.tenancyId)}`}
+          className={cn(
+            "inline-flex min-h-7 items-center rounded-full border px-2 py-0.5 text-[11px] font-extrabold leading-tight shadow-sm transition hover:-translate-y-px hover:shadow-md",
+            signal.tone === "danger" && "border-red-500 bg-red-100 text-red-800",
+            signal.tone === "warning" && "border-orange-400 bg-orange-100 text-orange-900",
+            signal.tone === "success" && "border-emerald-500 bg-emerald-100 text-emerald-800",
+            signal.tone === "neutral" && "border-slate-400 bg-slate-100 text-slate-800",
+          )}
+          title="Open the renewal follow-up workflow"
+          data-testid="renewal-signal"
+        >
+          {signal.label}
+        </a>
+      )}
+    </span>
+  );
 }
 
 function GridUnitRowGroup({
   row,
+  canEdit,
   dataColumns,
   stagedOrSeed,
   isStaged,
   stageEdit,
   onOpenSettings,
+  onConfigureManagementFee,
   onViewExpenses,
   onViewRecurring,
   onOpenAttachments,
@@ -1560,11 +2037,13 @@ function GridUnitRowGroup({
   density,
 }: {
   row: GridRow;
+  canEdit: boolean;
   dataColumns: GridColumn[];
   stagedOrSeed: (cellKey: string, columnId: ColumnId, seed: string) => string;
   isStaged: (cellKey: string, columnId: ColumnId) => boolean;
   stageEdit: (cellKey: string, columnId: ColumnId, value: string) => void;
   onOpenSettings?: (apartmentId: string) => void;
+  onConfigureManagementFee?: (apartmentId: string) => void;
   onViewExpenses?: (apartmentId: string, bearer: ExpenseBearer, withSST: boolean) => void;
   onViewRecurring?: (apartmentId: string, bearer: RecurringBearer) => void;
   onOpenAttachments?: (apartmentId: string) => void;
@@ -1658,10 +2137,9 @@ function GridUnitRowGroup({
   // with ANY money against it — partial or full — renders read-only, matching
   // the server freeze instead of offering an edit that Save would reject. See
   // row-lock.ts for the full rationale.
-  const isLocked = isRowLocked(row);
   // Cell-grain (R6): partial re-Bill means paying the electricity no longer freezes the
   // WiFi, so the row lock is now coarser than the money it represents. `isCellLocked`
-  // starts from `isLocked` and can only ever UNLOCK a cell whose own bucket is unpaid —
+  // starts from the row lock and can only ever UNLOCK a cell whose own bucket is unpaid —
   // it never opens a cell the row lock kept shut.
   const cellLocked = (columnId: ColumnId) => isCellLocked(row, columnId);
 
@@ -1673,8 +2151,6 @@ function GridUnitRowGroup({
   // exclusive below — a re-Billed row shows Re-Billed only, never both.
   const hasLiveBill = row.billed ?? row.billedAt != null;
   const needsBill = row.entryId != null && (!hasLiveBill || row.hasUnbilledChanges === true);
-  const renewalSignal = renewalSignalForRow(row);
-
   function cellBillingState(cellKey: string, columnId: ColumnId): BillingCellState | undefined {
     return billingStateForCell(row, cellKey, columnId, isCellPendingRebill);
   }
@@ -1747,7 +2223,7 @@ function GridUnitRowGroup({
         ? (e: React.MouseEvent) => onCellActivate(cellKey, columnId, resolveClickMods(e))
         : undefined,
       onContextMenu: onCellContextMenu ? (e: React.MouseEvent) => onCellContextMenu({ cellKey, columnId }, e) : undefined,
-      onDoubleClick: onCellDoubleClick ? () => onCellDoubleClick(cellKey, columnId) : undefined,
+      onDoubleClick: canEdit && onCellDoubleClick ? () => onCellDoubleClick(cellKey, columnId) : undefined,
       registerCell: registerCell ? (node: HTMLElement | null) => registerCell(cellKey, columnId, node) : undefined,
     };
   }
@@ -1795,16 +2271,31 @@ function GridUnitRowGroup({
     };
   }
 
+  const unitIdentity = formatUnitIdentity(row.propertyCode, row.unitCode);
+  const unitIdentityTitle = `${row.propertyName} · ${unitIdentity}`;
+
   return (
     <Fragment>
       <tr className="border-b border-[var(--border)] transition hover:bg-[var(--page-bg)]">
-        <td className={cn("sticky left-0 z-10 select-text border-r-2 border-r-[var(--navy)] bg-[var(--page-bg)] px-4 text-[18px] text-[var(--text-primary)] align-top selection:bg-[var(--primary)]/25", density === "compact" ? "py-1.5" : "py-3")}>
+        <td
+          data-column-id="unitCode"
+          className={cn("sticky left-0 z-10 select-text border-r-2 border-r-[var(--navy)] bg-[var(--page-bg)] px-4 text-[18px] text-[var(--text-primary)] align-top selection:bg-[var(--primary)]/25", density === "compact" ? "py-1.5" : "py-3")}
+        >
+          {/* The primary row is a fixed two-track grid: identity + payment
+              status on the left, actions on the right. Every unit therefore
+              follows the first-row pattern even when names are long or the
+              browser is zoomed. Secondary billing warnings use row two. */}
+          <div
+            data-testid="unit-primary-row"
+            data-autofit-content="true"
+            className="grid min-w-0 grid-cols-[minmax(0,1fr)_auto] items-center gap-x-1.5"
+          >
           {/* Identity line — the primary scan target. The unit code must read
               on ONE line: `whitespace-nowrap` stops the browser breaking a
               hyphenated code (e.g. "A-08-02") at each "-", and `shrink-0` stops
               it being squeezed when the sticky column is tight. Status pill sits
-              beside it; row actions cluster to the right via `ml-auto`. */}
-          <div className="flex min-w-0 items-center gap-2">
+              beside it; row actions occupy the fixed right track. */}
+          <div data-testid="unit-identity-line" data-autofit-content="true" className="col-start-1 row-start-1 flex min-w-0 items-center gap-1.5 overflow-hidden text-[var(--navy)]">
             {/* Per-unit Bill selection — only billable rows (saved, not yet
                 billed) render a checkbox. Billing a checked unit issues ALL its
                 tenants' invoices + the owner invoice in one backend op. */}
@@ -1823,57 +2314,52 @@ function GridUnitRowGroup({
                 data-testid="unit-code-btn"
                 aria-label={`Settings for ${row.unitCode}`}
                 onClick={() => { if (!hasNativeTextSelection()) onOpenSettings(row.apartmentId); }}
-                title={`${row.propertyName} ${row.unitCode}`.trim()}
+                title={unitIdentityTitle}
                 className="min-w-0 select-text truncate whitespace-nowrap rounded font-semibold underline-offset-2 hover:underline focus:outline-none focus:ring-2 focus:ring-[var(--ring)]"
               >
-                {row.propertyName && <span>{row.propertyName} </span>}
-                <span className="font-mono">{row.unitCode}</span>
+                {unitIdentity}
               </button>
             ) : (
-              <span className="min-w-0 select-text truncate whitespace-nowrap font-semibold" title={`${row.propertyName} ${row.unitCode}`.trim()}>
-                {row.propertyName && <span>{row.propertyName} </span>}
-                <span className="font-mono">{row.unitCode}</span>
+              <span className="min-w-0 select-text truncate whitespace-nowrap font-semibold" title={unitIdentityTitle}>
+                {unitIdentity}
               </span>
             )}
-          </div>
-          <div className={cn("flex min-w-0 flex-wrap items-center gap-2", density === "compact" ? "mt-0.5 pr-32" : "mt-2 pr-20")}>
             <StatusPill tone={settlementTone} testId="entry-payment-pill">
               {settlementLabel}
             </StatusPill>
-            {needsBill && (
-              <Badge variant="amber" data-testid="needs-bill-badge">
-                {hasLiveBill ? "Needs Re-Bill" : "Needs Bill"}
-              </Badge>
-            )}
-            {renewalSignal && (
-              <a
-                href={`/tenancy/tenancies?renewal=${encodeURIComponent(renewalSignal.tenancyId)}`}
-                className={cn(
-                  "inline-flex h-7 items-center rounded-full border px-2.5 text-xs font-extrabold shadow-sm transition hover:-translate-y-px hover:shadow-md",
-                  renewalSignal.urgent
-                    ? "animate-pulse border-red-500 bg-red-100 text-red-800"
-                    : "border-amber-400 bg-amber-100 text-amber-900",
-                )}
-                title="Open the tenant renewal workflow"
-                data-testid="renewal-signal"
-              >
-                {renewalSignal.label}
-              </a>
-            )}
-            {/* R13 — money settled against a proforma line whose tax invoice never got
-                minted. The MONEY IS CORRECT; only the document is missing, which is why
-                this reads "Invoice pending" rather than anything alarming about payment.
-                Repairable via POST /bills-grid/entries/:entryId/graduate-retry. Without
-                this chip the repair path exists but nobody can find it. */}
-            {row.graduationPending && (
-              <Badge variant="amber" data-testid="graduation-pending-badge">Invoice pending</Badge>
-            )}
+          </div>
+          {/* `contents` lets both children participate in the parent grid. The
+              action rail is locked to row one; optional warning badges remain
+              on row two and can never push the icons over Owner/Tenant details. */}
+          <div
+            data-testid="unit-status-actions-row"
+            className="contents"
+          >
             <span className={cn(
-              "absolute right-2 grid shrink-0 gap-0.5 rounded-lg border border-[var(--border)]/70 bg-[var(--page-bg)]/95 p-0.5 shadow-sm backdrop-blur-sm",
-              density === "compact"
-                ? "top-7 grid-cols-4 [&_button]:h-7 [&_button]:w-7"
-                : "top-11 grid-cols-2",
+              "col-span-2 row-start-2 flex min-w-0 flex-wrap items-center gap-2",
+              density === "compact" ? "mt-0.5" : "mt-2",
             )}>
+              {needsBill && (
+                <Badge variant="amber" data-testid="needs-bill-badge">
+                  {hasLiveBill ? "Needs Re-Bill" : "Needs Bill"}
+                </Badge>
+              )}
+              {/* R13 — money settled against a proforma line whose tax invoice never got
+                  minted. The MONEY IS CORRECT; only the document is missing, which is why
+                  this reads "Invoice pending" rather than anything alarming about payment.
+                  Repairable via POST /bills-grid/entries/:entryId/graduate-retry. Without
+                  this chip the repair path exists but nobody can find it. */}
+              {row.graduationPending && (
+                <Badge variant="amber" data-testid="graduation-pending-badge">Invoice pending</Badge>
+              )}
+            </span>
+            <span
+              data-testid="unit-action-cluster"
+              className={cn(
+                "col-start-2 row-start-1 grid shrink-0 grid-cols-4 gap-0.5 rounded-lg border border-[var(--border)]/70 bg-[var(--page-bg)]/95 p-0.5 shadow-sm",
+                density === "compact" && "[&_button]:h-7 [&_button]:w-7",
+              )}
+            >
               {onViewTenantDocuments && row.subRows.some((sub) => sub.partyId) && (
                 <Button
                   type="button"
@@ -1931,7 +2417,7 @@ function GridUnitRowGroup({
                     title="Unit bills (owner) — never shown to a tenant"
                     data-testid="attachments-btn"
                     onClick={(e) => { e.stopPropagation(); onOpenAttachments(row.apartmentId); }}
-                    className="text-muted-foreground hover:text-foreground"
+                    className="text-[var(--navy)] hover:bg-[var(--gold)]/15 hover:text-[var(--gold)]"
                   >
                     <Paperclip className="h-4 w-4" />
                   </Button>
@@ -1946,6 +2432,7 @@ function GridUnitRowGroup({
               />
             </span>
           </div>
+          </div>
           {/* Context lines — occupancy/tenant then the parent property/condo
               name (Item 5: identifies which building a unit belongs to, critical
               under the "All" filter where condos interleave). Both `truncate`
@@ -1953,7 +2440,7 @@ function GridUnitRowGroup({
               sticky column wider (which is what was crushing the code above).
               The occupancy element keeps its exact text — tests assert its
               textContent verbatim ("Whole unit · {name}" / "3 rooms"). */}
-          <div className={cn("max-w-[24rem] text-[18px]", density === "compact" ? "mt-0 space-y-0 pr-32 leading-tight" : "mt-1 space-y-0.5 pr-20")}>
+          <div className={cn("max-w-[24rem] text-[18px] leading-tight", density === "compact" ? "mt-0 space-y-0" : "mt-1 space-y-0.5")}>
             {/* Whole-unit tenant name lives in this tag ("Whole unit · {name}"). It used to
                 `truncate` and got clipped by the narrow unit column — now it WRAPS within the
                 capped width so the full tenant name shows without dragging the column wider.
@@ -1961,49 +2448,59 @@ function GridUnitRowGroup({
             {row.isWholeUnit ? (
               <div
                 data-testid="unit-occupancy-tag"
-                className="whitespace-normal break-words text-[18px] text-muted-foreground"
+                data-autofit-content="true"
+                className="whitespace-normal break-words text-[18px] font-semibold leading-tight text-[var(--navy)]"
                 title={`Whole unit: ${row.ownerName ?? "—"}`}
               >
-                <span className="text-muted-foreground/70">Whole unit: </span>
+                <span className="text-[18px] font-semibold leading-tight text-[var(--navy)]">Whole unit: </span>
                 {row.ownerPartyId ? (
                   <button
                     type="button"
-                    className="select-text font-semibold text-[var(--navy)] underline decoration-[var(--gold)] decoration-2 underline-offset-4 hover:text-[var(--gold)]"
+                    className="select-text text-[18px] font-semibold leading-tight text-[var(--navy)] underline decoration-[var(--gold)] decoration-2 underline-offset-4 hover:text-[var(--gold)]"
                     onClick={(event) => { event.stopPropagation(); if (!hasNativeTextSelection()) setPartyPreview({ id: row.ownerPartyId!, type: "owner", name: row.ownerName ?? "Owner" }); }}
                   >{row.ownerName ?? "—"}</button>
-                ) : <span className="font-medium text-foreground/80">{row.ownerName ?? "—"}</span>}
+                ) : <span className="text-[18px] font-semibold leading-tight text-[var(--navy)]">{row.ownerName ?? "—"}</span>}
               </div>
             ) : (
               <div
                 data-testid="unit-occupancy-tag"
-                className="whitespace-normal break-words text-[18px] text-muted-foreground"
+                data-autofit-content="true"
+                className="whitespace-normal break-words text-[18px] text-[var(--navy)]"
                 title={occupancyTag}
               >
                 {occupancyTag}
               </div>
             )}
             {row.isWholeUnit && inlineSubRow?.partyName && (
-              <div data-testid="whole-unit-tenant" className="break-words text-[18px] text-muted-foreground">
-                <span className="text-muted-foreground/70">Tenant: </span>
-                {inlineSubRow.partyId ? (
-                  <button
-                    type="button"
-                    className="select-text font-semibold text-[var(--navy)] underline decoration-[var(--gold)] decoration-2 underline-offset-4 hover:text-[var(--gold)]"
-                    onClick={(event) => { event.stopPropagation(); if (!hasNativeTextSelection()) setPartyPreview({ id: inlineSubRow.partyId!, type: "tenant", name: inlineSubRow.partyName ?? "Tenant" }); }}
-                  >{inlineSubRow.partyName}</button>
-                ) : <span className="font-medium text-foreground/80">{inlineSubRow.partyName}</span>}
+              <div data-testid="whole-unit-tenant" data-autofit-content="true" className="flex min-w-0 flex-nowrap items-center gap-x-1.5 whitespace-nowrap text-[18px] font-semibold leading-tight text-[var(--navy)]">
+                <span className="inline-flex min-w-0 items-center whitespace-nowrap">
+                  <span className="text-[18px] font-semibold leading-tight text-[var(--navy)]">Tenant: </span>
+                  {inlineSubRow.partyId ? (
+                    <button
+                      type="button"
+                      className="select-text text-[18px] font-semibold leading-tight text-[var(--navy)] underline decoration-[var(--gold)] decoration-2 underline-offset-4 hover:text-[var(--gold)]"
+                      onClick={(event) => { event.stopPropagation(); if (!hasNativeTextSelection()) setPartyPreview({ id: inlineSubRow.partyId!, type: "tenant", name: inlineSubRow.partyName ?? "Tenant" }); }}
+                    >{inlineSubRow.partyName}</button>
+                  ) : <span className="text-[18px] font-semibold leading-tight text-[var(--navy)]">{inlineSubRow.partyName}</span>}
+                </span>
+                <TenancyEndControl row={row} subRow={inlineSubRow} />
               </div>
             )}
             {!row.isWholeUnit && row.ownerName && (
-              <div data-testid="owner-line" className="truncate text-[18px] text-muted-foreground" title={`Owner: ${row.ownerName}`}>
-                <span className="text-muted-foreground/70">Owner: </span>
+              <div
+                data-testid="owner-line"
+                data-autofit-content="true"
+                className="truncate text-[18px] text-[var(--navy)]"
+                title={`Owner: ${row.ownerName}`}
+              >
+                <span className="font-medium text-[var(--navy)]">Owner: </span>
                 {row.ownerPartyId ? (
                   <button
                     type="button"
                     className="select-text font-semibold text-[var(--navy)] underline decoration-[var(--gold)] decoration-2 underline-offset-4 hover:text-[var(--gold)]"
                     onClick={(event) => { event.stopPropagation(); if (!hasNativeTextSelection()) setPartyPreview({ id: row.ownerPartyId!, type: "owner", name: row.ownerName ?? "Owner" }); }}
                   >{row.ownerName}</button>
-                ) : <span className="font-medium text-foreground/80">{row.ownerName}</span>}
+                ) : <span className="font-medium text-[var(--navy)]">{row.ownerName}</span>}
               </div>
             )}
           </div>
@@ -2141,6 +2638,7 @@ function GridUnitRowGroup({
               );
             }
             const isExpense = ["tenantExpNonSst", "tenantExpWithSst", "ownerExpNonSst", "ownerExpWithSst"].includes(col.id);
+            const managementFeeNeedsSetup = col.id === "managementFeeSst" && row.managementFee?.configured === false;
             const expenseWithSst = col.id === "tenantExpWithSst" || col.id === "ownerExpWithSst";
             const bearer: ExpenseBearer = col.id.startsWith("tenantExp") ? "tenant" : "owner";
             // Task 6: Rental is read-only, sourced from the whole-unit
@@ -2161,10 +2659,16 @@ function GridUnitRowGroup({
                 columnId={col.id}
                 display={readOnlyValue(row, col.id)}
                 numeric={col.numeric}
-                onView={isExpense && onViewExpenses ? () => onViewExpenses(row.apartmentId, bearer, expenseWithSst) : undefined}
-                viewLabel={`${expenseWithSst ? "Add With SST" : "Add Non SST"} ${bearer} expense`}
-                viewTestId={bearer === "tenant" ? "view-expenses-tenant" : "view-expenses-owner"}
-                viewKind={isExpense ? "expense" : "view"}
+                onView={
+                  isExpense && onViewExpenses
+                    ? () => onViewExpenses(row.apartmentId, bearer, expenseWithSst)
+                    : managementFeeNeedsSetup && onConfigureManagementFee
+                      ? () => onConfigureManagementFee(row.apartmentId)
+                      : undefined
+                }
+                viewLabel={managementFeeNeedsSetup ? "Configure management fee" : `${expenseWithSst ? "Add With SST" : "Add Non SST"} ${bearer} expense`}
+                viewTestId={managementFeeNeedsSetup ? "configure-management-fee" : bearer === "tenant" ? "view-expenses-tenant" : "view-expenses-owner"}
+                viewKind={isExpense ? "expense" : managementFeeNeedsSetup ? "configure" : "view"}
                 badgeCount={(() => {
                   if (!isExpense) return 0;
                   const counts = bearer === "tenant" ? row.expenses.tenant : row.expenses.owner;
@@ -2185,6 +2689,16 @@ function GridUnitRowGroup({
                   const margin = Number(raw);
                   return Number.isFinite(margin) ? margin : null;
                 })()}
+                warningText={
+                  col.id === "managementFeeSst"
+                    ? row.managementFee?.reason
+                      ?? (row.managementFee?.configured === false ? "Not configured" : undefined)
+                    : undefined
+                }
+                managementFeeReady={
+                  col.id === "managementFeeSst"
+                  && (row.managementFee?.status === "chargeable" || row.managementFee?.status === "posted")
+                }
                 {...readOnlyCellProps(row.apartmentId, col.id)}
               />
             );
@@ -2234,16 +2748,19 @@ function GridUnitRowGroup({
             data-listing-id={subRow.listingId}
             className="border-b border-[var(--border)] bg-background/30 transition hover:bg-[var(--page-bg)]"
           >
-            <td className="sticky left-0 z-10 border-r-2 border-r-[var(--navy)] bg-background px-4 py-2 pl-8 text-xs italic text-muted-foreground">
-              <span className="inline-flex items-center gap-1.5">
-                ↳ {subRow.partyId && subRow.partyName ? (
-                  <button
-                    type="button"
-                    className="not-italic font-semibold text-[var(--navy)] underline decoration-[var(--gold)] decoration-2 underline-offset-4 hover:text-[var(--gold)]"
-                    onClick={(event) => { event.stopPropagation(); setPartyPreview({ id: subRow.partyId!, type: "tenant", name: subRow.partyName ?? "Tenant" }); }}
-                  >{subRow.partyName}</button>
-                ) : (subRow.partyName ?? "Vacant")}
-                <AuditIcon name={subRow.lastEditedByName ?? null} at={subRow.updatedAt ?? null} unitCode={row.unitCode} />
+            <td data-column-id="unitCode" className="sticky left-0 z-10 border-r-2 border-r-[var(--navy)] bg-background px-4 py-2 pl-8 text-xs italic text-[var(--navy)]">
+              <span className="flex flex-wrap items-center gap-1.5">
+                <span className="inline-flex items-center gap-1.5">
+                  ↳ {subRow.partyId && subRow.partyName ? (
+                    <button
+                      type="button"
+                      className="not-italic font-semibold text-[var(--navy)] underline decoration-[var(--gold)] decoration-2 underline-offset-4 hover:text-[var(--gold)]"
+                      onClick={(event) => { event.stopPropagation(); setPartyPreview({ id: subRow.partyId!, type: "tenant", name: subRow.partyName ?? "Tenant" }); }}
+                    >{subRow.partyName}</button>
+                  ) : (subRow.partyName ?? "Vacant")}
+                  <AuditIcon name={subRow.lastEditedByName ?? null} at={subRow.updatedAt ?? null} unitCode={row.unitCode} />
+                </span>
+                <TenancyEndControl row={row} subRow={subRow} />
               </span>
             </td>
             {dataColumns.map((col) => {

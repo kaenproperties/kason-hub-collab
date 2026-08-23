@@ -2,6 +2,30 @@ import { describe, expect, it } from "vitest";
 import { createUserSchema, resetPasswordSchema, updateUserSchema } from "../users.validation";
 
 describe("createUserSchema", () => {
+  it("accepts an empty sparse permission override map", () => {
+    const result = createUserSchema.safeParse({
+      email: "new.staff@example.com",
+      fullName: "New Staff",
+      role: "editor",
+      password: "secret123",
+      permissionOverrides: {},
+    });
+
+    expect(result.success).toBe(true);
+  });
+
+  it("accepts only the explicitly customised permission overrides", () => {
+    const result = createUserSchema.safeParse({
+      email: "new.manager@example.com",
+      fullName: "New Manager",
+      role: "manager",
+      password: "secret123",
+      permissionOverrides: { "profit.view": true },
+    });
+
+    expect(result.success).toBe(true);
+  });
+
   it("rejects passwords under 6 characters", () => {
     const result = createUserSchema.safeParse({
       email: "x@y.com",

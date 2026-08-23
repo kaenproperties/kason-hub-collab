@@ -142,14 +142,12 @@ describe("EditTemplatePage", () => {
     );
   });
 
-  it("renders the editable Company name field for the printed letterhead", async () => {
-    // Regression for the WhatsApp client feedback batch on 2026-05-21:
-    // admins couldn't edit the printed company name from the reservation-form
-    // template editor and had to navigate to Parties › Card settings instead.
+  it("renders the fixed legal Company name used on the printed letterhead", async () => {
     renderPage();
     const companyInput = await screen.findByLabelText(/^Company name$/);
     expect(companyInput).toBeInTheDocument();
-    expect((companyInput as HTMLInputElement).placeholder).toMatch(/KAEN Properties/);
+    expect(companyInput).toHaveValue("KAEN PROPERTIES MANAGEMENT SDN BHD");
+    expect(companyInput).toHaveAttribute("readonly");
   });
 
   it("disables an org field input when its visibility toggle is off", async () => {
@@ -164,7 +162,7 @@ describe("EditTemplatePage", () => {
     expect(regInput).not.toBeDisabled();
   });
 
-  it("shows the fixed-title Callout mentioning Invoice (not Expense Receipt) for owner_statement", async () => {
+  it("shows the fixed-title Callout mentioning Owner Payout Report for owner_statement", async () => {
     const template: api.DocumentTemplate = {
       ...BASE,
       docType: "owner_statement",
@@ -172,7 +170,7 @@ describe("EditTemplatePage", () => {
     };
     renderPage(template);
     await screen.findByText(/Title is fixed/i);
-    expect(screen.queryByText("Invoice")).toBeInTheDocument();
+    expect(screen.getAllByText(/Owner Payout Report/).length).toBeGreaterThan(0);
     expect(screen.queryByText("Expense Receipt")).not.toBeInTheDocument();
   });
 });

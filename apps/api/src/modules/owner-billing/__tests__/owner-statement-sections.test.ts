@@ -93,6 +93,33 @@ describe("computeOwnerPayout business safeguards", () => {
     expect(result.payableToOwnerC).toBe(87_040);
   });
 
+  it("uses the exact billed management fee instead of recomputing changed custom settings", () => {
+    const result = computeOwnerPayout({
+      rows: [
+        {
+          direction: "income", category: "rental_income", amount: dec("1000"),
+          sstAmount: null, includeInPayout: true, taxCategory: "non_sst",
+          propertyId: "property-a", apartmentId: "apartment-a",
+        },
+        {
+          direction: "expense", category: "management_fee", amount: dec("75"),
+          sstAmount: dec("6"), includeInPayout: true, taxCategory: "with_sst",
+          propertyId: "property-a", apartmentId: "apartment-a",
+          sourceChargeId: "management-fee-charge-a",
+        },
+      ],
+      // The current config would produce RM108. The sourced row is the already
+      // billed custom result and must win for payout/report consistency.
+      feeConfigRows: [
+        { propertyId: "property-a", apartmentId: "apartment-a", feeType: "percent", feeValue: dec("10"), capAmount: null, sstPercent: dec("8"), updatedAt: new Date("2026-01-03") },
+      ],
+      depositCollectedC: 0,
+    });
+    expect(result.computedMgmtBaseC).toBe(7_500);
+    expect(result.computedMgmtSstC).toBe(600);
+    expect(result.payableToOwnerC).toBe(91_900);
+  });
+
   it("does not deduct management fee during the unit's free period", () => {
     const result = computeOwnerPayout({
       rows: [{

@@ -19,6 +19,7 @@ import { issueDocumentTx, type IssueLineInput } from "./issue.service";
 import { refreshDocumentStatusForCharges, deriveAndWriteDocumentStatusTx } from "./status.service";
 import { syncOwnerLedgerForCharges } from "../owner-ledger/owner-ledger.sync-hook";
 import { ensureChargeCategorySeeds } from "../charge-categories/seed";
+import { isExactTaTaxPairCharge } from "./ta-tax-pair.guard";
 
 /** Thrown from the tx; route/service callers map {status, code} to HTTP. */
 export class CreditNoteVoidError extends Error {
@@ -90,6 +91,9 @@ export async function creditPostedChargeTx(
     },
   });
   if (!charge) throw new CreditNoteVoidError(404, "CHARGE_NOT_FOUND");
+  if (await isExactTaTaxPairCharge(tx, input.organizationId, charge.id)) {
+    throw new CreditNoteVoidError(409, "TAX_PAIR_CORRECTION_UNSUPPORTED");
+  }
 
   const docLine = await tx.billingDocumentLine.findFirst({
     where: {
@@ -320,6 +324,15 @@ export async function voidPostedChargeWithCreditNote(
   input: VoidWithCreditNoteInput,
 ): Promise<VoidWithCreditNoteResult> {
   const db = getDb();
+  // Fail before even the lazy category seed can write.  The inclusive TA / renewal
+  // receivable is two Charges and none of the single-charge correction strategies
+  // can safely credit, refund, debit, or replace only one member.
+  const pairedTa = await db.$transaction((tx) =>
+    isExactTaTaxPairCharge(tx, input.organizationId, input.chargeId),
+  );
+  if (pairedTa) {
+    throw new CreditNoteVoidError(409, "TAX_PAIR_CORRECTION_UNSUPPORTED");
+  }
   // The DEBIT_ADJUSTMENT branch mints on the "DN" series (CN branch on "CN").
   // ensureChargeCategorySeeds opens its own connection (create-only) → BEFORE the tx, so an
   // existing org not yet re-seeded since DN was added can't throw SERIES_NOT_FOUND (redesign P0).
@@ -330,6 +343,11 @@ export async function voidPostedChargeWithCreditNote(
       select: { id: true, status: true, amount: true, outstandingAmount: true },
     });
     if (!charge) throw new CreditNoteVoidError(404, "CHARGE_NOT_FOUND");
+    // Repeat under the correction transaction so a concurrent relationship change
+    // cannot slip between the preflight and the first financial write.
+    if (await isExactTaTaxPairCharge(tx, input.organizationId, charge.id)) {
+      throw new CreditNoteVoidError(409, "TAX_PAIR_CORRECTION_UNSUPPORTED");
+    }
     if (!["posted", "partially_paid", "paid"].includes(charge.status)) {
       throw new CreditNoteVoidError(409, "CHARGE_NOT_POSTED");
     }

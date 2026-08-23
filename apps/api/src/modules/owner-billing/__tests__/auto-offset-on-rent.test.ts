@@ -61,6 +61,7 @@ describe("autoOffsetOwnerReceivablesForPaidRent", () => {
     lines: ReturnType<typeof line>[],
     rentPaid = true,
     alreadyExpensedChargeIds: (string | { chargeId: string; amount: string })[] = [],
+    depositFundCharges: { id: string; unit: { ownerPartyId: string }; carpark: null }[] = [],
   ) {
     const expensed = alreadyExpensedChargeIds.map((e) =>
       typeof e === "string"
@@ -76,10 +77,14 @@ describe("autoOffsetOwnerReceivablesForPaidRent", () => {
         findMany: vi.fn(async () => expensed),
       },
       charge: {
-        findMany: vi.fn(async ({ where }: { where: { chargeType?: string } }) => {
-          // First call: the paid rent charges. Second: the charges behind the lines.
+        findMany: vi.fn(async ({ where }: { where: { chargeType?: string | { in?: string[] } } }) => {
+          // Trigger calls: fully-paid rent, then posted deposit funds. Remaining call:
+          // the charges behind the open IVOWN lines.
           if (where.chargeType === "rent") {
             return rentPaid ? [{ id: RENT_CHARGE, unit: { ownerPartyId: OWNER }, carpark: null }] : [];
+          }
+          if (typeof where.chargeType === "object" && where.chargeType?.in?.includes("security_deposit")) {
+            return depositFundCharges;
           }
           return lines.map((l) => l.charge);
         }),
@@ -133,6 +138,23 @@ describe("autoOffsetOwnerReceivablesForPaidRent", () => {
     setupDb([line("l1", "c1", "management_fee", "300.00", "2026-08-01")], /* rentPaid */ false);
     await autoOffsetOwnerReceivablesForPaidRent(ORG, "u1", "admin", ["some-utility-charge"]);
     expect(recordOffsetService).not.toHaveBeenCalled();
+  });
+
+  it("uses a partial deposit collection as owner payout funds", async () => {
+    computeAvailableOwnerPayableC.mockResolvedValue(51_495); // RM514.95 deposit collected
+    setupDb(
+      [line("l1", "wifi-owner", "wifi", "143.50", "2026-08-01")],
+      /* rentPaid */ false,
+      [],
+      [{ id: "deposit-charge", unit: { ownerPartyId: OWNER }, carpark: null }],
+    );
+
+    await autoOffsetOwnerReceivablesForPaidRent(ORG, "u1", "admin", ["deposit-charge"]);
+
+    expect(recordOffsetService).toHaveBeenCalledTimes(1);
+    expect(recordOffsetService.mock.calls[0]![1].lineAllocations).toEqual([
+      { billingDocumentLineId: "l1", allocatedAmount: "143.50" },
+    ]);
   });
 
   it("does nothing when the owner owes nothing", async () => {
@@ -432,6 +454,19 @@ describe("autoOffsetOwnerReceivablesForPaidRent", () => {
     };
     await autoOffsetOwnerReceivablesForPaidRent(ORG, "u1", "admin", ["rent-charge-2"]);
     expect(recordOffsetService.mock.calls[0]![1].idempotencyKey).not.toBe(first);
+  });
+
+  it("a later top-up on the same line gets a new key when its allocation amount changes", async () => {
+    setupDb([line("l1", "c1", "wifi", "300.00", "2026-08-01")]);
+    computeAvailableOwnerPayableC.mockResolvedValueOnce(3_203); // first partial: RM32.03
+    await autoOffsetOwnerReceivablesForPaidRent(ORG, "u1", "admin", [RENT_CHARGE]);
+    const partialKey = recordOffsetService.mock.calls[0]![1].idempotencyKey;
+
+    recordOffsetService.mockClear();
+    computeAvailableOwnerPayableC.mockResolvedValueOnce(11_147); // later deposit top-up
+    await autoOffsetOwnerReceivablesForPaidRent(ORG, "u1", "admin", [RENT_CHARGE]);
+
+    expect(recordOffsetService.mock.calls[0]![1].idempotencyKey).not.toBe(partialKey);
   });
 
   // ── Failure containment ────────────────────────────────────────────────────

@@ -7,7 +7,7 @@ import {
   TrendingUp,
 } from "lucide-react";
 import { toast } from "sonner";
-import { useAuth } from "@/lib/auth";
+import { usePermission } from "@/components/permission-gate";
 import { useCommissionSettings } from "@/hooks/use-commission-settings";
 import { PageHeader } from "@/components/ui";
 import { Callout } from "@/components/ui/callout";
@@ -57,8 +57,7 @@ function isTabKey(v: string | null): v is TabKey {
 
 export default function CommissionSettingsPage() {
   const { data, isLoading, isError } = useCommissionSettings();
-  const { user } = useAuth();
-  const canWrite = user?.role === "admin";
+  const canWrite = usePermission("settings.manage");
 
   const [searchParams, setSearchParams] = useSearchParams();
   const navigate = useNavigate();

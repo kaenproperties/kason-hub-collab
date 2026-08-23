@@ -13,6 +13,7 @@ import { getDb } from "@kason/db";
 import { toCents } from "@kason/shared";
 import {
   computeOwnerPayout,
+  fetchOwnerReceivablePayoutRows,
   findOwnerLedgerRowsForMonth,
 } from "../owner-billing/owner-statement-sections";
 import {
@@ -95,8 +96,27 @@ export async function materializeOwnerUnitMonths(
     const aptUnitIds = unitIdsByApt.get(aptId) ?? [];
     const depositCollectedC = aptUnitIds.reduce((acc, uid) => acc + (depositCByUnit.get(uid) ?? 0), 0);
 
-    // Parity with resolveOwnerPayoutForScope: empty rows => null => zero figures.
-    const b = aptRows.length > 0 ? computeOwnerPayout({ rows: aptRows, feeConfigRows, depositCollectedC, statementMonth: monthStart }) : null;
+    // Owner-borne bills-grid charges are IVOWN receivables rather than ledger
+    // expense rows (the durable XOR in owner-ledger.sync keeps them out of both
+    // sources). The live Owner Report / resolveOwnerPayoutForScope includes them
+    // through this helper, so the materialized grid cache must do the same. Without
+    // it the Owner Payout cell showed Gross Cash In while the report correctly
+    // deducted owner expenses.
+    const receivableRows = await fetchOwnerReceivablePayoutRows(
+      ctx.orgId,
+      ownerPartyId,
+      monthStart,
+      aptId,
+      aptRows,
+    );
+    const payoutRows = [...aptRows, ...receivableRows] as typeof aptRows;
+
+    // Parity with resolveOwnerPayoutForScope. A unit may legitimately have an
+    // owner receivable even when it has no income ledger row, so receivables alone
+    // must still produce a top-up instead of being materialized as zero.
+    const b = payoutRows.length > 0
+      ? computeOwnerPayout({ rows: payoutRows, feeConfigRows, depositCollectedC, statementMonth: monthStart })
+      : null;
 
     // Observability only (NOT used to gate the write).
     const rowMax = aptRows.reduce<Date | null>((mx, r) => (!mx || r.updatedAt > mx ? r.updatedAt : mx), null);

@@ -75,9 +75,10 @@ describe("billing-documents routes", () => {
     expect(res.status).toBe(400);
   });
 
-  it("GET / rejects an editor (manager read)", async () => {
+  it("GET / allows an Operations Admin to view accounting documents", async () => {
+    vi.mocked(listBillingDocuments).mockResolvedValue({ items: [], total: 0 });
     const res = await makeApp(editor).request("/");
-    expect(res.status).toBe(403);
+    expect(res.status).toBe(200);
   });
 
   it("GET / rejects a malformed query with 400", async () => {

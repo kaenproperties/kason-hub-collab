@@ -68,7 +68,7 @@ describe("getTemplateForOrgDocType", () => {
     const t = await getTemplateForOrgDocType("org-1", "reservation_form");
 
     expect(t.title).toBe("Unit Reservation Form");
-    expect(t.orgName).toBe("KAEN Properties");
+    expect(t.orgName).toBe("KAEN PROPERTIES MANAGEMENT SDN BHD");
     expect(t.logoUrl).toBe("https://s3.test/logos/kaen.png?sig=x");
   });
 
@@ -216,9 +216,16 @@ describe("getTemplateForOrgDocType", () => {
       getTemplateForOrgDocType("org-1", "owner_statement", { tolerateLogoFailure: true }),
     ).resolves.toMatchObject({
       logoUrl: null,
-      orgName: "KAEN Properties",
+      orgName: "KAEN PROPERTIES MANAGEMENT SDN BHD",
       orgRegNo: "1234567-X",
-      title: "Owner Statement",
+      orgAddressLines: [
+        "No. 27-3, Jalan Perdana 10/12",
+        "Pandan Perdana, 55300 Kuala Lumpur",
+        "Malaysia",
+      ],
+      orgEmail: "kaenproperties@gmail.com",
+      orgContact: "011-3611 1763",
+      title: "Owner Payout Report",
     });
 
     // Observability: a tolerated failure must be logged, never silent.

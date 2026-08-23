@@ -32,7 +32,7 @@ import { FileText, Paperclip, Trash2, UploadCloud } from "lucide-react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Callout } from "@/components/ui/callout";
-import { useAuth } from "@/lib/auth";
+import { usePermission } from "@/components/permission-gate";
 import { ApiError } from "@/lib/api-client";
 import {
   deleteAttachment,
@@ -50,8 +50,7 @@ export type AttachmentsPanelProps = {
 };
 
 export function AttachmentsPanel({ apartmentId, periodMonth }: AttachmentsPanelProps) {
-  const { user } = useAuth();
-  const isManager = user?.role === "manager" || user?.role === "admin";
+  const canManageDocuments = usePermission("billing.document_manage");
   const queryClient = useQueryClient();
   const queryKey = ["bills-grid", "attachments", apartmentId, periodMonth];
   const inputRef = useRef<HTMLInputElement | null>(null);
@@ -59,6 +58,7 @@ export function AttachmentsPanel({ apartmentId, periodMonth }: AttachmentsPanelP
   const listQuery = useQuery({
     queryKey,
     queryFn: () => listAttachments(apartmentId, periodMonth),
+    enabled: canManageDocuments,
   });
   const items = listQuery.data?.items ?? [];
 
@@ -127,6 +127,8 @@ export function AttachmentsPanel({ apartmentId, periodMonth }: AttachmentsPanelP
       toast.error(err instanceof Error ? err.message : "Delete failed.");
     },
   });
+
+  if (!canManageDocuments) return null;
 
   return (
     <Card className="bg-background/60 backdrop-blur-xl border-border/50 shadow-xl">
@@ -199,7 +201,7 @@ export function AttachmentsPanel({ apartmentId, periodMonth }: AttachmentsPanelP
               <AttachmentRow
                 key={item.id}
                 item={item}
-                isManager={isManager}
+                canDelete={canManageDocuments}
                 deleting={deleteMutation.isPending && deleteMutation.variables === item.id}
                 deleteFailed={deleteFailedId === item.id}
                 onPreview={() => setPreviewIndex(index)}
@@ -234,14 +236,14 @@ export function AttachmentsPanel({ apartmentId, periodMonth }: AttachmentsPanelP
 
 function AttachmentRow({
   item,
-  isManager,
+  canDelete,
   deleting,
   deleteFailed,
   onPreview,
   onDelete,
 }: {
   item: AttachmentListItem;
-  isManager: boolean;
+  canDelete: boolean;
   deleting: boolean;
   deleteFailed: boolean;
   onPreview: () => void;
@@ -259,7 +261,7 @@ function AttachmentRow({
         >
           {item.filename}
         </button>
-        {isManager && (
+        {canDelete && (
           <Button
             type="button"
             variant="ghost"

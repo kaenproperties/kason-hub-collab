@@ -28,7 +28,7 @@ export function FirstMonthPreviewCard({
   return (
     <div className="rounded-md border border-amber-200 bg-white/60 p-3 text-sm">
       <div className="flex items-baseline justify-between gap-2">
-        <span className="text-slate-600">First invoice · {preview.month}</span>
+        <span className="text-slate-600">First rent to collect for owner · {preview.month}</span>
         <span className="text-lg font-semibold text-slate-900">
           RM {preview.amount.toFixed(2)}
         </span>

@@ -364,6 +364,12 @@ model Apartment {
   // Partition utility-billing model (only meaningful when listingMode = PARTITIONED;
   // WHOLE units always have the single tenant bear all). See 2026-06-18 spec.
   partitionBillingMode UtilityBillingMode @default(NO_SUBSIDY)
+  /// Optional owner cap for the unit's shared TNB remainder in one billing
+  /// month. A value takes priority over the legacy partition billing mode.
+  /// Null defers to that mode: SUBSIDY uses the organization-level per-pax
+  /// policy, while NO_SUBSIDY provides no owner subsidy.
+  /// DB-ENFORCED: CHECK "Apartment_tnbSubsidyCapMonthly_check" (NULL or >= 0).
+  tnbSubsidyCapMonthly Decimal?           @db.Decimal(12, 2)
   underManagement      Boolean            @default(true)
 
   bedrooms             Int?
@@ -2959,6 +2965,18 @@ model ManagementFeeConfig {
   sstPercent       Decimal   @default(8.00) @db.Decimal(5, 2)
   freePeriodStart  DateTime?
   freePeriodEnd    DateTime?
+  /// Optional operator override for the first month in which this agreement may
+  /// charge a management fee.  Null means the system derives it from tenancy,
+  /// free-period and first-full-month commission rules.
+  firstChargeMonth DateTime? @db.Date
+  /// Optional PRE-SST management-fee amount used only in firstChargeMonth.
+  /// This supports negotiated/prorated first charges without changing the
+  /// normal percentage/fixed/cap rule used by later months.
+  firstChargeBaseAmount Decimal? @db.Decimal(10, 2)
+  /// Optional rental-base deduction per occupant before the configured fee
+  /// percentage/cap is applied. Null means no pax deduction. This belongs to
+  /// the fee rule and may differ by owner/property/unit.
+  paxDeductionPerPerson Decimal? @db.Decimal(10, 2)
   /// ⛔ DEPRECATED 2026-08-17 — ORPHANED, read and written by NOTHING. The owner-settings
   /// cleaning auto-bill field, its manual create/patch/void endpoints and the statement
   /// issuer that consumed it are all gone; the bills grid is the single cleaning issuer
@@ -3584,6 +3602,12 @@ model UnitUtilityBill {
   ownerAttributableAircond Decimal? @db.Decimal(12, 2)
   ownerBorneUtilities      Decimal? @db.Decimal(12, 2) // Σ owner-borne indah/cleaning/wifi (left out of the tenant pool)
   subsidyPerPax            Decimal? @db.Decimal(12, 2) // snapshot of the rate used
+  /// Frozen policy discriminator for this bill. Null denotes a legacy bill
+  /// created before policy snapshots existed.
+  subsidyPolicySnapshot    String?
+  /// Frozen per-unit monthly TNB cap when subsidyPolicySnapshot selects the
+  /// unit-cap policy; null for legacy per-pax/no-subsidy bills.
+  tnbSubsidyCapSnapshot    Decimal? @db.Decimal(12, 2)
   subsidyCovered           Decimal? @db.Decimal(12, 2) // owner-paid subsidy total
   ownerBorneUtilitiesTotal Decimal? @db.Decimal(12, 2) // = ownerAttributableAircond + ownerBorneUtilities + subsidyCovered + roundingResidual (seam for M6)
   roundingResidual         Decimal? @db.Decimal(12, 2)
@@ -3700,6 +3724,13 @@ model UnitBillsGridEntry {
   /// recovery, recorded from the un-shaped `airSelangorRaw` at Bill. Subtract recoveries
   /// downstream before presenting this as an owner cost.
   ownerBorneAir  Decimal? @db.Decimal(12, 2)
+
+  /// Frozen subsidy policy used by the first successful Bill attempt. Null on
+  /// untouched/legacy rows so existing periods continue their legacy billing-mode policy.
+  subsidyPolicySnapshot String?
+  /// Frozen unit-level monthly TNB owner cap. Meaningful only for the unit-cap
+  /// policy; null for legacy per-pax/no-subsidy rows.
+  tnbSubsidyCapSnapshot Decimal? @db.Decimal(12, 2)
 
   wifi       Decimal? @db.Decimal(12, 2)
   // DB-ENFORCED: CHECK "UnitBillsGridEntry_wifiBearer_check" (owner|tenant), migration 20260727140000.

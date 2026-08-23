@@ -288,7 +288,8 @@ export function useOwnerLedgerSummary(range: OwnerLedgerRangeFilters) {
 // These types are NOT exported from @kason/shared; defined web-side and imported
 // by 2c-2/2c-3/2c-4 from this file.
 
-// "Letting Commission" labels an INFORMATIONAL row (see isInformational below), never
+// "Admin Fee (First Month Rental)" labels an INFORMATIONAL row (see
+// isInformational below), never
 // real income. Mirrors apps/api/src/modules/owner-billing/owner-statement-sections.ts;
 // both copies must agree.
 export type IncomeType =
@@ -297,10 +298,11 @@ export type IncomeType =
   | "Aircond Fee"
   | "Carpark"
   | "Shared Utility"
-  | "Letting Commission"
+  | "Admin Fee (First Month Rental)"
   // DERIVED memo, never a ledger row — the partition aircond spread (Σ per-room
   // submeter above the master TNB bill). Also isInformational:true, so it renders muted
-  // and is outside every total. But unlike "Letting Commission" the money HAS already
+  // and is outside every total. But unlike "Admin Fee (First Month Rental)" the money
+  // HAS already
   // reached the payout, via Aircond Fee minus the master TNB expense — so its footnote
   // must read "already included", never "retained by KAEN".
   | "Extra Electricity"

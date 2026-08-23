@@ -1,4 +1,5 @@
 import "@testing-library/jest-dom/vitest";
+import { cleanup } from "@testing-library/react";
 import { beforeEach, afterEach } from "vitest";
 
 // --- Feature-flag baseline -------------------------------------------------
@@ -133,6 +134,24 @@ if (
   });
 }
 
+// --- ResizeObserver polyfill ----------------------------------------------
+// BillsGrid and other fit-to-width tables observe their container in the
+// browser. jsdom has no layout engine and therefore no ResizeObserver, but the
+// components still need a standards-shaped object so render tests can verify
+// the remaining behaviour.
+if (typeof globalThis.ResizeObserver === "undefined") {
+  class TestResizeObserver implements ResizeObserver {
+    observe(): void { /* no-op — jsdom has no layout */ }
+    unobserve(): void { /* no-op — jsdom has no layout */ }
+    disconnect(): void { /* no-op — jsdom has no layout */ }
+  }
+  Object.defineProperty(globalThis, "ResizeObserver", {
+    configurable: true,
+    writable: true,
+    value: TestResizeObserver,
+  });
+}
+
 // --- Object-URL polyfill ---------------------------------------------------
 // jsdom implements neither URL.createObjectURL nor URL.revokeObjectURL. Any
 // component that renders fetched bytes — the transfer-slip viewer in the
@@ -190,6 +209,9 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  // Keep rendered trees from leaking into the next test. Some suites run with
+  // globals enabled, where Testing Library's implicit cleanup is not reliable.
+  cleanup();
   // Restore the original Object.defineProperty for next test.
   Object.defineProperty = origDefProp as typeof Object.defineProperty;
   // Reset navigator.clipboard to a plain writable property so the next

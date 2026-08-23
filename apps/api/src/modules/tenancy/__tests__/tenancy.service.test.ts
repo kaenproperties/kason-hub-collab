@@ -44,6 +44,16 @@ vi.mock("../../carpark/carpark-assignment.service", () => ({
   releaseAssignmentsForTenancyTx: vi.fn(),
 }));
 
+vi.mock("../../billing/draft-catchup.hook", () => ({
+  draftCatchupForTenancy: vi.fn().mockResolvedValue({ drafted: [] }),
+}));
+vi.mock("../../billing/tenancy-deposits", () => ({
+  createTenancyDepositsForTenancy: vi.fn(),
+}));
+vi.mock("../../charge-categories/seed", () => ({
+  ensureChargeCategorySeeds: vi.fn(),
+}));
+
 // The TEN-{year}-NNNN generator has its own suite (tenancy-code-generator.test.ts);
 // here we only care THAT createTenancyService delegates to it, and that the code
 // it returns reaches tenancy.create.
@@ -143,6 +153,78 @@ describe("tenancy.service", () => {
     expect(mockTx.tenancy.create).toHaveBeenCalledWith(
       expect.objectContaining({ data: expect.objectContaining({ tenancyCode: "TEN-MANUAL-9" }) }),
     );
+  });
+
+  it("keeps the SST-inclusive initial TA amount unchanged on direct tenancy creation", async () => {
+    mockedRepo.findProperty.mockResolvedValueOnce({ id: "p1" } as never);
+    mockedRepo.findUnit.mockResolvedValueOnce({ id: "u1", propertyId: "p1", ownerPartyId: "owner-1" } as never);
+    mockedRepo.findTenantRole.mockResolvedValueOnce({ id: "r1" } as never);
+    mockedRepo.findTenancyByCode.mockResolvedValueOnce(null);
+    mockTenancyDb.tenancy.findFirst
+      .mockResolvedValueOnce(null)
+      .mockResolvedValueOnce({
+        id: "ten-ta",
+        tenantPartyId: "t1",
+        propertyId: "p1",
+        unitId: "u1",
+        startDate: new Date("2026-04-25T00:00:00.000Z"),
+      });
+
+    const createTx = {
+      tenancy: { create: vi.fn().mockResolvedValue({ id: "ten-ta" }) },
+      listing: { updateMany: vi.fn().mockResolvedValue({ count: 1 }) },
+    };
+    const feeTx = {
+      invoice: {
+        findFirst: vi.fn().mockResolvedValue(null),
+        create: vi.fn().mockResolvedValue({ id: "invoice-ta" }),
+        update: vi.fn(),
+      },
+      chargeCategory: { findFirst: vi.fn().mockResolvedValue({ id: "cat-ta" }) },
+      charge: {
+        create: vi.fn().mockResolvedValue({ id: "ta-base" }),
+        findMany: vi.fn().mockResolvedValue([{ amount: "462.96" }, { amount: "37.04" }]),
+      },
+    };
+    mockTenancyDb.$transaction
+      .mockImplementationOnce(async (fn: (tx: unknown) => unknown) => fn(createTx))
+      .mockImplementationOnce(async (fn: (tx: unknown) => unknown) => fn(feeTx));
+
+    const res = await createTenancyService(session, {
+      propertyId: "p1",
+      unitId: "u1",
+      tenantPartyId: "t1",
+      tenancyCode: "T-TA",
+      startDate: "2026-04-25",
+      monthlyRentAmount: "3000",
+      tenancyAgreementFeeAmount: "500",
+      tenancyAgreementFeeDueDate: "2026-04-25",
+    } as never);
+
+    expect(res.ok).toBe(true);
+    expect(feeTx.charge.create).toHaveBeenNthCalledWith(1, {
+      data: expect.objectContaining({
+        chargeType: "tenancy_agreement_fee",
+        description: "TA (WITH SST)",
+        amount: "462.96",
+        outstandingAmount: "462.96",
+        sstRate: "8",
+        billingMonth: new Date("2026-04-01T00:00:00.000Z"),
+      }),
+      select: { id: true },
+    });
+    expect(feeTx.charge.create).toHaveBeenNthCalledWith(2, {
+      data: expect.objectContaining({
+        chargeNumber: "TAF-ten-ta-SST",
+        chargeType: "tenancy_agreement_fee",
+        description: "TA (WITH SST) — SST 8%",
+        amount: "37.04",
+        outstandingAmount: "37.04",
+        sstRate: "0",
+        parentChargeId: "ta-base",
+        billingMonth: new Date("2026-04-01T00:00:00.000Z"),
+      }),
+    });
   });
 
   it("blocks tenancy creation when the unit has no owner", async () => {
@@ -542,6 +624,67 @@ describe("tenancy.service", () => {
 
     expect(res.ok).toBe(false);
     if (!res.ok) expect(res.status).toBe(409);
+  });
+
+  it("keeps the SST-inclusive renewal TA amount unchanged in the renewed tenancy start month", async () => {
+    mockedRepo.findTenancy.mockResolvedValueOnce({
+      id: "ten-old",
+      propertyId: "p1",
+      unitId: "u1",
+      tenantPartyId: "tenant-1",
+      status: "active",
+    } as never);
+    mockedRepo.findTenancyByCode.mockResolvedValueOnce(null);
+    mockedRepo.renewTenancyTx.mockResolvedValueOnce({ id: "ten-renewed" } as never);
+
+    const mockTx = {
+      invoice: {
+        findFirst: vi.fn().mockResolvedValue(null),
+        create: vi.fn().mockResolvedValue({ id: "invoice-renewal" }),
+        update: vi.fn(),
+      },
+      chargeCategory: { findFirst: vi.fn().mockResolvedValue({ id: "cat-renewal" }) },
+      charge: {
+        create: vi.fn().mockResolvedValue({ id: "renewal-base" }),
+        findMany: vi.fn().mockResolvedValue([{ amount: "324.07" }, { amount: "25.93" }]),
+      },
+    };
+    mockTenancyDb.$transaction.mockImplementationOnce(async (fn: (tx: unknown) => unknown) => fn(mockTx));
+
+    const res = await renewTenancyService(session, {
+      tenancyId: "ten-old",
+      newTenancyCode: "TEN-2027-0001",
+      newStartDate: "2027-08-25",
+      newEndDate: "2028-08-24",
+      monthlyRentAmount: "3000",
+      renewalFeeAmount: "350",
+      renewalFeeDueDate: "2027-08-25",
+    });
+
+    expect(res.ok).toBe(true);
+    expect(mockTx.charge.create).toHaveBeenNthCalledWith(1, {
+      data: expect.objectContaining({
+        chargeType: "renewal_fee",
+        description: "Renewal TA (WITH SST)",
+        amount: "324.07",
+        outstandingAmount: "324.07",
+        sstRate: "8",
+        billingMonth: new Date("2027-08-01T00:00:00.000Z"),
+      }),
+      select: { id: true },
+    });
+    expect(mockTx.charge.create).toHaveBeenNthCalledWith(2, {
+      data: expect.objectContaining({
+        chargeNumber: "RENEW-ten-renewed-SST",
+        chargeType: "renewal_fee",
+        description: "Renewal TA (WITH SST) — SST 8%",
+        amount: "25.93",
+        outstandingAmount: "25.93",
+        sstRate: "0",
+        parentChargeId: "renewal-base",
+        billingMonth: new Date("2027-08-01T00:00:00.000Z"),
+      }),
+    });
   });
 
   // ---------------------------------------------------------------------------

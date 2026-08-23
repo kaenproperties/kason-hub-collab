@@ -12,13 +12,17 @@ import {
 import { createSignedDownloadUrl, putObject } from "../../lib/storage";
 import type { z } from "zod";
 import type { updateTemplateBodySchema } from "./validation";
+import {
+  LEGAL_DOCUMENT_PROFILE,
+  withLegalDocumentDefaults,
+} from "../../lib/document-templates/legal-document-profile";
 
 const DEFAULT_TITLE: Record<DocType, string> = {
   reservation_form: "Unit Reservation Form",
   rental_commission_claim: "Rental Commission Claim Form",
   invoice: "Invoice",
   renovation_claim: "Renovation Claim Form",
-  owner_statement: "Owner Statement",
+  owner_statement: "Owner Payout Report",
   credit_note: "Credit Note",
   refund_note: "Refund Note",
   tenancy_agreement: "Tenancy Agreement",
@@ -30,6 +34,7 @@ const DEFAULT_TITLE: Record<DocType, string> = {
 // service emits. The "\n" forces a line break in the rendered <h2>.
 const TITLE_OVERRIDES: Partial<Record<DocType, string>> = {
   rental_commission_claim: "Rental Commission\nClaim Form",
+  owner_statement: "Owner Payout Report",
 };
 
 function applyTitleOverride(row: repo.DocumentTemplateRow): repo.DocumentTemplateRow {
@@ -44,7 +49,6 @@ export type DocumentTemplateWithLogoUrl = repo.DocumentTemplateRow & {
 
 async function attachLogoUrl(
   row: repo.DocumentTemplateRow,
-  orgName: string,
 ): Promise<DocumentTemplateWithLogoUrl> {
   // A logo that can't be resolved must NOT take the template row with it.
   // Both callers below are the admin Settings CRUD surface — they render no
@@ -78,20 +82,23 @@ async function attachLogoUrl(
       },
     );
   }
-  return { ...applyTitleOverride(row), logoUrl, orgName };
+  return withLegalDocumentDefaults({
+    ...applyTitleOverride(row),
+    logoUrl,
+    orgName: LEGAL_DOCUMENT_PROFILE.organizationName,
+  });
 }
 
 export async function listTemplatesService(
   orgId: string,
 ): Promise<DocumentTemplateWithLogoUrl[]> {
-  const orgName = await repo.findOrgName(orgId);
   const rows = await repo.listTemplates(orgId);
   const byType = new Map(rows.map((r) => [r.docType, r] as const));
   const out: DocumentTemplateWithLogoUrl[] = [];
   for (const docType of KNOWN_DOC_TYPES) {
     const existing = byType.get(docType);
     if (existing) {
-      out.push(await attachLogoUrl(existing, orgName));
+      out.push(await attachLogoUrl(existing));
     } else {
       const seeded = await repo.upsertTemplate(orgId, docType, {
         title: DEFAULT_TITLE[docType],
@@ -109,7 +116,7 @@ export async function listTemplatesService(
         logoKey: null,
         bodyTemplate: null,
       });
-      out.push(await attachLogoUrl(seeded, orgName));
+      out.push(await attachLogoUrl(seeded));
     }
   }
   return out;
@@ -120,9 +127,10 @@ export async function updateTemplateService(
   docType: DocType,
   patch: z.infer<typeof updateTemplateBodySchema>,
 ): Promise<DocumentTemplateWithLogoUrl> {
-  const orgName = await repo.findOrgName(orgId);
-  const row = await repo.upsertTemplate(orgId, docType, { ...patch, bodyTemplate: patch.bodyTemplate ?? null });
-  return attachLogoUrl(row, orgName);
+  // Preserve PATCH semantics: omitting bodyTemplate must keep the stored body.
+  // An explicit null is still forwarded by the spread and clears it.
+  const row = await repo.upsertTemplate(orgId, docType, patch);
+  return attachLogoUrl(row);
 }
 
 // Proxy upload: strip white background, persist to Supabase Storage, return

@@ -69,7 +69,7 @@ describe("DocumentTemplatesPage", () => {
 
     // Both known types render...
     expect(await screen.findByText("Unit Reservation Form")).toBeInTheDocument();
-    expect(screen.getByText("Owner Statement")).toBeInTheDocument();
+    expect(screen.getByText("Owner Payout Report")).toBeInTheDocument();
     // ...exactly two cards.
     expect(screen.getAllByRole("link")).toHaveLength(2);
   });

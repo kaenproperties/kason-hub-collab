@@ -1,29 +1,29 @@
 import { describe, it, expect } from "vitest";
 import { resolveDocTitle, DOC_TITLE } from "../pdf.service";
 
-describe("resolveDocTitle (P2 Rental Bill)", () => {
-  it("renders 'RENTAL BILL' for RB docs regardless of the internal docType", () => {
-    // Rent stays a debit_note internally (avoids owner-ledger sign ripple); the
-    // RB series is the customer identity → the PDF title reads RENTAL BILL.
-    expect(resolveDocTitle("debit_note", "RB-0001")).toBe("RENTAL BILL");
-    expect(resolveDocTitle("invoice", "RB-0099")).toBe("RENTAL BILL");
+describe("resolveDocTitle (customer-facing payment requests)", () => {
+  it("renders 'RENTAL PAYMENT REQUEST' for RB docs regardless of the internal docType", () => {
+    // Rent stays a debit_note internally (avoids owner-ledger sign ripple), while the
+    // customer-facing title makes clear this is a collection request rather than revenue.
+    expect(resolveDocTitle("debit_note", "RB-0001")).toBe("RENTAL PAYMENT REQUEST");
+    expect(resolveDocTitle("invoice", "RB-0099")).toBe("RENTAL PAYMENT REQUEST");
   });
 
-  it("still renders 'RENTAL BILL' for legacy IVREN docs (immutable historical numbers)", () => {
+  it("uses the current rental request title for legacy IVREN numbers", () => {
     // Pre-rename IVREN-numbered docs stay valid → IVREN kept as a legacy alias in the title map.
-    expect(resolveDocTitle("debit_note", "IVREN-0001")).toBe("RENTAL BILL");
+    expect(resolveDocTitle("debit_note", "IVREN-0001")).toBe("RENTAL PAYMENT REQUEST");
   });
 
-  it("renders 'EXPENSE BILL' for EB docs, never 'INVOICE' (their docType is 'invoice')", () => {
-    // EB is a tenant expense RECOVERY on its own series; docType stays "invoice" but the
-    // customer identity is the EB series → the PDF title must read EXPENSE BILL, not INVOICE.
-    expect(resolveDocTitle("invoice", "EB-0002")).toBe("EXPENSE BILL");
+  it("renders 'EXPENSE PAYMENT REQUEST' for EB docs, never 'INVOICE'", () => {
+    // EB is a tenant expense recovery on its own series; docType stays "invoice" internally,
+    // but the title must not misclassify a pass-through recovery as company revenue.
+    expect(resolveDocTitle("invoice", "EB-0002")).toBe("EXPENSE PAYMENT REQUEST");
     expect(resolveDocTitle("invoice", "EBX-1")).toBe(DOC_TITLE.invoice); // "EB" prefix guard
   });
 
-  it("uses the docType title map for every other series", () => {
+  it("uses dedicated request titles before falling back to the docType map", () => {
     expect(resolveDocTitle("invoice", "IVTEN-0001")).toBe(DOC_TITLE.invoice);
-    expect(resolveDocTitle("debit_note", "DEP-0007")).toBe(DOC_TITLE.debit_note);
+    expect(resolveDocTitle("debit_note", "DEP-0007")).toBe("PAYMENT REQUEST");
     expect(resolveDocTitle("credit_note", "CN-0001")).toBe(DOC_TITLE.credit_note);
     expect(resolveDocTitle("refund_note", "RN-0001")).toBe(DOC_TITLE.refund_note);
     expect(resolveDocTitle("receipt", "RCPT-0001")).toBe(DOC_TITLE.receipt);

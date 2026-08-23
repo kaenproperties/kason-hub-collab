@@ -205,7 +205,18 @@ export async function findChargeById(organizationId: string, chargeId: string) {
     // for the post-charge readiness guard (billingMonth is the period key,
     // dueDate the fallback). postChargeService/voidChargeService read only
     // `!existing`/`.status`, so extra fields are a no-op for them.
-    select: { id: true, chargeNumber: true, status: true, unitId: true, billingMonth: true, dueDate: true },
+    select: {
+      id: true,
+      chargeNumber: true,
+      chargeType: true,
+      status: true,
+      parentChargeId: true,
+      invoiceId: true,
+      sstRate: true,
+      unitId: true,
+      billingMonth: true,
+      dueDate: true,
+    },
   });
 }
 

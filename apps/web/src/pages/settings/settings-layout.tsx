@@ -13,7 +13,7 @@ import {
 import { cn } from "@/lib/utils";
 import { useAuth } from "@/lib/auth";
 import { isPhase2FlagEnabled } from "@/lib/feature-flags";
-import { canSeeNavItem, type NavItem, type MinRole } from "@/components/navigation";
+import { canSeeNavItemFor, type NavItem, type MinRole } from "@/components/navigation";
 
 type SettingsDepartment = {
   title: string;
@@ -23,12 +23,12 @@ type SettingsDepartment = {
 };
 
 const TENANT_MANAGEMENT_SECTIONS: NavItem[] = [
-  { title: "Inventory",          href: "/settings/inventory",          icon: Building2,      minRole: "manager" },
-  { title: "Document Templates", href: "/settings/document-templates", icon: LayoutTemplate, minRole: "admin" },
+  { title: "Inventory",          href: "/settings/inventory",          icon: Building2,      minRole: "manager", permission: "settings.view" },
+  { title: "Document Templates", href: "/settings/document-templates", icon: LayoutTemplate, minRole: "admin", permission: "settings.view" },
   // Phase-2 Owner Billing (M6) — section only exists when the flag is on
   // (router.tsx gates the child route the same way).
   ...(isPhase2FlagEnabled("ENABLE_PHASE2_OWNER_BILLING")
-    ? [{ title: "Owner Billing", href: "/settings/owner-billing", icon: Receipt, minRole: "admin" as const }]
+    ? [{ title: "Owner Billing", href: "/settings/owner-billing", icon: Receipt, minRole: "admin" as const, permission: "settings.view" as const }]
     : []),
   // Phase-2 Auto-Draft Invoices (M5) — section only exists when the flag is on
   // (router.tsx gates the child route the same way).
@@ -39,17 +39,17 @@ const TENANT_MANAGEMENT_SECTIONS: NavItem[] = [
   // BillingConfigSection's own `canWrite` is still `role === "admin"`, so a manager
   // sees the schedule read-only with no Save / Run now.
   ...(isPhase2FlagEnabled("ENABLE_PHASE2_AUTODRAFT")
-    ? [{ title: "Billing Config", href: "/settings/billing-config", icon: FileText, minRole: "manager" as const }]
+    ? [{ title: "Billing Config", href: "/settings/billing-config", icon: FileText, minRole: "manager" as const, permission: "settings.view" as const }]
     : []),
   // Phase-2 Meter & Utilities (M2) — section only exists when the flag is on
   // (router.tsx gates the child route the same way).
   ...(isPhase2FlagEnabled("ENABLE_PHASE2_METER")
-    ? [{ title: "Utilities", href: "/settings/utilities", icon: Zap, minRole: "admin" as const }]
+    ? [{ title: "Utilities", href: "/settings/utilities", icon: Zap, minRole: "admin" as const, permission: "settings.view" as const }]
     : []),
   // Accounting-docs P1 — BillingDocument numbering config; section only exists
   // when the flag is on (router.tsx gates the child route the same way).
   ...(isPhase2FlagEnabled("ENABLE_PHASE2_BILLING_DOCS")
-    ? [{ title: "Document Series", href: "/settings/document-series", icon: Hash, minRole: "admin" as const }]
+    ? [{ title: "Document Series", href: "/settings/document-series", icon: Hash, minRole: "admin" as const, permission: "settings.view" as const }]
     : []),
   // NOTE (2026-08-03): the "Charge Categories" entry that used to sit here was removed.
   // That table is now a panel inside Billing Config above. The /settings/charge-categories
@@ -69,7 +69,7 @@ const SETTINGS_DEPARTMENTS: SettingsDepartment[] = [
     company: "KAEN Properties Management Sdn Bhd",
     description: "Rental commission and tenancy administration",
     sections: [
-      { title: "Commission & TA", href: "/settings/commission", icon: Calculator, minRole: "manager" },
+      { title: "Commission & TA", href: "/settings/commission", icon: Calculator, minRole: "manager", permission: "settings.view" },
     ],
   },
   {
@@ -77,7 +77,7 @@ const SETTINGS_DEPARTMENTS: SettingsDepartment[] = [
     company: "KAEN Properties Sdn Bhd",
     description: "Renovation commercial configuration",
     sections: [
-      { title: "Sales & Renovation", href: "/settings/sales-renovation", icon: Paintbrush, minRole: "admin" },
+      { title: "Sales & Renovation", href: "/settings/sales-renovation", icon: Paintbrush, minRole: "admin", permission: "settings.view" },
     ],
   },
   {
@@ -92,7 +92,7 @@ const SETTINGS_DEPARTMENTS: SettingsDepartment[] = [
     description: "Technical diagnostics and system-wide controls",
     sections: [
       // Deliberately not flag-gated: diagnostics must remain reachable when flags fail.
-      { title: "Feature Flags", href: "/settings/feature-flags", icon: Flag, minRole: "manager" },
+      { title: "Feature Flags", href: "/settings/feature-flags", icon: Flag, minRole: "manager", permission: "settings.view" },
     ],
   },
 ];
@@ -109,7 +109,7 @@ export default function SettingsLayout() {
   const role = user?.role;
   const allowedDepartments = SETTINGS_DEPARTMENTS.map((department) => ({
     ...department,
-    sections: department.sections.filter((section) => canSeeNavItem(role, section)),
+    sections: department.sections.filter((section) => canSeeNavItemFor(role, section, user?.permissions)),
   }));
   const allowed = allowedDepartments.flatMap((department) => department.sections);
 
@@ -122,8 +122,11 @@ export default function SettingsLayout() {
   }
 
   return (
-    <div className="flex flex-col md:flex-row gap-5 md:gap-7 min-h-[calc(100vh-8rem)]">
-      <aside className="md:w-72 md:shrink-0 md:border-r md:border-border/50 md:pr-5">
+    <div
+      data-testid="settings-layout"
+      className="grid min-h-[calc(100vh-8rem)] w-full max-w-none grid-cols-1 gap-5 md:grid-cols-[18rem_minmax(0,1fr)] md:gap-7"
+    >
+      <aside className="w-full min-w-0 md:border-r md:border-border/50 md:pr-5">
         <div className="mb-4 px-1">
           <p className="text-[11px] font-bold uppercase tracking-[0.18em] text-[#9A742B]">Settings</p>
           <p className="mt-1 text-xs leading-5 text-muted-foreground">
@@ -182,7 +185,7 @@ export default function SettingsLayout() {
         </nav>
       </aside>
 
-      <main className="flex-1 min-w-0">
+      <main data-testid="settings-content" className="w-full min-w-0 max-w-none">
         <Outlet />
       </main>
     </div>

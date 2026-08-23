@@ -41,7 +41,7 @@ import {
 } from "@/components/ui/dialog";
 import { Field, RadioField, TextInput } from "@/components/form-ui";
 import { apiFetch, ApiError } from "@/lib/api-client";
-import { useAuth } from "@/lib/auth";
+import { usePermission } from "@/components/permission-gate";
 import { isPhase2FlagEnabled } from "@/lib/feature-flags";
 import { ChargeCategoriesPanel } from "./charge-categories-panel";
 
@@ -230,8 +230,7 @@ function configToForm(c: DraftBillingConfig): ConfigFormState {
 // ─── Main component ───────────────────────────────────────────────────────────
 
 export default function BillingConfigSection() {
-  const { user } = useAuth();
-  const canWrite = user?.role === "admin";
+  const canWrite = usePermission("settings.manage");
   const qc = useQueryClient();
   // The category registry lives behind its own flag (the /charge-categories API 404s
   // while ENABLE_PHASE2_BILLING_DOCS is dark), independent of this page's AUTODRAFT gate.
